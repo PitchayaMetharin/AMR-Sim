@@ -7,12 +7,19 @@ Industrial Differential-Drive AMR
 Phase 0 — Requirements and architecture confirmation
 
 ## Status
-Not started in Codex yet.
+Phase 0 requirements and decision closure complete; awaiting user approval.
 
-## Frozen Hardware
+## Current Project Scope
+- Simulation-only academic AMR project.
+- Runs on a laptop using Gazebo Harmonic and ROS 2 tools.
+- Robot, LiDAR, IMU, PLC authority, drive, safety-state, and vehicle behavior
+  are simulated.
+- No physical hardware will be purchased, installed, commissioned, or certified.
+
+## Conceptual Future Hardware
 - Jetson Orin Nano
 - Siemens S7-1200F PLC
-- 2 × SICK MRS1000 LiDAR
+- 2 × SICK MRS1104C-111011 / 1081208 LiDAR
 - Xsens MTi-8 IMU
 - ZLAC8030D dual-axis servo driver
 - ZLTECH hub motors
@@ -20,7 +27,8 @@ Not started in Codex yet.
 - Siemens SCALANCE managed Ethernet switch
 
 ## Frozen Software and Algorithms
-- ROS 2
+- ROS 2 Humble on Ubuntu 22.04
+- C++17 minimum
 - Differential-drive kinematics
 - SLAM Toolbox
 - robot_localization EKF
@@ -38,6 +46,8 @@ Not started in Codex yet.
 ## Scope Exclusions
 - Mechanical CAD is designed by the user.
 - Codex must not create or redesign CAD unless explicitly requested.
+- Physical procurement, construction, wiring, commissioning, and certification
+  are outside the current project.
 
 ## Completed Work
 - Initial project architecture defined.
@@ -45,28 +55,90 @@ Not started in Codex yet.
 - Navigation LiDAR changed to 2 × SICK MRS1000.
 - outdoorScan3 removed.
 - Phase-gated Codex workflow defined.
+- Repository structure inventoried.
+- Initial robot requirements and frozen architecture recorded.
+- Comprehensive robot parameter register created.
+- Unloaded-mass conflict identified and isolated from implementation.
+- Full-project acceptance framework drafted.
+- Supplied five-sheet BOM reviewed for architecture alignment and data quality.
+- BOM conflicts and supplier-field misalignment documented without modifying
+  unrelated procurement entries.
+- Obsolete sensing-plan BOM content replaced by exactly two MRS1000 entries;
+  dependent unverified values initially marked TBD.
+- C++ confirmed as the primary production implementation language.
+- Exact MRS1104C-111011 / 1081208 variant and official electrical data verified.
+- Nominal 0.127 m drive-wheel radius derived from the official 10-inch motor
+  specification and distinguished from calibrated rolling radius.
+- Four TENTE casters confirmed.
+- Initial mass, payload, motion, mission, PLC/ROS boundary, endurance, and
+  acceptance targets recorded.
+- Local Ubuntu/ROS/Nav2/MoveIt/Gazebo/compiler environment inspected.
+- Gazebo Harmonic selected for Phase 6.
+- Gazebo Harmonic 8.14.0 installation verified with successful headless,
+  transport/control, and GUI tests.
+- Project scope frozen to laptop-based simulation only; Jetson and MTi-8
+  classified as candidate future hardware.
+- Default and initially rated simulated payload restored to 50 kg, with
+  approximately 80 kg initial total moving mass.
+- Payload will be manually configurable before model spawn; live in-session
+  adjustment is not required.
+- Unloaded mass closed at 30 kg ±5 kg.
+- Thailand/international safety-reference scope and academic-validation
+  boundary documented.
+- Staged simulation risk-reduction plan documented, including current test
+  limits and later payload-escalation gates.
+- Phase 0 environment tests passed for C++17/ament build and runtime, Fast DDS
+  delivery, Gazebo transport/control and GUI, RViz rendering, and SDFormat
+  inertia calculation.
+- `ros-humble-ros-gzharmonic` and joint-state publisher packages installed.
+- End-to-end Gazebo-to-ROS `/clock` delivery and LaserScan, PointCloud2, and
+  IMU bridge mappings verified.
+- Basic parameterized primitive-shape robot model confirmed as the Phase 6
+  path; final mechanical CAD is not required.
+- Root-level `SESSION_HANDOFF.md` prepared with the complete transfer state,
+  validation evidence, Git status, deferred inputs, and next permitted action.
 
 ## Work in Progress
-- None.
+- Phase 0 approval.
 
 ## Next Required Action
-Codex must review the handoff and complete Phase 0 only.
+User must approve Phase 0 before any commit or Phase 1 work.
 
-## Open Decisions
-- ROS 2 distribution and Ubuntu version
-- Exact MRS1000 interface and driver package
-- Robot wheel radius and wheel separation
-- Maximum speed and acceleration limits
-- Final robot mass and payload
+## Deferred Parameters
+- MRS1000 firmware, ROS 2 driver/configuration, IP plan, and time synchronization
+- Effective rolling radius and wheel separation
+- Caster geometry and all wheel/caster mounting poses
+- Payload envelope and center-of-gravity range
+- Payload geometry/inertia derivation and Phase 6 manual configuration
+- Numerical poses and orientations for both MRS1000 units and the MTi-8
+- Detailed operating floor, slope, threshold, and environmental limits
 - MPC implementation approach
-- PLC's final responsibilities
-- Simulation platform and robot model availability
+- Detailed PLC/ROS cause-and-effect and state machine
+- Network, time-synchronization, and ROS-to-PLC interfaces
+- Representative acceptance test matrix and docking accuracy/method
 
 ## Known Risks
 - Standard MRS1000-based perception and SLAM are not substitutes for certified functional-safety sensing.
 - MPC integration with Nav2 requires careful interface, timing, and constraint design.
 - Dual-LiDAR calibration and time synchronization will affect mapping and obstacle detection.
 - Missing mechanical parameters will block accurate kinematics and MPC tuning.
+- A 300 kg payload is only an optional future simulation stress case and
+  physical design target. It does not establish structure, stability, braking,
+  drive, caster, or safety capability.
+- Shifted supplier/shop/price fields make part of the BOM procurement data and
+  its subtotal unreliable.
+- Gazebo Classic 11 remains installed but is not the project baseline. The
+  explicit Humble/Harmonic bridge is installed; installing the conflicting
+  generic `ros-humble-ros-gz` package would break this package selection.
+- Actual dual-LiDAR and IMU streams remain untested until the primitive robot
+  model and sensors are implemented.
+- Gazebo GUI startup emits a non-fatal QML world-statistics binding-loop warning.
+- ROS 2 Humble is supported only through May 2027; the project needs a
+  deployment-support and later migration plan.
+- Detailed environmental limits remain undefined.
+- Simulation cannot demonstrate physical functional-safety performance,
+  stopping distance, structural capacity, traction, or certified compliance.
 
 ## Last Updated
-Initial repository template.
+2026-07-24 — Phase 0 progress and new-session handoff synchronized; awaiting
+explicit phase approval and local commit authorization.
