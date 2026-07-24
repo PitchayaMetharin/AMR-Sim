@@ -51,7 +51,8 @@ found.
 - The user explicitly authorized Phase 3.
 - Phase 3 communication architecture is documented and validated locally.
 - The user approved Phase 3 on 2026-07-25.
-- The local Phase 3 closure commit is pending.
+- Phase 3 was locally committed as `9dd6d18` with message
+  `docs: complete phase 3 communication architecture`.
 - Phase 4 has not started and is not authorized.
 - No URDF/Xacro, ROS 2 project package, simulation world, or mechanical CAD has
   been created.
@@ -362,10 +363,16 @@ Phase 2 is closed by the local commit:
 9e64d41 docs: complete phase 2 electrical power architecture
 ```
 
-Phase 3 changes are approved and awaiting the local closure commit. A pre-existing
-uncommitted user edit to `AMR_CODEX_HANDOFF.md` is outside the Phase 3 change
-set and must remain untouched unless the user directs otherwise. No Git push
-has occurred. Phase 4 has not started.
+Phase 3 is closed by the local commit:
+
+```text
+9dd6d18 docs: complete phase 3 communication architecture
+```
+
+This handoff refresh records the post-Phase 3 state. A pre-existing uncommitted
+user edit to `AMR_CODEX_HANDOFF.md` is outside the Phase 3 change set and must
+remain untouched unless the user directs otherwise. No Git push has occurred.
+Phase 4 has not started.
 
 ## Deferred Inputs
 
@@ -405,10 +412,8 @@ has occurred. Phase 4 has not started.
 
 ## Exact Next Action
 
-1. Create a local commit containing only the approved Phase 3 files; do not
-   include the pre-existing `AMR_CODEX_HANDOFF.md` edit without explicit user
-   direction.
-2. Refresh this handoff and project status with the Phase 3 commit hash.
-3. Wait for separate explicit user authorization for Phase 4.
-4. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
+1. Wait for separate explicit user authorization for Phase 4.
+2. Do not include the pre-existing `AMR_CODEX_HANDOFF.md` edit in any future
+   commit without explicit user direction.
+3. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
    implementation artifacts under the Phase 3 authorization.

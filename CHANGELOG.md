@@ -192,7 +192,8 @@ All significant project changes must be recorded here.
   simulation values requiring later latency/jitter validation.
 - Gazebo time retained for robot data while steady/PLC elapsed clocks govern
   communication freshness and UTC wall time governs evidence correlation.
-- Phase 3 communication architecture approved by the user.
+- Phase 3 communication architecture approved and locally committed as
+  `9dd6d18`.
 - Phase 12 ladder-program implementation assigned to the user. Codex will
   supply the ladder guide, tag/interface mapping, state-machine and
   cause/effect guidance, test checklist, and review support unless the user

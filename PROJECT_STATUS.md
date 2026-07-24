@@ -7,8 +7,8 @@ Industrial Differential-Drive AMR
 Phase 3 — Communication architecture
 
 ## Status
-Phase 3 communication architecture is approved and complete. The local closure
-commit is pending; Phase 4 is not authorized.
+Phase 3 communication architecture is approved, complete, and locally
+committed as `9dd6d18`. No project phase is active; Phase 4 is not authorized.
 
 ## Current Project Scope
 - Simulation-only academic AMR project.
@@ -186,11 +186,11 @@ commit is pending; Phase 4 is not authorized.
   ladder program unless explicitly requested later.
 
 ## Work in Progress
-- Phase 3 local closure commit only. No Phase 4 work has started.
+- None. No Phase 4 work has started.
 
 ## Next Required Action
-Create the approved local Phase 3 commit, then refresh the handoff with its
-hash. Do not begin Phase 4 without separate explicit authorization.
+Await separate explicit user authorization for Phase 4. Until then, no project
+phase is active.
 
 ## Deferred Parameters
 - MRS1000 firmware and ROS 2 driver/configuration; physical sensor IP and time
@@ -273,5 +273,5 @@ hash. Do not begin Phase 4 without separate explicit authorization.
   actual duty-cycle loads and usable battery energy remain unmeasured.
 
 ## Last Updated
-2026-07-25 — Phase 3 approved; user ownership of future ladder programming
-recorded; local closure commit pending; Phase 4 not started.
+2026-07-25 — Phase 3 approved and locally committed as `9dd6d18`; user
+ownership of future ladder programming recorded; Phase 4 not started.

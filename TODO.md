@@ -215,7 +215,7 @@
 ## Future Phases
 - [x] Phase 1 — Final system architecture
 - [x] Phase 2 — Electrical and power architecture
-- [ ] Phase 3 — Communication architecture
+- [x] Phase 3 — Communication architecture
 - [ ] Phase 4 — ROS 2 workspace and package structure
 - [ ] Phase 5 — Hardware drivers and interfaces
 - [ ] Phase 6 — Robot model and simulation
