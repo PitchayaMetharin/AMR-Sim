@@ -11,30 +11,41 @@ order:
 4. `CHANGELOG.md`
 5. `SESSION_HANDOFF.md`
 
-Then read the Phase 0 evidence relevant to the next task:
+Then read the Phase 1 architecture and its governing Phase 0 evidence:
 
-1. `docs/PHASE_0_REQUIREMENTS.md`
-2. `docs/ROBOT_PARAMETER_REGISTER.md`
-3. `docs/PHASE_0_SOFTWARE_BASELINE.md`
-4. `docs/PHASE_0_TEST_REPORT.md`
-5. `docs/SIMULATION_RISK_REDUCTION_PLAN.md`
-6. `docs/PHASE_0_SAFETY_SCOPE.md`
-7. `docs/PHASE_0_BOM_REVIEW.md`
+1. `docs/PHASE_1_SYSTEM_ARCHITECTURE.md`
+2. `docs/PHASE_0_REQUIREMENTS.md`
+3. `docs/ROBOT_PARAMETER_REGISTER.md`
+4. `docs/PHASE_0_SOFTWARE_BASELINE.md`
+5. `docs/PHASE_0_TEST_REPORT.md`
+6. `docs/SIMULATION_RISK_REDUCTION_PLAN.md`
+7. `docs/PHASE_0_SAFETY_SCOPE.md`
+8. `docs/PHASE_0_BOM_REVIEW.md`
 
 The governing files take precedence over this summary if a discrepancy is
 found.
 
 ## Transfer State
 
-- Current phase: Phase 0 — Requirements and architecture confirmation.
-- Phase 0 engineering work, review revisions, environment setup, and available
-  tests are complete.
-- Phase 0 is awaiting explicit user approval for its local Git commit.
-- No Phase 1 work has started.
+- Current phase: Phase 1 — Final system architecture.
+- Phase 0 was approved and locally committed as `7db85f7`.
+- Phase 1 architecture was prepared for approval, then reopened when the user
+  specified TIA Portal V17 for PLC and HMI engineering.
+- TIA Portal V17 is fixed on a separate Windows laptop.
+- ROS 2, Gazebo, RViz, and AMR development remain on the Ubuntu laptop.
+- The laptops communicate over Ethernet using OPC UA, provisionally with the
+  virtual PLC as server and the ROS 2 gateway as client.
+- The user selected S7-1500F as the current simulated PLC family, resolving the
+  PLCSIM Advanced compatibility conflict.
+- S7-1200F remains only a conceptual future physical BOM candidate.
+- Phase 1 is approved and complete.
+- The approved phase-closing commit message is
+  `docs: complete phase 1 system architecture`.
+- No Phase 2 work has started.
 - No URDF/Xacro, ROS 2 project package, simulation world, or mechanical CAD has
   been created.
 - `src/` is empty.
-- Do not start Phase 1 or create the Phase 6 model without explicit user
+- Do not start Phase 2 or create the Phase 6 model without explicit user
   authorization.
 
 The user's last direction was to keep the basic primitive URDF/Xacro model in
@@ -47,6 +58,11 @@ Phase 6.
 - Do not proceed to the next phase without explicit user approval.
 - Do not create mechanical CAD; the user owns mechanical design.
 - Phase 0 explicitly prohibits creating the project URDF.
+- Phase 1 is architecture-only and does not authorize later-phase
+  implementation.
+- Do not treat the S7-1500F simulation as automatically equivalent to a future
+  S7-1200F implementation. WinCC edition, license, firmware, and runtime remain
+  explicit decisions.
 - After phase approval, create a local Git commit with a clear message.
 - Never push to GitHub without explicit instruction.
 - Keep `PROJECT_STATUS.md`, `TODO.md`, and `CHANGELOG.md` synchronized.
@@ -118,6 +134,22 @@ joint, collision, inertia, sensor, or controller interfaces.
 
 These are software constraints, not verified physical performance.
 
+## TIA Portal V17 Baseline
+
+- TIA Portal V17 is required for PLC and HMI engineering.
+- A separate Windows laptop runs TIA Portal V17, PLCSIM Advanced, and HMI
+  simulation.
+- The Ubuntu laptop runs ROS 2, Gazebo, RViz, and AMR development.
+- The laptops use Ethernet and OPC UA for the ROS/PLC interface.
+- S7-1500F is the current simulated PLC family through PLCSIM Advanced V4.0
+  provisionally; exact model, firmware, and installed update remain TBD.
+- S7-1200F is only a future physical candidate and would require explicit
+  porting and revalidation.
+- Exact TIA update, STEP 7/Safety license, WinCC edition, panel images, and HMI
+  runtime/simulator remain TBD.
+- HMI commands must pass through the PLC/ROS contract and may not publish
+  directly to the motion path or force drive permission.
+
 ## Installed Environment
 
 - Ubuntu 22.04.5 LTS, x86_64.
@@ -153,6 +185,9 @@ The detailed record is `docs/PHASE_0_TEST_REPORT.md`. Current evidence includes:
 - package database audit passed;
 - BOM XLSX archive integrity passed;
 - parameter register IDs are unique.
+- Phase 1 Markdown links, architecture decision IDs, parameter IDs,
+  project-record consistency, diff whitespace, code fences, and empty-`src/`
+  boundary passed after the TIA/S7-1500F revision.
 
 Warnings:
 
@@ -185,20 +220,19 @@ Warnings:
 
 ## Git and Workspace State
 
-At handoff creation, Phase 0 changes are uncommitted:
+Phase 0 is committed locally:
 
 ```text
- M AMR_CODEX_HANDOFF.md
- M CHANGELOG.md
- M PROJECT_STATUS.md
- M TODO.md
-?? Industrial_AMR_BOM_with_Thailand_Suppliers_Prices.xlsx
-?? SESSION_HANDOFF.md
-?? docs/
+7db85f7 docs: complete phase 0 requirements baseline
 ```
 
-Do not discard or overwrite these changes. They are the accumulated Phase 0
-work. No Git push has occurred.
+Phase 1 is closed by the local commit:
+
+```text
+docs: complete phase 1 system architecture
+```
+
+No Git push has occurred. Phase 2 has not started.
 
 ## Deferred Inputs
 
@@ -215,16 +249,13 @@ work. No Git push has occurred.
 - Acceptance routes, obstacle classes, trial count, docking method, and
   recovery-time limit.
 - ROS 2 Humble migration plan before May 2027 end of support.
+- TIA Portal update, STEP 7/Safety license, PLCSIM Advanced V4.0 update, exact
+  S7-1500F model/firmware, WinCC edition, and HMI runtime.
+- OPC UA namespace, security, data ownership, heartbeat, timeout,
+  acknowledgement, reconnect, and Ethernet addressing.
 
 ## Exact Next Action
 
-1. Ask the user for explicit Phase 0 approval if it has not been given.
-2. If changes are requested, remain in Phase 0, implement them, rerun affected
-   validation, and resynchronize documentation.
-3. If Phase 0 is explicitly approved, review the complete diff and create a
-   local commit such as:
-
-   `docs: complete phase 0 requirements baseline`
-
-4. Stop after the commit.
-5. Start Phase 1 only after separate explicit authorization.
+1. Verify the Phase 1 closing commit and clean working tree.
+2. Stop.
+3. Start Phase 2 only after separate explicit authorization.

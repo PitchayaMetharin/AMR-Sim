@@ -24,7 +24,8 @@ You are the Lead Robotics Engineer responsible for completing this industrial AM
 
 ## Frozen Decisions
 - Jetson Orin Nano
-- Siemens S7-1200F
+- Siemens S7-1500F simulated PLC through PLCSIM Advanced
+- Siemens S7-1200F retained only as a conceptual future physical candidate
 - 2× SICK MRS1000
 - Xsens MTi-8
 - ZLAC8030D

@@ -195,15 +195,19 @@ when source drawings use millimetres.
 | SW-019 | ROS 2 Humble/Gazebo Harmonic integration | `ros-humble-ros-gzharmonic` 0.244.12-3jammy | Installed; `/clock` bridge and sensor message type mappings pass; do not mix with conflicting `ros-humble-ros-gz` packages | Phase 6 |
 | SW-020 | Joint-state publication tools | `joint_state_publisher` and GUI 2.4.0 | Installed; modules and executable interfaces load | Phase 6 |
 | SW-021 | Rendering baseline | Intel integrated graphics; RViz OpenGL/GLSL 4.6 and Gazebo OGRE2 startup pass | Confirmed for empty-world baseline; full-load performance TBD | Simulation/visualization |
+| SW-022 | PLC/HMI engineering environment | Siemens TIA Portal V17 | Confirmed user requirement | PLC/HMI architecture |
+| SW-023 | TIA Portal host topology | Separate Windows laptop for TIA Portal V17, PLC simulation, and HMI simulation; Ubuntu laptop remains ROS/Gazebo host | Confirmed user requirement | Deployment/integration |
+| SW-024 | Siemens PLC simulation product | S7-PLCSIM Advanced V4.0 provisional target for TIA Portal V17 and OPC UA/Ethernet integration | Compatible family selected; installed version/update verification required | PLC simulation/integration |
+| SW-025 | Siemens HMI engineering/runtime product | WinCC V17; exact edition, update, panel images, and runtime/simulator TBD | Verification required | HMI simulation/integration |
 
 ## PLC, Safety, and Network
 
 | ID | Parameter | Value | Status | Required by |
 |---|---|---:|---|---|
-| SYS-001 | PLC family | Siemens S7-1200F | Confirmed selection | BOM/PLC |
-| SYS-002 | PLC safety CPU/I/O ordering codes and firmware | CPU 6ES7214-1AF40-0XB0; F-DI 6ES7226-6BA32-0XB0; F-DQ 6ES7226-6DA32-0XB0 in BOM; firmware TBD | Verification required | Safety/electrical |
+| SYS-001 | Current simulated PLC family | Siemens S7-1500F through PLCSIM Advanced | Confirmed user selection; exact model TBD | PLC simulation |
+| SYS-002 | Conceptual future physical PLC and I/O | S7-1200F CPU 6ES7214-1AF40-0XB0; F-DI 6ES7226-6BA32-0XB0; F-DQ 6ES7226-6DA32-0XB0 in BOM | Future physical candidate only; not equivalent to current S7-1500F simulation | Future physical project |
 | SYS-003 | PLC safety and standard responsibilities | E-stop/bumper, contactors/drive power, permissives, safety I/O feedback, reset/restart, power sequencing, safety fault latching, ROS watchdog | Confirmed boundary; detailed cause/effect TBD | Architecture |
-| SYS-004 | ROS-to-PLC protocol and data contract | TBD | TBD | Communications |
+| SYS-004 | ROS-to-PLC protocol and data contract | OPC UA over Ethernet; virtual PLC server and ROS 2 client/gateway provisionally selected | Confirmed protocol/topology; namespace, data model, security, timing, and reconnect TBD | Communications |
 | SYS-005 | Control authority/state machine | ROS requests motion; PLC owns drive permission and power enable | Confirmed boundary; detailed state machine TBD | Architecture |
 | SYS-006 | Heartbeat/watchdog timing | TBD | TBD | PLC/ROS |
 | SYS-007 | E-stop zones, devices, reset, and restart behavior | TBD | TBD | Safety |
@@ -211,10 +215,13 @@ when source drawings use millimetres.
 | SYS-009 | Required PL/SIL and safety standards | ISO 3691-4:2023 primary; ISO 12100:2010, ISO 13849-1:2023, IEC 60204-1:2016+A1:2021 supporting; provisional PL d Category 3 concept | No compliance claim; physical PLr requires future risk assessment | Safety |
 | SYS-010 | Safety validation authority | Academic project team and university supervisor | Simulation review only; formal assessor required for physical deployment | Safety/acceptance |
 | SYS-011 | Managed switch model/port plan | SCALANCE XC216 / 6GK5216-0BA00-2AC2 in BOM; port plan TBD | Verification required | BOM/network |
-| SYS-012 | Network topology, IP plan, VLANs, QoS | TBD | TBD | Communications |
+| SYS-012 | Network topology, IP plan, VLANs, QoS | Ubuntu ROS laptop connected by Ethernet to Windows TIA/PLCSIM/HMI laptop; detailed IP and segmentation TBD | Topology confirmed; Phase 3 design required | Communications |
 | SYS-013 | System time source/synchronization topology | TBD | TBD | EKF/SLAM/logging |
 | SYS-014 | Cybersecurity/access-control requirements | TBD | TBD | Deployment |
 | SYS-015 | External host/fleet/WMS/MES interface | Not required for prototype; keep future-ready for REST/MQTT/OPC UA/VDA 5050 only if later required | Confirmed initial scope | Architecture |
+| SYS-016 | Simulated PLC firmware/toolchain compatibility | S7-1500F selected; exact CPU model/firmware, STEP 7 edition, Safety option, and PLCSIM Advanced V4.0 update TBD | Family-level compatibility verified; exact implementation verification required | PLC simulation |
+| SYS-017 | HMI-to-PLC/ROS authority boundary | HMI may request missions, stops, modes, and resets through approved PLC/ROS interfaces; no direct motion or permission forcing | Confirmed architecture; detailed tags and protocol TBD | HMI/communications/PLC |
+| SYS-018 | OPC UA endpoint roles | Windows S7-1500F virtual PLC as OPC UA server; Ubuntu ROS 2 gateway as client; HMI link remains native Siemens unless Phase 3 changes it | Confirmed architecture; detailed contract deferred to Phase 3 | Communications/PLC/HMI |
 
 ## Power and Operational Environment
 

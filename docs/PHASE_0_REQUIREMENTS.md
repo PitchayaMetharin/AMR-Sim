@@ -66,8 +66,10 @@ The detailed geometry and configuration inputs are maintained in
 - NVIDIA Jetson Orin Nano Developer Kit 8GB is a candidate future physical
   compute platform and will not be purchased or used in the current project.
 - Siemens S7-1200F PLC, SCALANCE switch, 48 V LiFePO4 system, ZLAC8030D, and
-  ZLTECH motors are conceptual future physical selections. Their behavior and
-  authority are simulated where required.
+  ZLTECH motors are conceptual future physical selections.
+- Phase 1 subsequently selected S7-1500F through PLCSIM Advanced as the current
+  simulated PLC family for Ethernet/OPC UA integration. It is not claimed to be
+  equivalent to the future S7-1200F candidate.
 - Two conceptual ZLTECH ZLLG10ASM800 V2.0 10-inch hub motors.
 - Manufacturer-confirmed nominal wheel diameter: 0.254 m; provisional nominal
   URDF radius: 0.127 m. This is not a measured rolling radius.
@@ -187,7 +189,8 @@ The staged test and risk-reduction boundary is recorded in
 
 ### PLC/ROS responsibility boundary
 
-The Siemens S7-1200F owns:
+The simulated PLC authority, implemented using S7-1500F in PLCSIM Advanced,
+owns:
 
 - emergency-stop and safety-bumper supervision;
 - contactor, drive-power, and hardware-permissive control;
@@ -296,7 +299,8 @@ The following simulation targets and conceptual future physical selections are
 treated as frozen unless a later engineering change is explicitly approved:
 
 - Jetson Orin Nano
-- Siemens S7-1200F
+- simulated Siemens S7-1500F through PLCSIM Advanced
+- Siemens S7-1200F as a conceptual future physical candidate only
 - two SICK MRS1000 units
 - Xsens MTi-8
 - ZLAC8030D

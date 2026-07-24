@@ -64,6 +64,42 @@
 - [x] Produce Phase 0 report.
 - [x] Stop and await user approval.
 
+## Phase 1 — Final System Architecture
+- [x] Record Phase 0 approval and local commit.
+- [x] Define the simulation-only system context and deployment boundary.
+- [x] Define the layered logical architecture.
+- [x] Assign each major component one responsibility and prohibited scope.
+- [x] Define the single valid motion-command and authority path.
+- [x] Freeze simulated PLC drive-permission and reset authority.
+- [x] Define state-estimation and TF ownership.
+- [x] Define independent front/rear LiDAR perception flow.
+- [x] Define Nav2, MPC, mission-supervisor, and operator boundaries.
+- [x] Define Gazebo `/clock` as the simulation time authority.
+- [x] Define startup, readiness, shutdown, and restart ordering.
+- [x] Define architectural failure-containment behavior.
+- [x] Define verification and observability requirements.
+- [x] Assign detailed implementation decisions to Phases 2–15.
+- [x] Document explicit deferred decisions without inventing values.
+- [x] Record TIA Portal V17 as the PLC/HMI engineering environment.
+- [x] Identify the Windows/Ubuntu deployment conflict.
+- [x] Select separate Ubuntu and Windows laptops as the deployment topology.
+- [x] Select Ethernet and OPC UA for inter-laptop ROS/PLC communication.
+- [x] Define provisional virtual-PLC-server and ROS-client OPC UA roles.
+- [x] Resolve the PLCSIM Advanced versus S7-1200F compatibility conflict by
+      selecting S7-1500F for the current simulation.
+- [x] Keep S7-1200F only as a conceptual future physical candidate and document
+      the required porting/revalidation boundary.
+- [x] Defer exact STEP 7/Safety, PLCSIM Advanced, CPU firmware, WinCC, and HMI
+      runtime selections without guessing.
+- [x] Create `docs/PHASE_1_SYSTEM_ARCHITECTURE.md`.
+- [x] Update `PROJECT_STATUS.md`.
+- [x] Update `TODO.md`.
+- [x] Update `CHANGELOG.md`.
+- [x] Update `SESSION_HANDOFF.md`.
+- [x] Rerun Phase 1 documentation and repository consistency checks after the
+      TIA deployment decision.
+- [x] Stop and await user approval.
+
 ## Deferred Inputs — Later Simulation Phases or Future Physical Project
 - [ ] Define the design reverse-speed limit before controller configuration.
 - [ ] Define the simulated ROS/PLC protocol, heartbeat period, state machine,
@@ -83,7 +119,7 @@
       through a future risk assessment and test program.
 
 ## Future Phases
-- [ ] Phase 1 — Final system architecture
+- [x] Phase 1 — Final system architecture
 - [ ] Phase 2 — Electrical and power architecture
 - [ ] Phase 3 — Communication architecture
 - [ ] Phase 4 — ROS 2 workspace and package structure

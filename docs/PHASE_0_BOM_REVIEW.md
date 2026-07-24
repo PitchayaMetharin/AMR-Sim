@@ -101,7 +101,7 @@ confirms that the corresponding BOM line remains selected:
 | Motor driver | ZLTECH ZLAC8030D | Matches frozen selection; official revision/firmware verification required. |
 | Drive motors | 2 × ZLTECH ZLLG10ASM800 V2.0 | Official product page confirms 10-inch nominal wheel; remaining mechanical/electrical/encoder data require verification. |
 | IMU | Xsens MTi-8-5A-DK | Matches MTi-8 family; confirm development-kit versus production module intent. |
-| Fail-safe PLC | Siemens 6ES7214-1AF40-0XB0 | Matches S7-1200F family; official revision/firmware verification required. |
+| Fail-safe PLC | Siemens 6ES7214-1AF40-0XB0 | Future physical S7-1200F candidate only. Phase 1 uses an S7-1500F virtual PLC; exact simulated model remains TBD. |
 | Fail-safe input | Siemens 6ES7226-6BA32-0XB0 | Candidate; Phase 1/2 responsibility and I/O count verification required. |
 | Fail-safe output | Siemens 6ES7226-6DA32-0XB0 | Candidate; Phase 1/2 responsibility and I/O count verification required. |
 | Ethernet switch | Siemens 6GK5216-0BA00-2AC2 / SCALANCE XC216 | Matches frozen family; port-speed/topology suitability remains to be validated. |
