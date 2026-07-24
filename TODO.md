@@ -100,6 +100,45 @@
       TIA deployment decision.
 - [x] Stop and await user approval.
 
+## Phase 2 — Electrical and Power Architecture
+- [x] Record explicit user authorization for Phase 2.
+- [x] Read the Phase 1 architecture and governing Phase 0 evidence.
+- [x] Extract and reconcile the workbook power budget without modifying
+      procurement data.
+- [x] Define the traction, 24 V control, 12 V compute, device-local, charging,
+      and laptop-simulation power domains.
+- [x] Define the conceptual source, branch-protection, service-isolation,
+      precharge, contactor, converter, driver, and charging boundaries.
+- [x] Preserve control-power supervision when simulated traction power is
+      isolated.
+- [x] Reproduce the provisional 174 W 24 V load and 217.5 W capacity check.
+- [x] Reproduce the provisional 40 W 12 V load and 50 W capacity check.
+- [x] Classify the 1,625 W traction value as an insufficient nameplate sum.
+- [x] Record the user-confirmed 48 V, 30 Ah nominal battery rating and
+      calculate its 1.44 kWh nominal energy.
+- [x] Record that the 30 Ah pack does not close the eight-hour target under the
+      provisional all-listed auxiliary load case before traction and reserve.
+- [x] Retain 48 V, 30 Ah as the current battery baseline and record the
+      user-selected 50% motor-power runtime case at approximately 1 hour
+      22 minutes.
+- [x] Verify current official input/output ratings for the ZLAC8030D,
+      DDR-240C-24, DDR-60L-12, Blue Sea 6006, and EV200AAANA candidates.
+- [x] Block battery/driver/disconnect compatibility until the exact pack
+      voltage window is known.
+- [x] Define precharge, independent K1/K2 feedback, regeneration, charging,
+      low-energy, branch-protection, and fault-response requirements.
+- [x] Define logical electrical states and simulated electrical signals without
+      creating Phase 3 transport or Phase 12 PLC implementation details.
+- [x] Create `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`.
+- [x] Update `docs/ROBOT_PARAMETER_REGISTER.md`.
+- [x] Update `PROJECT_STATUS.md`.
+- [x] Update `TODO.md`.
+- [x] Update `CHANGELOG.md`.
+- [x] Update `SESSION_HANDOFF.md`.
+- [x] Run Phase 2 documentation and repository consistency checks.
+- [x] Stop and await user approval.
+- [ ] Record Phase 2 approval and create the local Phase 2 commit.
+
 ## Deferred Inputs — Later Simulation Phases or Future Physical Project
 - [ ] Define the design reverse-speed limit before controller configuration.
 - [ ] Define the simulated ROS/PLC protocol, heartbeat period, state machine,
@@ -117,10 +156,23 @@
       Phase 6 manual pre-spawn payload parameter.
 - [ ] Define physical stopping-distance requirements by load and operating mode
       through a future risk assessment and test program.
+- [ ] Identify the exact battery/BMS and verify its complete voltage, current,
+      fault-current, energy, thermal, protection, and communication envelope
+      before any future physical electrical design.
+- [ ] Resolve the ZLAC8030D and service-disconnect compatibility gate against
+      the exact battery voltage and regenerative-transient range.
+- [ ] Obtain the exact driver DC-link, current-limit, enable, protection, and
+      regenerative-braking evidence before sizing precharge or protection.
+- [ ] Define the mission duty-cycle power profile, usable-energy reserve, and
+      low-energy/shutdown thresholds before accepting the 30 Ah capacity
+      against the eight-hour endurance target.
+- [ ] Complete source and branch protection coordination, conductor/connector
+      sizing, contactor/feedback selection, charging design, grounding/bonding,
+      EMC, surge, and thermal design only if a physical project is authorized.
 
 ## Future Phases
 - [x] Phase 1 — Final system architecture
-- [ ] Phase 2 — Electrical and power architecture
+- [x] Phase 2 — Electrical and power architecture
 - [ ] Phase 3 — Communication architecture
 - [ ] Phase 4 — ROS 2 workspace and package structure
 - [ ] Phase 5 — Hardware drivers and interfaces

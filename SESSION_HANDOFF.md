@@ -11,23 +11,25 @@ order:
 4. `CHANGELOG.md`
 5. `SESSION_HANDOFF.md`
 
-Then read the Phase 1 architecture and its governing Phase 0 evidence:
+Then read the active Phase 2 architecture, the approved Phase 1 architecture,
+and their governing Phase 0 evidence:
 
-1. `docs/PHASE_1_SYSTEM_ARCHITECTURE.md`
-2. `docs/PHASE_0_REQUIREMENTS.md`
-3. `docs/ROBOT_PARAMETER_REGISTER.md`
-4. `docs/PHASE_0_SOFTWARE_BASELINE.md`
-5. `docs/PHASE_0_TEST_REPORT.md`
-6. `docs/SIMULATION_RISK_REDUCTION_PLAN.md`
-7. `docs/PHASE_0_SAFETY_SCOPE.md`
-8. `docs/PHASE_0_BOM_REVIEW.md`
+1. `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`
+2. `docs/PHASE_1_SYSTEM_ARCHITECTURE.md`
+3. `docs/PHASE_0_REQUIREMENTS.md`
+4. `docs/ROBOT_PARAMETER_REGISTER.md`
+5. `docs/PHASE_0_SOFTWARE_BASELINE.md`
+6. `docs/PHASE_0_TEST_REPORT.md`
+7. `docs/SIMULATION_RISK_REDUCTION_PLAN.md`
+8. `docs/PHASE_0_SAFETY_SCOPE.md`
+9. `docs/PHASE_0_BOM_REVIEW.md`
 
 The governing files take precedence over this summary if a discrepancy is
 found.
 
 ## Transfer State
 
-- Current phase: Phase 1 — Final system architecture.
+- Current phase: Phase 2 — Electrical and power architecture.
 - Phase 0 was approved and locally committed as `7db85f7`.
 - Phase 1 architecture was prepared for approval, then reopened when the user
   specified TIA Portal V17 for PLC and HMI engineering.
@@ -41,15 +43,19 @@ found.
 - Phase 1 is approved and complete.
 - Phase 1 was locally committed as `8be2e8b` with message
   `docs: complete phase 1 system architecture`.
-- No Phase 2 work has started.
+- The user explicitly authorized Phase 2.
+- Phase 2 architecture is approved and complete.
+- The local Phase 2 closeout commit is the next action.
+- No Phase 3 work has started or is authorized.
 - No URDF/Xacro, ROS 2 project package, simulation world, or mechanical CAD has
   been created.
 - `src/` is empty.
-- Do not start Phase 2 or create the Phase 6 model without explicit user
-  authorization.
+- Do not create Phase 3 communication artifacts or the Phase 6 model without
+  explicit user authorization for the applicable phase.
 
-The user's last direction was to keep the basic primitive URDF/Xacro model in
-Phase 6.
+The user's last directions were to retain the 48 V, 30 Ah battery baseline,
+approve Phase 2, and prepare this new-session handoff. The basic
+primitive-geometry URDF/Xacro model remains assigned to Phase 6.
 
 ## Non-Negotiable Workflow
 
@@ -59,6 +65,9 @@ Phase 6.
 - Do not create mechanical CAD; the user owns mechanical design.
 - Phase 0 explicitly prohibits creating the project URDF.
 - Phase 1 is architecture-only and does not authorize later-phase
+  implementation.
+- Phase 2 is electrical/power architecture only. It does not authorize physical
+  wiring, procurement, PLC code, ROS/OPC UA contracts, or later-phase
   implementation.
 - Do not treat the S7-1500F simulation as automatically equivalent to a future
   S7-1200F implementation. WinCC edition, license, firmware, and runtime remain
@@ -103,6 +112,54 @@ Phase 6.
 - Exact sensor poses remain configurable and deferred.
 - MRS1000/Nav2 perception is operational navigation perception, not
   safety-rated personnel protection.
+
+## Phase 2 Electrical and Power Baseline
+
+- Current runtime power is supplied by the two laptops; the AMR battery and
+  onboard electrical system remain conceptual future references.
+- Conceptual domains are battery/source, traction, regulated 24 V control,
+  regulated 12 V compute, device-local low voltage, and charging.
+- The user confirmed a 48 V, 30 Ah nominal LiFePO4 battery, giving 1.44 kWh
+  nominal stored energy. Exact battery/BMS models and usable energy remain
+  unknown.
+- Retain 48 V, 30 Ah as the current capacity baseline unless the user later
+  directs a higher-capacity selection.
+- Control and compute branches are upstream of the propulsion contactors so
+  supervision and diagnostics can remain available when traction is isolated.
+- The provisional 24 V load is 174 W (7.25 A). The workbook's 25% allowance
+  gives 217.5 W (9.0625 A), leaving 22.5 W on the 240 W DDR-240C-24 candidate.
+- The provisional 12 V load is 40 W (3.333 A). The 25% allowance gives 50 W
+  (4.167 A), leaving 10 W on the 60 W DDR-60L-12 candidate.
+- These are architecture calculations, not final supply validation. Most BOM
+  load rows still require exact-variant evidence, simultaneous-state checks,
+  derating, wiring-loss, inrush, and thermal review.
+- The 1,625 W traction value is only a nameplate sum and cannot size the
+  battery, BMS, protection, conductors, contactors, precharge, or endurance.
+- The provisional all-listed auxiliary load case requires 1.712 kWh at the
+  loads over eight hours and approximately 1.881 kWh using typical converter
+  efficiencies, before traction and reserve. The 30 Ah pack therefore does not
+  close the eight-hour endurance target.
+- The current user-selected runtime case uses 50% of combined motor nameplate
+  power (800 W), 25 W driver allowance, and approximately 235 W auxiliary
+  source load. Total planning load is 1,060 W and ideal nominal runtime is
+  1.36 hours, approximately 1 hour 22 minutes. This is not measured or
+  guaranteed physical endurance.
+- ZLTECH verifies a 24–48 VDC input range for ZLAC8030D.
+- Blue Sea verifies 48 VDC maximum for the 6006 disconnect.
+- The battery is 48 V nominal, but its exact model and full voltage window are
+  unknown. A nominal 48 V rating does not prove compatibility with devices
+  rated to 48 V maximum, so battery-to-driver and battery-to-disconnect
+  compatibility remain blocked.
+- The conceptual BOM's provisional 80–100 A fuse and 100 ohm/100 W precharge
+  values are not approved design inputs.
+- Regenerative-energy handling, driver DC-link capacitance, BMS charge
+  acceptance, fault current, current limits, and protection coordination are
+  open.
+- K1/K2 are represented as independently commanded and monitored series
+  traction-isolation elements. This creates no PL/Category claim.
+- Electrical states and 22 logical simulated signal meanings are frozen in
+  `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`; Phase 3 owns transport and
+  Phase 12 owns detailed PLC logic.
 
 ## Phase 6 Primitive Model Strategy
 
@@ -188,6 +245,9 @@ The detailed record is `docs/PHASE_0_TEST_REPORT.md`. Current evidence includes:
 - Phase 1 Markdown links, architecture decision IDs, parameter IDs,
   project-record consistency, diff whitespace, code fences, and empty-`src/`
   boundary passed after the TIA/S7-1500F revision.
+- Phase 2 Markdown links, decision IDs, signal IDs, parameter IDs, power-budget
+  arithmetic, project-record consistency, diff whitespace, code fences, and
+  empty-`src/` boundary passed.
 
 Warnings:
 
@@ -232,8 +292,9 @@ Phase 1 is closed by the local commit:
 8be2e8b docs: complete phase 1 system architecture
 ```
 
-This handoff refresh is documentation-only and adds no Phase 2 work. No Git
-push has occurred. Phase 2 has not started.
+Phase 2 is approved. Its documentation and project-record changes are ready
+for the local closeout commit. No Git push has occurred. Phase 3 has not
+started.
 
 ## Deferred Inputs
 
@@ -254,11 +315,26 @@ push has occurred. Phase 2 has not started.
   S7-1500F model/firmware, WinCC edition, and HMI runtime.
 - OPC UA namespace, security, data ownership, heartbeat, timeout,
   acknowledgement, reconnect, and Ethernet addressing.
+- Exact battery/BMS model, complete voltage window, current/fault limits,
+  usable portion of the confirmed 1.44 kWh nominal energy, reserve, thermal
+  limits, protection behavior, and interface.
+- ZLAC8030D manual/revision, DC-link capacitance, current and transient limits,
+  regeneration, braking, enable, protection, and fault behavior.
+- Exact motor electrical, torque, speed, current, efficiency, encoder, and
+  thermal data.
+- Source and branch protection, disconnect, conductors, connectors, contactors,
+  precharge, grounding, bonding, shielding, isolation, surge, EMC, and thermal
+  design.
+- Charger, charging contacts, charge profile/current, pilot/interlock,
+  protocol, and docking sequence.
+- Mission duty-cycle power profile, acceptance of the 30 Ah capacity against
+  the eight-hour target, SOC thresholds, and shutdown reserve.
 
 ## Exact Next Action
 
-1. Confirm that the user explicitly authorizes Phase 2.
-2. If Phase 2 is not explicitly authorized, stop.
-3. If authorized, work only on Phase 2 — Electrical and power architecture.
+1. Create the approved local Phase 2 closeout commit.
+2. Refresh this handoff with the resulting commit ID and verify a clean
+   workspace.
+3. Do not start Phase 3 without separate explicit user approval.
 4. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
-   implementation artifacts during Phase 2.
+   implementation artifacts under the Phase 2 authorization.

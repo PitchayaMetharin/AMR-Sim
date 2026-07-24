@@ -49,6 +49,17 @@ All significant project changes must be recorded here.
   virtual PLC as server and ROS 2 gateway as provisional client.
 - S7-1500F selected as the current simulated PLC family for PLCSIM Advanced and
   OPC UA integration.
+- Phase 2 electrical and power architecture defining conceptual power domains,
+  source and branch boundaries, traction isolation, control-power persistence,
+  charging, energy states, simulated electrical signals, fault responses, and
+  later-phase ownership.
+- Reproducible provisional 24 V and 12 V load calculations with explicit
+  evidence limits and future verification gates.
+- User-confirmed 48 V, 30 Ah nominal battery rating, its 1.44 kWh nominal
+  energy, and the resulting eight-hour endurance check.
+- Logical battery/BMS, rail-valid, precharge, K1/K2 command/feedback, traction
+  bus, driver-fault, charger, electrical-state, and inhibition-reason signals
+  for later transport and PLC implementation.
 
 ### Changed
 - Project-agent role changed from teaching assistant to lead robotics engineer.
@@ -119,6 +130,36 @@ All significant project changes must be recorded here.
 - Phase 1 final system architecture approved and closed.
 - Phase 1 locally committed as `8be2e8b` and the new-session handoff refreshed
   to the clean post-phase state.
+- Phase 2 authorized and prepared for review; Phase 3 remains unauthorized.
+- Traction, 24 V control, 12 V compute, device-local, and charging power
+  domains separated, with control and compute supervision retained when
+  simulated propulsion power is isolated.
+- The workbook's 174 W 24 V load now has an explicit 217.5 W result after its
+  25% allowance and 22.5 W residual headroom on the 240 W candidate converter.
+- The workbook's 40 W 12 V load now has an explicit 50 W result after its 25%
+  allowance and 10 W residual headroom on the 60 W candidate converter.
+- The 1,625 W traction figure reclassified as a nameplate sum that cannot size
+  the battery, BMS, fuse, conductors, contactors, precharge, or endurance.
+- Battery-to-ZLAC8030D and battery-to-Blue-Sea-6006 compatibility blocked:
+  the pack is confirmed as 48 V nominal but its maximum charged/transient
+  voltage remains unknown, while both candidates have verified 48 V maximum
+  limits.
+- The provisional 80–100 A fuse and 100 ohm/100 W precharge entries prevented
+  from becoming design values until battery, fault-current, driver-capacitance,
+  regeneration, and timing evidence is available.
+- The battery capacity changed from TBD to 30 Ah nominal. The eight-hour target
+  remains open because the provisional all-listed auxiliary load case requires
+  at least 1.712 kWh at the loads and approximately 1.881 kWh using typical
+  converter efficiencies, before traction, reserve, aging, and distribution
+  loss.
+- The 48 V, 30 Ah battery retained as the current capacity baseline. A
+  user-selected planning case using 50% of combined motor nameplate power,
+  25 W driver allowance, and approximately 235 W auxiliary input gives a
+  provisional 1.36-hour runtime estimate (approximately 1 hour 22 minutes).
+- Stale single-laptop wording reconciled with the approved Ubuntu ROS/Gazebo
+  plus Windows TIA/PLC/HMI two-laptop topology.
+- Phase 2 electrical and power architecture approved and closed; local
+  closeout commit pending.
 
 ### Removed
 - SICK outdoorScan3 safety LiDAR.

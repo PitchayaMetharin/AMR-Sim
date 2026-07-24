@@ -36,9 +36,9 @@ The detailed geometry and configuration inputs are maintained in
 5. Hardware values must be obtained by checking the project BOM first and then
    verifying the exact model or ordering code against official manufacturer
    documentation.
-6. The current project runs entirely on a laptop using simulated robot and
-   sensor data. Candidate physical hardware is retained only as a future
-   architecture reference.
+6. The current project runs entirely in simulation across the approved Ubuntu
+   ROS/Gazebo laptop and Windows TIA/PLC/HMI simulation laptop. Candidate
+   physical hardware is retained only as a future architecture reference.
 7. Physical procurement, assembly, hardware commissioning, certification, and
    industrial deployment are outside the current project.
 
@@ -65,8 +65,9 @@ The detailed geometry and configuration inputs are maintained in
 - The laptop is the current simulation compute platform.
 - NVIDIA Jetson Orin Nano Developer Kit 8GB is a candidate future physical
   compute platform and will not be purchased or used in the current project.
-- Siemens S7-1200F PLC, SCALANCE switch, 48 V LiFePO4 system, ZLAC8030D, and
-  ZLTECH motors are conceptual future physical selections.
+- Siemens S7-1200F PLC, SCALANCE switch, user-confirmed 48 V/30 Ah LiFePO4
+  system, ZLAC8030D, and ZLTECH motors are conceptual future physical
+  selections.
 - Phase 1 subsequently selected S7-1500F through PLCSIM Advanced as the current
   simulated PLC family for Ethernet/OPC UA integration. It is not claimed to be
   equivalent to the future S7-1200F candidate.
@@ -357,7 +358,7 @@ marked TBD cannot be finalized until the corresponding parameter is approved.
 | PLC and shutdown | PLC authority, heartbeat/watchdog behavior, fault reactions, contactor control, reset rules, and ROS/PLC loss-of-communication behavior are verified against an approved cause-and-effect matrix. |
 | Safety | Academic review verifies the simulated control-authority and stopped-state behavior without a compliance claim. A future physical machine requires qualified risk assessment and safety-function validation. Standard perception is not credited as certified personnel protection. |
 | Fault handling | Defined sensor, network, compute, motor-driver, encoder, power, and software faults transition to documented safe or controlled states and create diagnosable records. |
-| Endurance | The simulation supports an 8-hour representative duty-cycle scenario. Physical per-charge endurance remains a future target dependent on confirmed battery capacity and measured power. |
+| Endurance | The simulation supports an 8-hour representative duty-cycle scenario. The confirmed 48 V/30 Ah nominal battery does not yet close physical per-charge endurance; usable energy and measured mission power remain required. |
 | Availability | Prototype scheduled-test availability is at least 95%. Future production target is at least 98%, excluding charging and scheduled maintenance. |
 | Documentation | Architecture, BOM evidence, wiring, interfaces, parameters, calibration, commissioning, operation, maintenance, test results, known limitations, and recovery procedures are current and internally consistent. |
 
@@ -414,8 +415,9 @@ final mechanical, electrical, safety, or controller validation:
 - motor torque/speed/thermal curves, encoder interpretation, driver
   regeneration behavior, braking-energy path, and validated battery-voltage
   compatibility;
-- battery capacity, mass, BMS limits/interface, charger, charging contacts, and
-  low-energy behavior;
+- battery mass, exact model, usable capacity, voltage window, BMS
+  limits/interface, charger, charging contacts, and low-energy behavior; the
+  nominal 48 V/30 Ah rating was confirmed in Phase 2;
 - maximum floor slope, threshold/gap height, floor-friction range, contamination
   conditions, aisle/turning limits, temperature, humidity, and ingress target;
 - exact LiDAR/IMU poses, scan overlap/occlusion analysis, IP plan, firmware,

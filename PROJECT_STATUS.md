@@ -4,14 +4,16 @@
 Industrial Differential-Drive AMR
 
 ## Current Phase
-Phase 1 — Final system architecture
+Phase 2 — Electrical and power architecture
 
 ## Status
-Phase 1 system architecture approved and complete; Phase 2 is not authorized.
+Phase 2 electrical and power architecture approved and complete. Phase 3 is
+not authorized.
 
 ## Current Project Scope
 - Simulation-only academic AMR project.
-- Runs on a laptop using Gazebo Harmonic and ROS 2 tools.
+- Runs across an Ubuntu ROS/Gazebo laptop and a Windows TIA/PLC/HMI simulation
+  laptop.
 - Robot, LiDAR, IMU, PLC authority, drive, safety-state, and vehicle behavior
   are simulated.
 - No physical hardware will be purchased, installed, commissioned, or certified.
@@ -23,7 +25,7 @@ Phase 1 system architecture approved and complete; Phase 2 is not authorized.
 - Xsens MTi-8 IMU
 - ZLAC8030D dual-axis servo driver
 - ZLTECH hub motors
-- 48 V LiFePO4 battery system
+- User-supplied 48 V, 30 Ah LiFePO4 battery system
 - Siemens SCALANCE managed Ethernet switch
 
 ## Frozen Software and Algorithms
@@ -124,13 +126,48 @@ Phase 1 system architecture approved and complete; Phase 2 is not authorized.
 - S7-1200F retained only as a conceptual future physical BOM candidate, with no
   equivalence or automatic portability claim.
 - Phase 1 approved and locally committed as `8be2e8b`.
+- Conceptual traction, 24 V control, 12 V compute, device-local, charging, and
+  laptop-simulation power domains defined without creating a physical wiring
+  design.
+- Control-power persistence separated from traction isolation so simulated PLC
+  supervision and diagnostics can remain available after propulsion is
+  inhibited.
+- Provisional 24 V load arithmetic reconciled at 174 W, 217.5 W with the
+  workbook's 25% allowance, and 22.5 W residual headroom on the 240 W candidate
+  supply.
+- Provisional 12 V load arithmetic reconciled at 40 W, 50 W with the 25%
+  allowance, and 10 W residual headroom on the 60 W candidate supply.
+- The 1,625 W traction figure classified as a nameplate sum that cannot size
+  the battery, BMS, protection, conductors, contactors, or endurance.
+- User-confirmed battery rating recorded as 48 V, 30 Ah, giving 1.44 kWh
+  nominal stored energy.
+- Eight-hour endurance remains open: the provisional all-listed auxiliary load
+  case requires at least 1.712 kWh at the loads and approximately 1.881 kWh
+  using typical converter efficiencies, before traction and reserve.
+- The 48 V, 30 Ah battery retained as the current capacity baseline. Using the
+  user-selected 50% combined motor-nameplate assumption, 25 W driver allowance,
+  and approximately 235 W auxiliary source load gives a provisional 1.36-hour
+  runtime estimate (approximately 1 hour 22 minutes).
+- Official input ranges verified for the DDR-240C-24 and DDR-60L-12 converter
+  candidates.
+- A blocking battery-voltage compatibility conflict identified: the unresolved
+  full voltage window of the 48 V nominal pack cannot be approved with the
+  ZLAC8030D 48 V maximum input or Blue Sea 6006 48 V maximum rating.
+- Precharge, independent K1/K2 command/feedback, charging interlock,
+  regenerative-energy handling, low-energy behavior, and branch-protection
+  requirements defined without guessing component values.
+- Logical electrical energy states, simulated electrical signals, ownership,
+  default-inhibited behavior, and fault responses defined.
+- Phase 2 electrical and power architecture documented in
+  `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`.
+- Phase 2 approved by the user and closed.
 
 ## Work in Progress
-- None. Awaiting separate authorization for Phase 2.
+- None. No Phase 3 work has started.
 
 ## Next Required Action
-Start Phase 2 only after separate explicit user authorization. Until then, no
-project phase is active.
+Create the approved local Phase 2 closeout commit, refresh the session handoff,
+then await separate explicit authorization for Phase 3.
 
 ## Deferred Parameters
 - MRS1000 firmware, ROS 2 driver/configuration, IP plan, and time synchronization
@@ -150,6 +187,19 @@ project phase is active.
 - WinCC V17 edition, panel-image version, and HMI runtime/simulator
 - OPC UA endpoint, namespace, security, data ownership, heartbeat, timeout,
   acknowledgement, reconnect, and Ethernet addressing
+- Exact battery/BMS model, voltage window, current limits, fault current,
+  usable portion of the confirmed 1.44 kWh nominal energy, reserve, and
+  interface
+- ZLAC8030D revision/manual, DC-link capacitance, input/transient limits,
+  current limits, regeneration, enable, and fault behavior
+- Exact motor electrical, torque, speed, current, encoder, efficiency, and
+  thermal data
+- Final source/branch protection, disconnect, conductor, connector, contactor,
+  precharge, grounding, bonding, shielding, isolation, surge, EMC, and thermal
+  design
+- Charger, charging contacts, charge profile/current, pilot/interlock, protocol,
+  and docking sequence
+- Mission duty-cycle power profile and low-energy/shutdown-reserve thresholds
 
 ## Known Risks
 - Standard MRS1000-based perception and SLAM are not substitutes for certified functional-safety sensing.
@@ -172,7 +222,7 @@ project phase is active.
 - Detailed environmental limits remain undefined.
 - Simulation cannot demonstrate physical functional-safety performance,
   stopping distance, structural capacity, traction, or certified compliance.
-- The single laptop must later be performance-tested with Gazebo, two simulated
+- The Ubuntu laptop must later be performance-tested with Gazebo, two simulated
   LiDAR streams, SLAM, Nav2, MPC, visualization, and evidence collection active.
 - Detailed command freshness, PLC watchdog, estimator validity, and perception
   degraded-mode thresholds remain intentionally deferred.
@@ -181,7 +231,18 @@ project phase is active.
 - A future physical S7-1200F implementation would require explicit PLC-program,
   I/O, OPC UA, timing, fail-safe behavior, and validation porting from the
   S7-1500F simulation; simulation results are not automatically transferable.
+- The unresolved battery may exceed the verified 48 V maximum of the
+  ZLAC8030D and Blue Sea 6006 candidates; the conceptual traction path is
+  blocked from physical approval.
+- The current 24 V and 12 V budgets use several unverified conceptual BOM load
+  values and do not close derating, simultaneity, wiring-loss, inrush, or
+  peripheral-load checks.
+- Regenerative energy, available fault current, protection coordination,
+  precharge energy, and physical emergency-stop behavior remain unknown.
+- The confirmed 30 Ah capacity does not close the 8-hour target under the
+  provisional all-listed auxiliary load case, even before traction demand;
+  actual duty-cycle loads and usable battery energy remain unmeasured.
 
 ## Last Updated
-2026-07-24 — Phase 1 approved and committed as `8be2e8b`; session handoff
-refreshed; no Phase 2 work started.
+2026-07-24 — Phase 2 electrical and power architecture approved and closed;
+local closeout commit pending; Phase 3 not started.

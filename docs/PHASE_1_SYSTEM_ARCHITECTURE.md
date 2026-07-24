@@ -525,7 +525,7 @@ schema are deferred to Phases 3, 4, and 14.
 
 | ID | Decision | Status |
 |---|---|---|
-| P1-ADR-001 | Use a single-laptop, simulation-only deployment for the current project. | Approved baseline |
+| P1-ADR-001 | Use a laptop-hosted, simulation-only deployment with no onboard physical compute or controls. | Approved baseline |
 | P1-ADR-002 | Use Gazebo Harmonic as plant, sensor, contact, and simulation-time authority. | Approved baseline |
 | P1-ADR-003 | Use layered logical boundaries independent of final ROS process composition. | Phase 1 decision |
 | P1-ADR-004 | Use wheel odometry plus IMU through EKF for local state and SLAM Toolbox for `map -> odom`. | Phase 1 decision |

@@ -9,7 +9,8 @@ You are the Lead Robotics Engineer responsible for completing this industrial AM
 
 - The current project is a simulation-only academic AMR project.
 - All ROS 2, SLAM, localization, navigation, sensor, PLC-authority, drive, and
-  vehicle behavior runs on a laptop using simulated data.
+  vehicle behavior runs across the approved Ubuntu and Windows laptops using
+  simulated data.
 - Gazebo Harmonic is the selected simulator.
 - No physical hardware will be purchased, installed, wired, commissioned, or
   certified in the current project.

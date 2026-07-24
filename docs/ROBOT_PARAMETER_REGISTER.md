@@ -228,11 +228,27 @@ when source drawings use millimetres.
 | ID | Parameter | Value | Status | Required by |
 |---|---|---:|---|---|
 | PWR-001 | Traction battery nominal voltage/chemistry | 48 V LiFePO4 system | Confirmed concept; verification required | BOM/electrical |
-| PWR-002 | Battery/BMS/charger ordering codes | User-supplied 48 V LiFePO4; capacity, mass, manufacturer, BMS, and charger TBD | TBD | Electrical |
-| PWR-003 | Capacity, continuous/peak current, SOC limits | TBD | Verification required | Electrical/endurance |
+| PWR-002 | Battery/BMS/charger ordering codes | User-supplied 48 V, 30 Ah LiFePO4 battery; exact battery, BMS, and charger models TBD | Nominal voltage/capacity confirmed by user; exact hardware evidence required | Electrical |
+| PWR-003 | Capacity, continuous/peak current, SOC limits | 30 Ah nominal; 1.44 kWh nominal energy; usable capacity, current limits, and SOC limits TBD | Nominal capacity confirmed; remaining values require verification | Electrical/endurance |
 | PWR-004 | Charging method/interface/duty | TBD | TBD | Operations/electrical |
 | PWR-005 | Required mission duration/duty cycle | At least 8 h representative mixed operation per charge | Initial target; capacity/power validation required | Sizing/acceptance |
 | PWR-006 | Low-energy behavior and shutdown reserve | TBD | TBD | PLC/operations |
+| PWR-007 | Provisional 24 V output load | 174 W (7.25 A at 24 V) from current conceptual BOM rows | Arithmetic verified; only exact MRS1000 loads have completed the hardware-evidence gate | Electrical/simulation |
+| PWR-008 | 24 V capacity with workbook allowance | 217.5 W (9.0625 A) after 25% allowance | Provisional; simultaneity, derating, wiring loss, coil behavior, and exact variants unverified | Electrical |
+| PWR-009 | 24 V converter candidate | MEAN WELL DDR-240C-24; 33.6–67.2 VDC continuous input; 24 V, 10 A, 240 W output; 91% typical efficiency | Official specification verified; final system suitability and derating unverified | Electrical |
+| PWR-010 | Provisional 12 V compute output load | 40 W (3.333 A at 12 V); 50 W after 25% allowance | Provisional; Jetson operating mode and USB peripheral loads unverified | Electrical/deployment |
+| PWR-011 | 12 V converter candidate | MEAN WELL DDR-60L-12; 18–75 VDC input; 12 V, 5 A, 60 W output; 91% typical efficiency | Official specification verified; final system suitability and derating unverified | Electrical |
+| PWR-012 | ZLAC8030D input-voltage range | 24–48 VDC | Official product page verified; compatibility with unresolved battery is blocked | Electrical/drive |
+| PWR-013 | Battery operating-voltage window | 48 V nominal; minimum, maximum charged, transient, and regenerative values TBD | Blocking: nominal voltage does not prove compatibility with 48 V-maximum candidates | Electrical |
+| PWR-014 | Service-disconnect candidate | Blue Sea 6006; manufacturer maximum 48 VDC | Not approved for unresolved pack; exact future device TBD | Electrical/service |
+| PWR-015 | Traction nameplate sum | 1,625 W from two provisional 800 W motor lines plus 25 W driver allowance | Arithmetic only; prohibited as battery, protection, conductor, or endurance sizing basis | Electrical/sizing |
+| PWR-016 | Traction continuous/peak DC-bus current | TBD | Blocking verification required | Electrical/protection |
+| PWR-017 | Regenerative-energy path and absorption limits | TBD | Blocking verification required before physical stopping or power validation | Electrical/drive |
+| PWR-018 | Traction isolation architecture | K1/K2 represented as independently commanded and monitored series elements; control/compute branches remain available upstream | Confirmed Phase 2 simulation architecture; physical safety suitability unverified | PLC/simulation/electrical |
+| PWR-019 | Precharge architecture | Required before traction readiness with independent completion feedback | Confirmed Phase 2 architecture; circuit, threshold, energy, and timing TBD | PLC/simulation/electrical |
+| PWR-020 | Simulated electrical states/signals | Defined in `PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md` | Confirmed Phase 2 contract; transport and PLC implementation deferred | Phases 3/5/6/12 |
+| PWR-021 | Eight-hour battery-energy check | 1.44 kWh nominal pack; 1.712 kWh auxiliary output lower bound and approximately 1.881 kWh at typical converter efficiency before traction/reserve | Eight-hour target not closed; measured duty cycle, usable energy, reserve, and traction demand required | Electrical/endurance/acceptance |
+| PWR-022 | Current runtime planning case | 50% of combined motor nameplate power (800 W) + 25 W driver + approximately 235 W auxiliary source load = 1,060 W; 1.36 h nominal runtime (approximately 1 h 22 min) | User-confirmed planning assumption; not measured or guaranteed physical endurance | Electrical/endurance/acceptance |
 | ENV-001 | Indoor/covered-outdoor/outdoor classification | Indoor industrial/laboratory prototype; no outdoor or uncontrolled public operation | Confirmed initial scope | All design |
 | ENV-002 | Temperature and humidity range | TBD | TBD | BOM/acceptance |
 | ENV-003 | Dust/water/ingress requirement | TBD | TBD | BOM/acceptance |
