@@ -158,8 +158,8 @@ All significant project changes must be recorded here.
   provisional 1.36-hour runtime estimate (approximately 1 hour 22 minutes).
 - Stale single-laptop wording reconciled with the approved Ubuntu ROS/Gazebo
   plus Windows TIA/PLC/HMI two-laptop topology.
-- Phase 2 electrical and power architecture approved and closed; local
-  closeout commit pending.
+- Phase 2 electrical and power architecture approved, closed, and locally
+  committed as `9e64d41`.
 
 ### Removed
 - SICK outdoorScan3 safety LiDAR.

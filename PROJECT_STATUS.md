@@ -7,8 +7,8 @@ Industrial Differential-Drive AMR
 Phase 2 — Electrical and power architecture
 
 ## Status
-Phase 2 electrical and power architecture approved and complete. Phase 3 is
-not authorized.
+Phase 2 electrical and power architecture approved, complete, and locally
+committed as `9e64d41`. No project phase is active; Phase 3 is not authorized.
 
 ## Current Project Scope
 - Simulation-only academic AMR project.
@@ -160,14 +160,14 @@ not authorized.
   default-inhibited behavior, and fault responses defined.
 - Phase 2 electrical and power architecture documented in
   `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`.
-- Phase 2 approved by the user and closed.
+- Phase 2 approved by the user, closed, and locally committed as `9e64d41`.
 
 ## Work in Progress
 - None. No Phase 3 work has started.
 
 ## Next Required Action
-Create the approved local Phase 2 closeout commit, refresh the session handoff,
-then await separate explicit authorization for Phase 3.
+Await separate explicit user authorization for Phase 3. Until then, no project
+phase is active.
 
 ## Deferred Parameters
 - MRS1000 firmware, ROS 2 driver/configuration, IP plan, and time synchronization
@@ -244,5 +244,5 @@ then await separate explicit authorization for Phase 3.
   actual duty-cycle loads and usable battery energy remain unmeasured.
 
 ## Last Updated
-2026-07-24 — Phase 2 electrical and power architecture approved and closed;
-local closeout commit pending; Phase 3 not started.
+2026-07-24 — Phase 2 approved and locally committed as `9e64d41`; new-session
+handoff refreshed; Phase 3 not started.

@@ -45,7 +45,8 @@ found.
   `docs: complete phase 1 system architecture`.
 - The user explicitly authorized Phase 2.
 - Phase 2 architecture is approved and complete.
-- The local Phase 2 closeout commit is the next action.
+- Phase 2 was locally committed as `9e64d41` with message
+  `docs: complete phase 2 electrical power architecture`.
 - No Phase 3 work has started or is authorized.
 - No URDF/Xacro, ROS 2 project package, simulation world, or mechanical CAD has
   been created.
@@ -292,9 +293,14 @@ Phase 1 is closed by the local commit:
 8be2e8b docs: complete phase 1 system architecture
 ```
 
-Phase 2 is approved. Its documentation and project-record changes are ready
-for the local closeout commit. No Git push has occurred. Phase 3 has not
-started.
+Phase 2 is closed by the local commit:
+
+```text
+9e64d41 docs: complete phase 2 electrical power architecture
+```
+
+This handoff refresh records the clean post-phase state. No Git push has
+occurred. Phase 3 has not started.
 
 ## Deferred Inputs
 
@@ -332,9 +338,7 @@ started.
 
 ## Exact Next Action
 
-1. Create the approved local Phase 2 closeout commit.
-2. Refresh this handoff with the resulting commit ID and verify a clean
-   workspace.
-3. Do not start Phase 3 without separate explicit user approval.
-4. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
-   implementation artifacts under the Phase 2 authorization.
+1. Wait for separate explicit user authorization for Phase 3.
+2. If Phase 3 is not explicitly authorized, stop.
+3. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
+   implementation artifacts under the completed Phase 2 authorization.
