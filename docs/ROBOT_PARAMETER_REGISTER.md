@@ -116,8 +116,8 @@ when source drawings use millimetres.
 | SEN-013 | LiDAR scan frequency/data rate | 50 Hz / four layers at 12.5 Hz; network rate TBD | Official datasheet verified | Compute/network |
 | SEN-014 | LiDAR range/intensity/filter settings | TBD | Verification required | Perception |
 | SEN-015 | LiDAR occlusion/exclusion zones | TBD | TBD | Mounting/perception |
-| SEN-016 | LiDAR IP addresses/subnet/VLAN | TBD | TBD | Network |
-| SEN-017 | LiDAR time-synchronization method | TBD | TBD | Perception/SLAM |
+| SEN-016 | LiDAR IP addresses/subnet/VLAN | No physical LiDAR network in current simulation; future physical addressing TBD | Current simulation boundary confirmed; future physical design deferred | Network |
+| SEN-017 | LiDAR time-synchronization method | Gazebo simulation time for current simulated streams; future physical synchronization TBD | Phase 3 simulation contract; Phase 8 configuration required | Perception/SLAM |
 | SEN-018 | LiDAR calibration method and tolerances | TBD | TBD | Perception/acceptance |
 | SEN-019 | IMU quantity/family | Simulated IMU; Xsens MTi-8 candidate reference | Confirmed simulation scope | BOM/estimation |
 | SEN-020 | IMU ordering code/hardware revision | MTi-8-5A-DK candidate future hardware | Not used in current project | Driver/estimation |
@@ -128,7 +128,7 @@ when source drawings use millimetres.
 | SEN-025 | IMU x/y/z | TBD | TBD | TF/URDF |
 | SEN-026 | IMU roll/pitch/yaw and axis alignment | TBD | TBD | TF/EKF |
 | SEN-027 | IMU output rate and enabled messages | TBD | Verification required | EKF/compute |
-| SEN-028 | IMU time-synchronization method | TBD | TBD | EKF |
+| SEN-028 | IMU time-synchronization method | Gazebo simulation time for current simulated stream; future physical synchronization TBD | Phase 3 simulation contract; Phase 7 configuration required | EKF |
 | SEN-029 | IMU covariance/noise parameters | TBD | Verification/characterization required | EKF |
 | SEN-030 | Magnetic aiding policy/calibration | TBD | TBD | EKF/environment |
 
@@ -144,7 +144,7 @@ when source drawings use millimetres.
 | MOT-006 | Maximum commanded emergency deceleration | 1.0 m/s² linear | Provisional controlled-command target; not guaranteed E-stop deceleration | Safety/sizing |
 | MOT-007 | Linear/angular jerk limits | 0.5 m/s³ linear; 1.0 rad/s³ angular | Provisional software limits | MPC/stability |
 | MOT-008 | Minimum controllable wheel/body speed | TBD | TBD | Driver/MPC |
-| MOT-009 | Command timeout/watchdog period | TBD | TBD | Driver/PLC |
+| MOT-009 | Command timeout/watchdog period | Internal stamped motion command initial lifespan/application timeout 200 ms; ROS gateway heartbeat 100 ms; PLC heartbeat watchdog 500 ms; PLC state freshness at ROS 300 ms | Provisional Phase 3 simulation contract; Phase 11/13 measurement and Phase 12 implementation required | Driver/PLC |
 | MOT-010 | Wheel-speed command/update rate | TBD | TBD | Driver/control |
 | MOT-011 | Controller/odometry/EKF update rates | TBD | TBD | Software architecture |
 | MOT-012 | Goal position/yaw tolerances | ±0.050 m and ±2° | Initial acceptance target | Nav2/acceptance |
@@ -179,7 +179,7 @@ when source drawings use millimetres.
 | SW-003 | Ubuntu version | 22.04 LTS | Confirmed; 22.04.5 observed | All software |
 | SW-004 | JetPack/L4T version | Not applicable to current laptop simulation | Deferred to future physical project | Deployment |
 | SW-005 | Jetson Orin Nano module/carrier/storage | Developer Kit 8GB candidate future hardware | Not used in current project | BOM/deployment |
-| SW-006 | DDS/RMW implementation and QoS policy | Fast DDS observed; production RMW/QoS policy TBD | Partially confirmed | Communications |
+| SW-006 | DDS/RMW implementation and QoS policy | `rmw_fastrtps_cpp`, `ROS_DOMAIN_ID=1`, planned `ROS_LOCALHOST_ONLY=1`; reliable bounded QoS for command/authority/state and best-effort bounded QoS for sensor streams | Phase 3 simulation contract; current shell localhost setting was 0; Phase 4 configuration/tests required | Communications |
 | SW-007 | Simulation platform/version | Gazebo Harmonic 8.14.0 | Confirmed; headless, GUI, transport, and ROS clock bridge tested | Phase 6 |
 | SW-008 | `ros2_control` use and controller set | TBD | TBD | Simulation/hardware |
 | SW-009 | Simulation physics engine and step/update rate | TBD | TBD | Phase 6 |
@@ -188,7 +188,7 @@ when source drawings use millimetres.
 | SW-012 | Nav2 version/global planner | Nav2 selected; details TBD | TBD | Navigation |
 | SW-013 | MPC implementation/plugin/solver | TBD; MoveIt not required for initial mobile base | TBD | Phase 11 |
 | SW-014 | Real-time/timing requirements | TBD | TBD | Control architecture |
-| SW-015 | Logging, bagging, retention, and clock source | TBD | TBD | Validation/support |
+| SW-015 | Logging, bagging, retention, and clock source | Gazebo time for robot data, Ubuntu steady time for ROS communication freshness, PLC elapsed time for PLC watchdog, UTC wall time for cross-host evidence; bag set/retention TBD | Clock roles confirmed in Phase 3; evidence configuration deferred | Validation/support |
 | SW-016 | Software update/rollback mechanism | TBD | TBD | Deployment |
 | SW-017 | Primary production implementation language | C++17 minimum | Confirmed for ROS 2 Humble; GCC 11.4 observed | All software |
 | SW-018 | Current execution target | Laptop-based simulation only | Confirmed; no physical hardware | All phases |
@@ -206,22 +206,22 @@ when source drawings use millimetres.
 |---|---|---:|---|---|
 | SYS-001 | Current simulated PLC family | Siemens S7-1500F through PLCSIM Advanced | Confirmed user selection; exact model TBD | PLC simulation |
 | SYS-002 | Conceptual future physical PLC and I/O | S7-1200F CPU 6ES7214-1AF40-0XB0; F-DI 6ES7226-6BA32-0XB0; F-DQ 6ES7226-6DA32-0XB0 in BOM | Future physical candidate only; not equivalent to current S7-1500F simulation | Future physical project |
-| SYS-003 | PLC safety and standard responsibilities | E-stop/bumper, contactors/drive power, permissives, safety I/O feedback, reset/restart, power sequencing, safety fault latching, ROS watchdog | Confirmed boundary; detailed cause/effect TBD | Architecture |
-| SYS-004 | ROS-to-PLC protocol and data contract | OPC UA over Ethernet; virtual PLC server and ROS 2 client/gateway provisionally selected | Confirmed protocol/topology; namespace, data model, security, timing, and reconnect TBD | Communications |
+| SYS-003 | PLC safety and standard responsibilities | E-stop/bumper, contactors/drive power, permissives, safety I/O feedback, reset/restart, power sequencing, safety fault latching, ROS watchdog | Confirmed boundary; user owns Phase 12 ladder implementation, while Codex supplies the guide, mappings, cause/effect guidance, tests, and review | Architecture |
+| SYS-004 | ROS-to-PLC protocol and data contract | OPC UA over closed Ethernet; S7-1500F virtual PLC server and one ROS 2 client/gateway; symbolic `DB_AMR_OPCUA` contract, sequence/commit/acknowledgement, coherent snapshots, and fail-inhibited reconnect | Phase 3 architecture confirmed; implementation deferred | Communications |
 | SYS-005 | Control authority/state machine | ROS requests motion; PLC owns drive permission and power enable | Confirmed boundary; detailed state machine TBD | Architecture |
-| SYS-006 | Heartbeat/watchdog timing | TBD | TBD | PLC/ROS |
+| SYS-006 | Heartbeat/watchdog timing | Gateway heartbeat 100 ms; PLC application watchdog 500 ms without sequence change; PLC state freshness at ROS 300 ms | Provisional Phase 3 simulation values; Phase 12 implementation and Phase 13 measurement required | PLC/ROS |
 | SYS-007 | E-stop zones, devices, reset, and restart behavior | TBD | TBD | Safety |
 | SYS-008 | Contactor/brake/drive-enable cause-and-effect | TBD | TBD | Safety/electrical |
 | SYS-009 | Required PL/SIL and safety standards | ISO 3691-4:2023 primary; ISO 12100:2010, ISO 13849-1:2023, IEC 60204-1:2016+A1:2021 supporting; provisional PL d Category 3 concept | No compliance claim; physical PLr requires future risk assessment | Safety |
 | SYS-010 | Safety validation authority | Academic project team and university supervisor | Simulation review only; formal assessor required for physical deployment | Safety/acceptance |
 | SYS-011 | Managed switch model/port plan | SCALANCE XC216 / 6GK5216-0BA00-2AC2 in BOM; port plan TBD | Verification required | BOM/network |
-| SYS-012 | Network topology, IP plan, VLANs, QoS | Ubuntu ROS laptop connected by Ethernet to Windows TIA/PLCSIM/HMI laptop; detailed IP and segmentation TBD | Topology confirmed; Phase 3 design required | Communications |
-| SYS-013 | System time source/synchronization topology | TBD | TBD | EKF/SLAM/logging |
-| SYS-014 | Cybersecurity/access-control requirements | TBD | TBD | Deployment |
+| SYS-012 | Network topology, IP plan, VLANs, QoS | Closed `192.168.50.0/24` simulation subnet planned: Ubuntu `192.168.50.10`, Windows `192.168.50.20`, no gateway/DNS/DHCP; TCP 4840 restricted to the Ubuntu client | Phase 3 non-applied plan; collision/interface/firewall verification required before configuration | Communications |
+| SYS-013 | System time source/synchronization topology | Gazebo simulation time is robot-data authority; steady/PLC elapsed clocks own communication watchdogs; shared UTC source targets ≤50 ms log offset | Phase 3 architecture; cross-host offset measurement deferred to Phase 13 | EKF/SLAM/logging |
+| SYS-014 | Cybersecurity/access-control requirements | Closed simulation network; preferred OPC UA `SignAndEncrypt`/`Basic256Sha256`, explicit application-certificate trust, no unsecured drive-enabled test | Phase 3 security gate; exact V17/PLCSIM/CPU capability and certificate procedure require verification | Deployment |
 | SYS-015 | External host/fleet/WMS/MES interface | Not required for prototype; keep future-ready for REST/MQTT/OPC UA/VDA 5050 only if later required | Confirmed initial scope | Architecture |
 | SYS-016 | Simulated PLC firmware/toolchain compatibility | S7-1500F selected; exact CPU model/firmware, STEP 7 edition, Safety option, and PLCSIM Advanced V4.0 update TBD | Family-level compatibility verified; exact implementation verification required | PLC simulation |
 | SYS-017 | HMI-to-PLC/ROS authority boundary | HMI may request missions, stops, modes, and resets through approved PLC/ROS interfaces; no direct motion or permission forcing | Confirmed architecture; detailed tags and protocol TBD | HMI/communications/PLC |
-| SYS-018 | OPC UA endpoint roles | Windows S7-1500F virtual PLC as OPC UA server; Ubuntu ROS 2 gateway as client; HMI link remains native Siemens unless Phase 3 changes it | Confirmed architecture; detailed contract deferred to Phase 3 | Communications/PLC/HMI |
+| SYS-018 | OPC UA endpoint roles | Windows S7-1500F virtual PLC as OPC UA server; Ubuntu ROS 2 gateway as sole client/writer for ROS requests; HMI remains on the native Siemens PLC link; namespace resolved by URI | Confirmed Phase 3 architecture; TIA/ROS implementation deferred | Communications/PLC/HMI |
 
 ## Power and Operational Environment
 

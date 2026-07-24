@@ -11,25 +11,26 @@ order:
 4. `CHANGELOG.md`
 5. `SESSION_HANDOFF.md`
 
-Then read the active Phase 2 architecture, the approved Phase 1 architecture,
-and their governing Phase 0 evidence:
+Then read the active Phase 3 architecture, the approved Phase 2 and Phase 1
+architectures, and their governing Phase 0 evidence:
 
-1. `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`
-2. `docs/PHASE_1_SYSTEM_ARCHITECTURE.md`
-3. `docs/PHASE_0_REQUIREMENTS.md`
-4. `docs/ROBOT_PARAMETER_REGISTER.md`
-5. `docs/PHASE_0_SOFTWARE_BASELINE.md`
-6. `docs/PHASE_0_TEST_REPORT.md`
-7. `docs/SIMULATION_RISK_REDUCTION_PLAN.md`
-8. `docs/PHASE_0_SAFETY_SCOPE.md`
-9. `docs/PHASE_0_BOM_REVIEW.md`
+1. `docs/PHASE_3_COMMUNICATION_ARCHITECTURE.md`
+2. `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`
+3. `docs/PHASE_1_SYSTEM_ARCHITECTURE.md`
+4. `docs/PHASE_0_REQUIREMENTS.md`
+5. `docs/ROBOT_PARAMETER_REGISTER.md`
+6. `docs/PHASE_0_SOFTWARE_BASELINE.md`
+7. `docs/PHASE_0_TEST_REPORT.md`
+8. `docs/SIMULATION_RISK_REDUCTION_PLAN.md`
+9. `docs/PHASE_0_SAFETY_SCOPE.md`
+10. `docs/PHASE_0_BOM_REVIEW.md`
 
 The governing files take precedence over this summary if a discrepancy is
 found.
 
 ## Transfer State
 
-- Current phase: Phase 2 — Electrical and power architecture.
+- Current phase: Phase 3 — Communication architecture.
 - Phase 0 was approved and locally committed as `7db85f7`.
 - Phase 1 architecture was prepared for approval, then reopened when the user
   specified TIA Portal V17 for PLC and HMI engineering.
@@ -47,16 +48,28 @@ found.
 - Phase 2 architecture is approved and complete.
 - Phase 2 was locally committed as `9e64d41` with message
   `docs: complete phase 2 electrical power architecture`.
-- No Phase 3 work has started or is authorized.
+- The user explicitly authorized Phase 3.
+- Phase 3 communication architecture is documented and validated locally.
+- The user approved Phase 3 on 2026-07-25.
+- The local Phase 3 closure commit is pending.
+- Phase 4 has not started and is not authorized.
 - No URDF/Xacro, ROS 2 project package, simulation world, or mechanical CAD has
   been created.
 - `src/` is empty.
-- Do not create Phase 3 communication artifacts or the Phase 6 model without
+- Do not create Phase 4 ROS workspace artifacts or the Phase 6 model without
   explicit user authorization for the applicable phase.
+- `AMR_CODEX_HANDOFF.md` has a pre-existing uncommitted user edit that removes
+  approved scope language and restores older conflicting S7-1200F/50 kg
+  unloaded-mass text. Preserve it untouched unless the user explicitly directs
+  reconciliation. The approved Phase 1/2 records govern current Phase 3 work.
 
-The user's last directions were to retain the 48 V, 30 Ah battery baseline,
-approve Phase 2, and prepare this new-session handoff. The basic
-primitive-geometry URDF/Xacro model remains assigned to Phase 6.
+The user's last directions were to approve Phase 3 and retain user ownership of
+future ladder programming. Codex shall provide the ladder-programming guide,
+tag/interface mapping, state-machine and cause/effect guidance, test checklist,
+and review support. Do not author the ladder program unless the user later
+explicitly requests it. No weekly-usage percentage is exposed to the agent in
+this workspace; stop if the interface surfaces the user's requested 5% warning.
+The basic primitive-geometry URDF/Xacro model remains assigned to Phase 6.
 
 ## Non-Negotiable Workflow
 
@@ -70,12 +83,62 @@ primitive-geometry URDF/Xacro model remains assigned to Phase 6.
 - Phase 2 is electrical/power architecture only. It does not authorize physical
   wiring, procurement, PLC code, ROS/OPC UA contracts, or later-phase
   implementation.
+- Phase 3 is communication architecture only. It does not authorize applying
+  network/firewall/certificate settings, creating ROS packages, implementing
+  the OPC UA gateway, or creating TIA/PLC/HMI code.
+- The user owns Phase 12 ladder implementation. Codex supplies guidance,
+  mappings, cause/effect design, tests, and review unless separately authorized
+  to implement code.
 - Do not treat the S7-1500F simulation as automatically equivalent to a future
   S7-1200F implementation. WinCC edition, license, firmware, and runtime remain
   explicit decisions.
 - After phase approval, create a local Git commit with a clear message.
 - Never push to GitHub without explicit instruction.
 - Keep `PROJECT_STATUS.md`, `TODO.md`, and `CHANGELOG.md` synchronized.
+
+## Phase 3 Communication Baseline
+
+- DDS remains on the Ubuntu host; Windows receives no ROS discovery or DDS
+  traffic.
+- OPC UA is the sole inter-laptop application protocol.
+- PLCSIM Advanced S7-1500F is the OPC UA server; one Ubuntu ROS gateway is the
+  client.
+- The non-applied closed-network plan is `192.168.50.0/24`: Ubuntu
+  `192.168.50.10`, Windows `192.168.50.20`, no gateway, DNS, or DHCP.
+- Before application, verify subnet collision, interface identity, PLCSIM
+  adapter support, and Windows/Ubuntu firewall ownership.
+- Fast DDS through `rmw_fastrtps_cpp` and `ROS_DOMAIN_ID=1` are retained.
+  Phase 4 shall set `ROS_LOCALHOST_ONLY=1`; the current shell was observed as
+  `0`.
+- The planned OPC UA endpoint is `opc.tcp://192.168.50.20:4840`, subject to the
+  exact server path exposed by the verified toolchain.
+- Drive-enabled tests require a verified secure endpoint, preferred
+  `SignAndEncrypt` with `Basic256Sha256`, and explicit certificate trust.
+- Unsecured OPC UA is allowed only as a documented, closed-network,
+  motion-inhibited diagnostic exception.
+- Resolve Siemens namespace
+  `http://www.siemens.com/simatic-s7-opcua` at every session; never hardcode a
+  numeric namespace index.
+- The symbolic interface root is `DB_AMR_OPCUA` with `Interface`, `RosToPlc`,
+  `PlcToRos`, and `Diagnostics` groups.
+- ROS request bundles use a commit-last sequence. PLC state uses a double-read
+  `StateSeq` coherent-snapshot check. Reset/enable/stop requests require
+  sequence-correlated acknowledgement.
+- Initial simulation timing: 100 ms gateway heartbeat, 500 ms PLC heartbeat
+  watchdog, 100 ms PLC state update, 300 ms ROS PLC-state freshness, and
+  200 ms stamped motion-command expiry.
+- Reconnect cancels pending requests, makes the ROS authority snapshot
+  non-permissive, revalidates endpoint/security/namespace/schema/boot IDs, and
+  returns only to ready-inhibited.
+- Gazebo time stamps robot data; Ubuntu steady time governs gateway freshness;
+  PLC elapsed time governs the PLC watchdog; UTC wall time is evidence only.
+- Canonical ROS names, QoS profiles, field types, electrical-signal mapping,
+  inhibition enumerations, fault responses, and verification tests are in
+  `docs/PHASE_3_COMMUNICATION_ARCHITECTURE.md`.
+- In Phase 12, the user implements the TIA ladder program and PLC/HMI project.
+  Codex supplies the guide, OPC UA/tag mapping, state-transition and
+  cause/effect guidance, test checklist, and review. Phase 13 applies and
+  validates the network and cross-host integration.
 
 ## Current Project Scope
 
@@ -299,8 +362,10 @@ Phase 2 is closed by the local commit:
 9e64d41 docs: complete phase 2 electrical power architecture
 ```
 
-This handoff refresh records the clean post-phase state. No Git push has
-occurred. Phase 3 has not started.
+Phase 3 changes are approved and awaiting the local closure commit. A pre-existing
+uncommitted user edit to `AMR_CODEX_HANDOFF.md` is outside the Phase 3 change
+set and must remain untouched unless the user directs otherwise. No Git push
+has occurred. Phase 4 has not started.
 
 ## Deferred Inputs
 
@@ -311,16 +376,18 @@ occurred. Phase 3 has not started.
 - Exact MRS1000 and IMU poses.
 - Floor friction, slope, threshold, gap, contamination, and environment limits.
 - Reverse-speed design limit.
-- ROS/PLC protocol, heartbeat timing, state machine, and cause/effect matrix.
-- Network addressing, ROS QoS, and time synchronization.
+- Detailed PLC state transitions, timer/latch/reset implementation, and
+  cause/effect matrix.
+- Applied network-interface, firewall, certificate, and trust-store
+  configuration after collision and toolchain checks.
 - MPC solver/plugin and timing design.
 - Acceptance routes, obstacle classes, trial count, docking method, and
   recovery-time limit.
 - ROS 2 Humble migration plan before May 2027 end of support.
 - TIA Portal update, STEP 7/Safety license, PLCSIM Advanced V4.0 update, exact
   S7-1500F model/firmware, WinCC edition, and HMI runtime.
-- OPC UA namespace, security, data ownership, heartbeat, timeout,
-  acknowledgement, reconnect, and Ethernet addressing.
+- Exact installed OPC UA endpoint path, secure-policy/user-token support,
+  certificate profile, and server-revised subscription intervals.
 - Exact battery/BMS model, complete voltage window, current/fault limits,
   usable portion of the confirmed 1.44 kWh nominal energy, reserve, thermal
   limits, protection behavior, and interface.
@@ -338,7 +405,10 @@ occurred. Phase 3 has not started.
 
 ## Exact Next Action
 
-1. Wait for separate explicit user authorization for Phase 3.
-2. If Phase 3 is not explicitly authorized, stop.
-3. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
-   implementation artifacts under the completed Phase 2 authorization.
+1. Create a local commit containing only the approved Phase 3 files; do not
+   include the pre-existing `AMR_CODEX_HANDOFF.md` edit without explicit user
+   direction.
+2. Refresh this handoff and project status with the Phase 3 commit hash.
+3. Wait for separate explicit user authorization for Phase 4.
+4. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
+   implementation artifacts under the Phase 3 authorization.

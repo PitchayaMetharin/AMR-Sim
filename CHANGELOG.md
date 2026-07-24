@@ -60,6 +60,19 @@ All significant project changes must be recorded here.
 - Logical battery/BMS, rail-valid, precharge, K1/K2 command/feedback, traction
   bus, driver-fault, charger, electrical-state, and inhibition-reason signals
   for later transport and PLC implementation.
+- Phase 3 communication architecture separating the Ubuntu ROS 2/DDS plane
+  from the Windows OPC UA authority plane.
+- Closed static-address two-laptop simulation-network plan with explicit
+  isolation, firewall, and no-routing requirements.
+- Symbolic `DB_AMR_OPCUA` interface contract with one writer per direction,
+  namespace-URI resolution, type/access/quality validation, commit-last
+  request bundles, coherent PLC snapshots, and sequence acknowledgements.
+- Initial ROS/PLC heartbeat, watchdog, state-freshness, command-expiry, and
+  reconnect timing contract.
+- Canonical ROS namespaces and QoS classes for sensors, state, authority,
+  commands, diagnostics, dynamic TF, and static TF.
+- Communication fault, observability, clock-domain, HMI-boundary, security,
+  and later verification requirements.
 
 ### Changed
 - Project-agent role changed from teaching assistant to lead robotics engineer.
@@ -160,6 +173,30 @@ All significant project changes must be recorded here.
   plus Windows TIA/PLC/HMI two-laptop topology.
 - Phase 2 electrical and power architecture approved, closed, and locally
   committed as `9e64d41`.
+- Phase 3 explicitly authorized and prepared for review; Phase 4 remains
+  unauthorized.
+- Fast DDS with `ROS_DOMAIN_ID=1` retained for the Ubuntu-only ROS graph;
+  `ROS_LOCALHOST_ONLY=1` is required in the later deployment configuration so
+  DDS is not extended to the Windows PLC/HMI laptop.
+- Inter-laptop addressing planned as closed `192.168.50.0/24` with Ubuntu
+  `.10`, Windows `.20`, and no gateway/DNS/DHCP, pending collision and
+  interface verification before application.
+- Drive-enabled OPC UA integration requires a verified secure endpoint,
+  preferred `SignAndEncrypt`/`Basic256Sha256`, and explicit certificate trust.
+  Unsecured OPC UA is limited to motion-inhibited diagnostics on the closed
+  simulation network.
+- Siemens OPC UA nodes will be found by namespace URI and symbolic browse path
+  rather than a fixed numeric namespace index.
+- Initial gateway heartbeat set to 100 ms, PLC watchdog to 500 ms, PLC-state
+  freshness at ROS to 300 ms, and stamped command expiry to 200 ms; all remain
+  simulation values requiring later latency/jitter validation.
+- Gazebo time retained for robot data while steady/PLC elapsed clocks govern
+  communication freshness and UTC wall time governs evidence correlation.
+- Phase 3 communication architecture approved by the user.
+- Phase 12 ladder-program implementation assigned to the user. Codex will
+  supply the ladder guide, tag/interface mapping, state-machine and
+  cause/effect guidance, test checklist, and review support unless the user
+  later explicitly requests implementation.
 
 ### Removed
 - SICK outdoorScan3 safety LiDAR.

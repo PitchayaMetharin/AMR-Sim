@@ -4,11 +4,11 @@
 Industrial Differential-Drive AMR
 
 ## Current Phase
-Phase 2 — Electrical and power architecture
+Phase 3 — Communication architecture
 
 ## Status
-Phase 2 electrical and power architecture approved, complete, and locally
-committed as `9e64d41`. No project phase is active; Phase 3 is not authorized.
+Phase 3 communication architecture is approved and complete. The local closure
+commit is pending; Phase 4 is not authorized.
 
 ## Current Project Scope
 - Simulation-only academic AMR project.
@@ -161,16 +161,40 @@ committed as `9e64d41`. No project phase is active; Phase 3 is not authorized.
 - Phase 2 electrical and power architecture documented in
   `docs/PHASE_2_ELECTRICAL_POWER_ARCHITECTURE.md`.
 - Phase 2 approved by the user, closed, and locally committed as `9e64d41`.
+- ROS 2/DDS traffic confined to the Ubuntu host and OPC UA selected as the sole
+  inter-laptop application protocol.
+- Closed `192.168.50.0/24` simulation-network plan defined without applying
+  host configuration; Ubuntu `.10`, Windows `.20`, no gateway/DNS/DHCP.
+- Fast DDS and `ROS_DOMAIN_ID=1` retained for the single-host ROS graph, with
+  `ROS_LOCALHOST_ONLY=1` required in the later deployment configuration.
+- Secure OPC UA endpoint, application-certificate, namespace-resolution,
+  symbolic-schema, ownership, quality, and coherent-snapshot rules defined.
+- Commit-last ROS-to-PLC request bundles and sequence-correlated PLC
+  acknowledgements defined so pulse loss and replay cannot silently grant
+  authority.
+- Initial 100 ms gateway heartbeat, 500 ms PLC watchdog, 300 ms PLC-state
+  freshness, and 200 ms stamped-command timeout defined as provisional
+  simulation values requiring later measurement.
+- Gazebo simulation time, Ubuntu steady time, PLC elapsed time, and UTC
+  evidence time assigned distinct responsibilities.
+- Canonical ROS namespaces, interface classes, QoS profiles, unique publishers,
+  reconnect behavior, communication fault responses, and verification plan
+  documented in `docs/PHASE_3_COMMUNICATION_ARCHITECTURE.md`.
+- User ownership of Phase 12 ladder programming recorded. Codex will provide
+  the implementation guide, OPC UA/tag mapping, state-machine and cause/effect
+  guidance, test checklist, and review support rather than authoring the
+  ladder program unless explicitly requested later.
 
 ## Work in Progress
-- None. No Phase 3 work has started.
+- Phase 3 local closure commit only. No Phase 4 work has started.
 
 ## Next Required Action
-Await separate explicit user authorization for Phase 3. Until then, no project
-phase is active.
+Create the approved local Phase 3 commit, then refresh the handoff with its
+hash. Do not begin Phase 4 without separate explicit authorization.
 
 ## Deferred Parameters
-- MRS1000 firmware, ROS 2 driver/configuration, IP plan, and time synchronization
+- MRS1000 firmware and ROS 2 driver/configuration; physical sensor IP and time
+  synchronization remain future-project inputs
 - Effective rolling radius and wheel separation
 - Caster geometry and all wheel/caster mounting poses
 - Payload envelope and center-of-gravity range
@@ -178,15 +202,17 @@ phase is active.
 - Numerical poses and orientations for both MRS1000 units and the MTi-8
 - Detailed operating floor, slope, threshold, and environmental limits
 - MPC implementation approach
-- Detailed PLC/ROS cause-and-effect and state machine
-- Network, time-synchronization, and ROS-to-PLC interfaces
+- Detailed PLC/ROS cause-and-effect, transitions, timers, latches, and state
+  machine
+- Applied network-interface, firewall, certificate, and OPC UA configuration
 - Representative acceptance test matrix and docking accuracy/method
 - TIA Portal V17 update level
 - STEP 7 edition, Safety license/option, PLCSIM Advanced V4.0 update, and exact
   S7-1500F simulated model/firmware
 - WinCC V17 edition, panel-image version, and HMI runtime/simulator
-- OPC UA endpoint, namespace, security, data ownership, heartbeat, timeout,
-  acknowledgement, reconnect, and Ethernet addressing
+- Exact OPC UA security/user-token capabilities, endpoint path, revised
+  subscription intervals, certificates, and trust stores for the installed
+  V17/PLCSIM/CPU combination
 - Exact battery/BMS model, voltage window, current limits, fault current,
   usable portion of the confirmed 1.44 kWh nominal energy, reserve, and
   interface
@@ -224,10 +250,13 @@ phase is active.
   stopping distance, structural capacity, traction, or certified compliance.
 - The Ubuntu laptop must later be performance-tested with Gazebo, two simulated
   LiDAR streams, SLAM, Nav2, MPC, visualization, and evidence collection active.
-- Detailed command freshness, PLC watchdog, estimator validity, and perception
-  degraded-mode thresholds remain intentionally deferred.
+- Phase 3 communication timing values are initial simulation bounds and require
+  Phase 13 latency/jitter/load validation; they are not safety response times.
 - TIA Portal V17 runs on a separate Windows laptop. The direct Ethernet path,
-  OPC UA security, reconnect behavior, and cross-host timing must be validated.
+  secure OPC UA capability, certificates, reconnect behavior, and cross-host
+  timing remain untested on the exact installed toolchain.
+- The planned `192.168.50.0/24` subnet and interface bindings must be checked
+  for collision before any configuration is applied.
 - A future physical S7-1200F implementation would require explicit PLC-program,
   I/O, OPC UA, timing, fail-safe behavior, and validation porting from the
   S7-1500F simulation; simulation results are not automatically transferable.
@@ -244,5 +273,5 @@ phase is active.
   actual duty-cycle loads and usable battery energy remain unmeasured.
 
 ## Last Updated
-2026-07-24 — Phase 2 approved and locally committed as `9e64d41`; new-session
-handoff refreshed; Phase 3 not started.
+2026-07-25 — Phase 3 approved; user ownership of future ladder programming
+recorded; local closure commit pending; Phase 4 not started.

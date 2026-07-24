@@ -139,12 +139,54 @@
 - [x] Stop and await user approval.
 - [x] Record Phase 2 approval and create the local Phase 2 commit.
 
+## Phase 3 — Communication Architecture
+- [x] Record explicit user authorization for Phase 3.
+- [x] Read the Phase 2 and Phase 1 architectures and governing Phase 0
+      evidence in the required order.
+- [x] Preserve the pre-existing uncommitted `AMR_CODEX_HANDOFF.md` edit without
+      incorporating or overwriting it.
+- [x] Separate the Ubuntu ROS 2/DDS plane from the Windows OPC UA authority
+      plane.
+- [x] Define the closed, static-address, non-applied two-laptop Ethernet plan.
+- [x] Define OPC UA endpoint roles, security gate, certificate trust, namespace
+      resolution, symbolic schema, data ownership, and quality rules.
+- [x] Assign transport representations to all Phase 2 electrical signals.
+- [x] Define coherent PLC snapshots and commit-last ROS request bundles.
+- [x] Define sequence-correlated acknowledgement and replay/restart behavior.
+- [x] Define initial heartbeat, watchdog, freshness, command timeout, and
+      reconnect values.
+- [x] Separate Gazebo simulation time, Ubuntu steady time, PLC elapsed time,
+      and UTC evidence time.
+- [x] Define canonical ROS namespaces, topic/action classes, QoS profiles, and
+      unique publisher ownership.
+- [x] Define communication fault responses, diagnostics, verification tests,
+      and later-phase ownership.
+- [x] Record that the user owns Phase 12 ladder implementation and Codex
+      supplies the guide, mappings, cause/effect guidance, tests, and review.
+- [x] Create `docs/PHASE_3_COMMUNICATION_ARCHITECTURE.md`.
+- [x] Update `docs/ROBOT_PARAMETER_REGISTER.md`.
+- [x] Update `PROJECT_STATUS.md`.
+- [x] Update `TODO.md`.
+- [x] Update `CHANGELOG.md`.
+- [x] Update `SESSION_HANDOFF.md`.
+- [x] Run Phase 3 documentation and repository consistency checks.
+- [x] Stop and await user approval.
+- [x] Record Phase 3 approval and create the local Phase 3 commit.
+
 ## Deferred Inputs — Later Simulation Phases or Future Physical Project
 - [ ] Define the design reverse-speed limit before controller configuration.
-- [ ] Define the simulated ROS/PLC protocol, heartbeat period, state machine,
-      and cause/effect matrix before PLC integration.
-- [ ] Define network addressing, ROS 2 QoS, and simulation time-synchronization
-      architecture before sensor integration.
+- [x] Define the simulated ROS/PLC transport, heartbeat period, acknowledgement,
+      and reconnect architecture before PLC integration.
+- [ ] Define the detailed PLC state machine, timers, latches, reset rules, and
+      cause/effect matrix before PLC integration.
+- [ ] Prepare the Phase 12 ladder-programming guide, OPC UA/tag mapping,
+      cause/effect guidance, and PLC/HMI test checklist for the user.
+- [ ] User implements the Phase 12 ladder program in TIA Portal; Codex reviews
+      it when requested.
+- [x] Define network addressing, ROS 2 QoS, and simulation time architecture
+      before sensor integration.
+- [ ] Verify the planned subnet, interfaces, firewall, certificates, and secure
+      OPC UA capabilities on the exact Windows/Ubuntu toolchain.
 - [ ] Define representative acceptance routes, obstacle classes, trial count,
       and recovery-time limit before validation.
 - [ ] Define deployment support and migration plan before ROS 2 Humble EOL.
