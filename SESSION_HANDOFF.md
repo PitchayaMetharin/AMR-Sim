@@ -39,7 +39,7 @@ found.
   PLCSIM Advanced compatibility conflict.
 - S7-1200F remains only a conceptual future physical BOM candidate.
 - Phase 1 is approved and complete.
-- The approved phase-closing commit message is
+- Phase 1 was locally committed as `8be2e8b` with message
   `docs: complete phase 1 system architecture`.
 - No Phase 2 work has started.
 - No URDF/Xacro, ROS 2 project package, simulation world, or mechanical CAD has
@@ -229,10 +229,11 @@ Phase 0 is committed locally:
 Phase 1 is closed by the local commit:
 
 ```text
-docs: complete phase 1 system architecture
+8be2e8b docs: complete phase 1 system architecture
 ```
 
-No Git push has occurred. Phase 2 has not started.
+This handoff refresh is documentation-only and adds no Phase 2 work. No Git
+push has occurred. Phase 2 has not started.
 
 ## Deferred Inputs
 
@@ -256,6 +257,8 @@ No Git push has occurred. Phase 2 has not started.
 
 ## Exact Next Action
 
-1. Verify the Phase 1 closing commit and clean working tree.
-2. Stop.
-3. Start Phase 2 only after separate explicit authorization.
+1. Confirm that the user explicitly authorizes Phase 2.
+2. If Phase 2 is not explicitly authorized, stop.
+3. If authorized, work only on Phase 2 — Electrical and power architecture.
+4. Do not create ROS packages, URDF/Xacro, PLC code, HMI screens, or later-phase
+   implementation artifacts during Phase 2.

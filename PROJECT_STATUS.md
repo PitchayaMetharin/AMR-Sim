@@ -123,13 +123,14 @@ Phase 1 system architecture approved and complete; Phase 2 is not authorized.
   Advanced/OPC UA compatibility conflict.
 - S7-1200F retained only as a conceptual future physical BOM candidate, with no
   equivalence or automatic portability claim.
+- Phase 1 approved and locally committed as `8be2e8b`.
 
 ## Work in Progress
 - None. Awaiting separate authorization for Phase 2.
 
 ## Next Required Action
-Create the approved local Phase 1 commit, then stop. Start Phase 2 only after
-separate explicit user authorization.
+Start Phase 2 only after separate explicit user authorization. Until then, no
+project phase is active.
 
 ## Deferred Parameters
 - MRS1000 firmware, ROS 2 driver/configuration, IP plan, and time synchronization
@@ -182,6 +183,5 @@ separate explicit user authorization.
   S7-1500F simulation; simulation results are not automatically transferable.
 
 ## Last Updated
-2026-07-24 — Phase 1 architecture approved after S7-1500F,
-PLCSIM Advanced, two-laptop, Ethernet, and OPC UA closure; no Phase 2 work
-started.
+2026-07-24 — Phase 1 approved and committed as `8be2e8b`; session handoff
+refreshed; no Phase 2 work started.

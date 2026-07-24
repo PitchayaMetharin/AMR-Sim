@@ -117,6 +117,8 @@ All significant project changes must be recorded here.
   no automatic equivalence or portability from the S7-1500F simulation is
   claimed.
 - Phase 1 final system architecture approved and closed.
+- Phase 1 locally committed as `8be2e8b` and the new-session handoff refreshed
+  to the clean post-phase state.
 
 ### Removed
 - SICK outdoorScan3 safety LiDAR.
