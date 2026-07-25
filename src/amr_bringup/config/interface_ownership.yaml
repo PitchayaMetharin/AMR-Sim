@@ -1,0 +1,51 @@
+{
+  "namespace": "/amr",
+  "topics": {
+    "/amr/base/status": {
+      "type": "amr_interfaces/msg/BaseStatus",
+      "publisher": "amr_base_adapter/base_adapter_node"
+    },
+    "/amr/control/cmd_vel_request": {
+      "type": "geometry_msgs/msg/TwistStamped",
+      "publisher": "amr_control/command_arbitration_node"
+    },
+    "/amr/control/cmd_vel_gated": {
+      "type": "geometry_msgs/msg/TwistStamped",
+      "publisher": "amr_control/motion_gate_node"
+    },
+    "/amr/control/gate_status": {
+      "type": "amr_interfaces/msg/GateStatus",
+      "publisher": "amr_control/motion_gate_node"
+    },
+    "/amr/plc/state": {
+      "type": "amr_interfaces/msg/PlcState",
+      "publisher": "amr_plc_gateway/plc_gateway_node"
+    },
+    "/amr/plc/connection_status": {
+      "type": "amr_interfaces/msg/PlcConnectionStatus",
+      "publisher": "amr_plc_gateway/plc_gateway_node"
+    },
+    "/amr/sensors/front_lidar/scan": {
+      "type": "sensor_msgs/msg/LaserScan",
+      "publisher": "amr_sensor_adapters/front_lidar_adapter_node"
+    },
+    "/amr/sensors/front_lidar/points": {
+      "type": "sensor_msgs/msg/PointCloud2",
+      "publisher": "amr_sensor_adapters/front_lidar_adapter_node"
+    },
+    "/amr/sensors/rear_lidar/scan": {
+      "type": "sensor_msgs/msg/LaserScan",
+      "publisher": "amr_sensor_adapters/rear_lidar_adapter_node"
+    },
+    "/amr/sensors/rear_lidar/points": {
+      "type": "sensor_msgs/msg/PointCloud2",
+      "publisher": "amr_sensor_adapters/rear_lidar_adapter_node"
+    }
+  },
+  "actions": {
+    "/amr/mission/navigate_to_pose": {
+      "type": "nav2_msgs/action/NavigateToPose",
+      "server": "amr_mission/mission_supervisor_node"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "clock": {"depth": 1, "reliability": "best_effort", "durability": "volatile"},
+  "sensor": {"depth": 5, "reliability": "best_effort", "durability": "volatile"},
+  "state": {"depth": 5, "reliability": "reliable", "durability": "volatile"},
+  "authority": {"depth": 1, "reliability": "reliable", "durability": "volatile", "deadline_ms": 100},
+  "command": {"depth": 1, "reliability": "reliable", "durability": "volatile", "deadline_ms": 100, "lifespan_ms": 200},
+  "diagnostic": {"depth": 20, "reliability": "reliable", "durability": "volatile"},
+  "tf": {"depth": 100, "reliability": "reliable", "durability": "volatile"},
+  "static_tf": {"depth": 1, "reliability": "reliable", "durability": "transient_local"}
+}

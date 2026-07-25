@@ -173,6 +173,32 @@
 - [x] Stop and await user approval.
 - [x] Record Phase 3 approval and create the local Phase 3 commit.
 
+## Phase 4 — ROS 2 Workspace and Package Structure
+- [x] Record explicit user authorization for Phase 4.
+- [x] Preserve the protected `AMR_CODEX_HANDOFF.md` user edit.
+- [x] Create the `src/` workspace ownership map and reserve future package
+      boundaries without creating later-phase implementation packages.
+- [x] Assign exact future executables/components, public I/O, lifecycle policy,
+      process isolation, and forbidden responsibilities.
+- [x] Create buildable C++17/Humble `amr_interfaces` and `amr_bringup`
+      packages.
+- [x] Define fail-closed structured status interfaces and gateway request
+      services with headers, sequences, validity, boot IDs, states, reasons,
+      and raw permission where applicable.
+- [x] Define localhost-only DDS, namespace, simulation-time, QoS, and launch
+      ownership configuration.
+- [x] Add machine-readable canonical topic/action authority ownership.
+- [x] Add compiled C++ fail-closed default tests plus interface and workspace
+      structural tests.
+- [x] Clean-build both packages and pass all 14 tests.
+- [x] Verify the fresh overlay, installed ROS interfaces, environment settings,
+      launch smoke test, and cache-free installed resources.
+- [x] Create `docs/PHASE_4_ROS2_WORKSPACE.md`.
+- [x] Update `PROJECT_STATUS.md`, `TODO.md`, `CHANGELOG.md`, and
+      `SESSION_HANDOFF.md`.
+- [x] Stop and await user approval.
+- [x] Record Phase 4 approval and create the local Phase 4 commit.
+
 ## Deferred Inputs — Later Simulation Phases or Future Physical Project
 - [ ] Define the design reverse-speed limit before controller configuration.
 - [x] Define the simulated ROS/PLC transport, heartbeat period, acknowledgement,
@@ -216,7 +242,7 @@
 - [x] Phase 1 — Final system architecture
 - [x] Phase 2 — Electrical and power architecture
 - [x] Phase 3 — Communication architecture
-- [ ] Phase 4 — ROS 2 workspace and package structure
+- [x] Phase 4 — ROS 2 workspace and package structure
 - [ ] Phase 5 — Hardware drivers and interfaces
 - [ ] Phase 6 — Robot model and simulation
 - [ ] Phase 7 — Odometry and EKF

@@ -5,6 +5,19 @@ All significant project changes must be recorded here.
 ## Unreleased
 
 ### Added
+- Phase 4 ROS 2 Humble/C++17 workspace skeleton with `amr_interfaces` and
+  `amr_bringup`, plus reserved later-phase package boundaries.
+- Fail-closed base, motion-gate, PLC-state, and PLC-connection interfaces;
+  gateway motion-enable/reset delivery services; localhost-only DDS and QoS
+  configuration; machine-readable authority ownership; compiled C++ default
+  tests; and headless structural tests.
+- Exact future package/executable, public-I/O, lifecycle, composition, and
+  forbidden-responsibility assignments without later-phase implementation.
+- Clean isolated Phase 4 validation evidence: two packages built, 14 tests
+  passed, installed interfaces resolved, launch smoke test passed, and
+  generated Python caches excluded from installation.
+- Phase 4 workspace architecture record and compact, current-phase-only
+  session-handoff rule.
 - Phase-gated engineering workflow.
 - Requirement to stop after every phase and await approval.
 - `PROJECT_STATUS.md`, `CHANGELOG.md`, and `TODO.md` repository records.
@@ -75,6 +88,8 @@ All significant project changes must be recorded here.
   and later verification requirements.
 
 ### Changed
+- Phase 4 approved after clean C++17/Humble build, 14 passing tests, installed
+  interface verification, and launch/configuration smoke validation.
 - Project-agent role changed from teaching assistant to lead robotics engineer.
 - Navigation LiDAR changed from SICK LMS151 to 2 × SICK MRS1000.
 - Local controller changed from Regulated Pure Pursuit to MPC.

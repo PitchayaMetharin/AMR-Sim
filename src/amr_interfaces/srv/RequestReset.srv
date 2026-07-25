@@ -1,0 +1,11 @@
+# Gateway delivery request, not PLC reset completion.
+std_msgs/Header header
+uint32 sequence
+uint32 source_boot_id
+bool valid
+bool reset_request
+---
+uint16 REASON_UNAVAILABLE=0
+bool accepted_for_delivery
+uint32 acknowledged_sequence
+uint16 reason

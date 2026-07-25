@@ -4,11 +4,13 @@
 Industrial Differential-Drive AMR
 
 ## Current Phase
-Phase 3 — Communication architecture
+None
 
 ## Status
 Phase 3 communication architecture is approved, complete, and locally
-committed as `9dd6d18`. No project phase is active; Phase 4 is not authorized.
+committed as `9dd6d18`. Phase 4 workspace structure and interfaces are
+approved, complete, and clean-build validated with 14 passing tests. Phase 5
+is not authorized.
 
 ## Current Project Scope
 - Simulation-only academic AMR project.
@@ -186,11 +188,11 @@ committed as `9dd6d18`. No project phase is active; Phase 4 is not authorized.
   ladder program unless explicitly requested later.
 
 ## Work in Progress
-- None. No Phase 4 work has started.
+- None. Phase 4 is complete.
 
 ## Next Required Action
-Await separate explicit user authorization for Phase 4. Until then, no project
-phase is active.
+Await explicit user authorization for Phase 5. Do not create Phase 5 driver or
+gateway implementation artifacts while waiting.
 
 ## Deferred Parameters
 - MRS1000 firmware and ROS 2 driver/configuration; physical sensor IP and time
@@ -273,5 +275,6 @@ phase is active.
   actual duty-cycle loads and usable battery energy remain unmeasured.
 
 ## Last Updated
-2026-07-25 — Phase 3 approved and locally committed as `9dd6d18`; user
-ownership of future ladder programming recorded; Phase 4 not started.
+2026-07-25 — Phase 4 approved after independent clean-build validation: two
+packages, 14 tests, installed interfaces, and launch smoke test passed. Phase 5
+is not authorized.
