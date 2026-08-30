@@ -6,6 +6,10 @@ uint8 FAULT=3
 
 # Reason values. Zero is intentionally UNAVAILABLE.
 uint16 REASON_UNAVAILABLE=0
+uint16 REASON_READY=1
+uint16 REASON_ODOMETRY_MISSING_OR_STALE=2
+uint16 REASON_JOINT_STATES_MISSING_OR_STALE=3
+uint16 REASON_FAULT=4
 
 std_msgs/Header header
 uint32 sequence

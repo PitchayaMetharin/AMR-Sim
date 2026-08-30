@@ -8,18 +8,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/ManipulateProduct.action"
+  "action/TransportProduct.action"
   "msg/BaseStatus.msg"
-  "msg/GateStatus.msg"
-  "msg/PlcConnectionStatus.msg"
-  "msg/PlcState.msg"
-  "srv/RequestMotionEnable.srv"
-  "srv/RequestReset.srv"
+  "msg/FactoryStatus.msg"
+  "msg/HealthStatus.msg"
+  "msg/ManipulatorStatus.msg"
+  "srv/SetOperationMode.srv"
   DEPENDENCIES std_msgs
 )
+
+install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -33,8 +37,13 @@ if(BUILD_TESTING)
   )
   target_link_libraries(fail_closed_defaults_test "${cpp_typesupport_target}")
 
+  ament_add_gtest(qos_profiles_test test/test_qos_profiles.cpp)
+  target_include_directories(qos_profiles_test PRIVATE include)
+  ament_target_dependencies(qos_profiles_test rclcpp)
+
   ament_add_pytest_test(interface_schema_test test/test_interface_schema.py)
 endif()
 
-ament_export_dependencies(rosidl_default_runtime)
+ament_export_dependencies(rclcpp rosidl_default_runtime)
+ament_export_include_directories(include)
 ament_package()

@@ -1,0 +1,25 @@
+/amr/command_arbitration_node:
+  ros__parameters:
+    use_sim_time: true
+    source_timeout_ms: 200
+    require_manipulator_stowed: false
+    manipulator_status_timeout_ms: 200
+    output_frequency: 20.0
+    max_linear_velocity: 0.50
+    max_angular_velocity: 0.40
+    max_linear_acceleration: 0.50
+    max_angular_acceleration: 0.40
+    egress_max_distance_m: 0.50
+    egress_max_speed_mps: 0.10
+    egress_time_limit_s: 60.0
+    egress_status_timeout_ms: 200
+    egress_odometry_timeout_ms: 200
+    # The rear lidar runs at 10 Hz of simulation time.  Keep one full
+    # wall-clock second of evidence so a bounded egress remains usable under
+    # the documented low-real-time-factor factory runs while still failing
+    # closed on a missing scan stream.
+    egress_scan_timeout_ms: 1000
+    egress_drift_tolerance_m: 0.05
+    egress_yaw_tolerance_rad: 0.05
+    egress_clearance_m: 0.05
+    egress_footprint: "[[0.6, 0.4], [0.6, -0.4], [-0.6, -0.4], [-0.6, 0.4]]"

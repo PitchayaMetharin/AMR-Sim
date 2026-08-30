@@ -1,0 +1,17 @@
+frame_id: map
+tag_family: 36h11
+product_tag_size: 0.06
+max_hamming: 0
+product_size: [0.30, 0.20, 0.15]
+maximum_product_mass: 5.0
+tag_to_grasp:
+  translation_xyz: [0.0, -0.10, 0.156]
+  rotation_xyzw: [0.5, -0.5, 0.5, 0.5]
+products:
+  product_a: {tag_id: 101, mass: 1.0, pickup_station: pickup_a}
+  product_b: {tag_id: 102, mass: 3.0, pickup_station: pickup_b}
+  product_c: {tag_id: 103, mass: 5.0, pickup_station: pickup_c}
+dispatch_slots:
+  - {id: dispatch_1, x: -4.10, y: 0.50, z: 0.075}
+  - {id: dispatch_2, x: -4.10, y: 0.00, z: 0.075}
+  - {id: dispatch_3, x: -4.10, y: -0.50, z: 0.075}

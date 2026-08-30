@@ -52,11 +52,11 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert 'nav2_msgs/action/back_up.hpp' in mass_source
     assert '"/amr/control/dock_egress"' in mass_source
     assert "staging_waypoints, 0.005, 0.0, staging_trajectory, true" in mass_source
-    detach = mass_source.index("request_and_confirm_initial_detachment(3s)")
+    bootstrap = mass_source.index("verify_attachment_bootstrap(5s)")
     reference = mass_source.index("capture_reference_evidence(3s)")
     gripper = mass_source.index("command_gripper(node, 0.035)")
-    assert detach < reference < gripper
-    assert "attachment_states_[index] == \"detached\"" in mass_source
+    assert bootstrap < reference < gripper
+    assert "request_and_confirm_initial_detachment" not in mass_source
     assert 'unsafe wrist-flipped staging branch rejected' in mass_source
     assert "pregrasp.position.x = 0.85; pregrasp.position.z = 1.00;" in mass_source
     assert 'arm.setJointValueTarget(pregrasp, "gripper_tcp")' not in mass_source
@@ -144,16 +144,18 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     restore_support = mass_source.index(
         "set_pickup_support_collision(false)", retreat_execute)
     validity_service = mass_source.index('"/check_state_validity"')
-    validity_group = mass_source.index('validity_request->group_name = "manipulator"')
-    validity_contacts = mass_source.index("validity_response->contacts")
-    validity_required = mass_source.index("!validity_response->valid")
+    validity_helper = mass_source.index("const auto validate_state")
+    validity_diff = mass_source.index("request->robot_state.is_diff = true")
+    validity_contacts = mass_source.index("response->contacts")
+    validity_required = mass_source.index("payload-aware state validity failed")
+    payload_proof = mass_source.index("planning_scene_attached_object_proof(true)")
     loaded_stow = mass_source.index("arm.plan(stow_plan)")
-    start_state = mass_source.index("arm.setStartStateToCurrentState();", validity_required)
+    lower_execute = mass_source.index("arm.execute(lower_plan)")
     assert attach_scene < allow_support < lift_checkpoint < clearance_retreat
     assert clearance_retreat < retreat_waypoints < retreat_path < retreat_execute
     assert retreat_execute < restore_support < validity_service
-    assert validity_service < validity_group < validity_contacts < validity_required
-    assert validity_required < start_state < loaded_stow
+    assert validity_service < validity_helper < validity_diff < validity_contacts < validity_required
+    assert validity_helper < loaded_stow < payload_proof < lower_execute
     assert "retreat_waypoints" in mass_source
     assert mass_source[attach_scene:validity_service].count(
         "retreat_waypoints, 0.005, 0.0, retreat_trajectory, true") == 1
@@ -364,11 +366,20 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert alignment_segment_navigation < final_heading_navigation
     assert "final dispatch heading moved beyond the alignment segment bound" in mass_source
     assert "geometry_msgs::msg::Pose pre_place = grasp" in mass_source
+    assert "kPrePlaceRadialClearance = 0.080" in mass_source
+    assert "release_radial_yaw" in mass_source
+    assert "above_release.position.z = pre_place.position.z" in mass_source
+    assert "release -> above_release" in mass_source
+    assert "above_release -> pre_place" in mass_source
+    assert "retained_placement_solutions" in mass_source
     assert "product_attached" in mass_source[before_alignment_guard:alignment_navigation]
     assert 'native_attachment_state_is("attached")' in mass_source[
         before_alignment_guard:alignment_navigation]
     assert "top_down_radial_quaternion" in mass_source
-    assert "atan2(pre_place_base[1], pre_place_base[0])" in mass_source
+    assert "pre_place.position.x = pre_place_base[0] +" in mass_source
+    assert "pre_place.position.y = pre_place_base[1] +" in mass_source
+    assert "kPrePlaceRadialClearance * release_base[0] / release_radius" in mass_source
+    assert "kPrePlaceRadialClearance * release_base[1] / release_radius" in mass_source
     assert "const double map_aligned_product_yaw = wrap_yaw(-alignment_yaw)" in mass_source
     assert "map_aligned_product_yaw_pi = wrap_yaw" in mass_source
     assert "std::abs(map_aligned_product_yaw) <= std::abs(map_aligned_product_yaw_pi)" in mass_source
@@ -394,15 +405,14 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "result.z /= norm" in orientation_source
     assert "result.w /= norm" in orientation_source
     release_seed = mass_source.index("placement_release_seed{")
-    release_preflight = mass_source.index(
-        'placement_ik_state->setFromIK(\n        manipulator_group, release, "gripper_tcp", 0.5)')
+    release_preflight = mass_source.index("solve_retained_ik(release")
     pre_place_preflight = mass_source.index(
-        "deterministic placement IK continuation failed")
+        "const auto & pre_place_ik_solution = retained_placement_solutions.back()")
     pre_place_ik = mass_source.index("arm.setJointValueTarget(pre_place_ik_solution)")
     pre_place_ompl = mass_source.index("arm.plan(pre_place_plan)")
-    lower = mass_source.index("Cartesian placement lower was incomplete")
+    lower = mass_source.index("Measured pre-place endpoint error")
     placement_gate = mass_source.index("selected_slot_position_error() > 0.030", lower)
-    continuation = mass_source.index("continuation_steps")
+    continuation = mass_source.index("release_to_above_release_steps")
     detach_scene_remove = mass_source.index(
         "remove_attached.object.operation = moveit_msgs::msg::CollisionObject::REMOVE")
     post_detach_evidence = mass_source.index(
@@ -423,29 +433,43 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
         "set_held_product_finger_collision(false)", restore_in_catch + 1)
     post_retreat_state = mass_source.index(
         "post_retreat_state = arm.getCurrentState(3.0)", restore_after_retreat)
+    post_retreat_scene_proof = mass_source.index(
+        "planning_scene_attached_object_proof(false)", post_retreat_state)
     post_retreat_response = mass_source.index(
-        "post_retreat_validity_response", post_retreat_state)
-    post_retreat_gate = mass_source.index(
-        "!post_retreat_validity_response->valid", post_retreat_response)
+        "validate_state(*post_retreat_state", post_retreat_scene_proof)
+    post_retreat_gate = post_retreat_response
     empty_stow = mass_source.index(
         "arm.setJointValueTarget(stow)", post_retreat_gate)
     assert after_alignment_pose < release_seed < release_preflight
     assert release_preflight < continuation < pre_place_preflight
-    assert pre_place_preflight < pre_place_ik < pre_place_ompl < lower < placement_gate
+    lower_validation = mass_source.index(
+        "Validate the measured-current-to-first-point segment", lower)
+    lower_time_parameterization = mass_source.index(
+        "IterativeParabolicTimeParameterization", lower_validation)
+    lower_execution = mass_source.index("arm.execute(lower_plan)", lower_time_parameterization)
+    assert pre_place_preflight < pre_place_ik < pre_place_ompl < lower < lower_validation
+    assert lower_validation < lower_time_parameterization < lower_execution < placement_gate
     assert lower < detach_scene_remove < post_detach_evidence < finger_allow
     assert finger_allow < post_retreat_waypoints < post_retreat_path < post_retreat_execute
     assert post_retreat_execute < restore_in_catch < restore_after_retreat
-    assert restore_after_retreat < post_retreat_state < post_retreat_response
-    assert post_retreat_response < post_retreat_gate < empty_stow
+    assert restore_after_retreat < post_retreat_state < post_retreat_scene_proof
+    assert post_retreat_scene_proof < post_retreat_response < empty_stow
     assert "placement_ik_state->satisfiesBounds(manipulator_group)" in mass_source
     assert "expected_placement_joint_names" in mass_source
     assert '"arm_joint_1", "arm_joint_2", "arm_joint_3"' in mass_source
     assert "manipulator_group->getVariableNames() != expected_placement_joint_names" in mass_source
     assert "finite_joint_values" in mass_source
-    assert "copyJointGroupPositions(manipulator_group, release_ik_solution)" in mass_source
-    assert "pre_place_ik_solution = continuation_solution" in mass_source
-    assert "setJointGroupPositions(manipulator_group, continuation_solution)" in mass_source
-    assert "std::ceil(std::abs(vertical_delta) / 0.005)" in mass_source
+    assert "copyJointGroupPositions(manipulator_group, seed)" in mass_source
+    assert "const auto & pre_place_ik_solution = retained_placement_solutions.back()" in mass_source
+    assert "retained_placement_solutions" in mass_source
+    assert "executed pre-place endpoint did not match retained IK branch" in mass_source
+    assert '"/check_state_validity service was unavailable"' in mass_source
+    assert "payload-aware state validity failed" in mass_source
+    assert "lower_robot_trajectory" in mass_source
+    assert "computeTimeStamps" in mass_source
+    assert "lower_points.back().positions != release_ik_solution" not in mass_source
+    assert "setJointGroupPositions(manipulator_group, seed)" in mass_source
+    assert "std::ceil(distance / 0.005)" in mass_source
     assert "world_tcp_orientation" in mass_source
     assert "product_relative_orientation.y = -std::sqrt(0.5)" in mass_source
     assert "tcp_offset_world" in mass_source
@@ -455,7 +479,7 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "attached.object.primitive_poses.front().orientation.y = -std::sqrt(0.5)" in mass_source
     assert "pre_place.orientation = amr_manipulation::top_down_radial_quaternion(\n      pre_place_map_yaw)" in mass_source
     assert "top_down_radial_quaternion(\n      pre_place_radial_yaw)" not in mass_source
-    assert "placement_release_seed{\n      -pre_place_radial_yaw" in mass_source
+    assert "placement_release_seed{\n      -release_radial_yaw" in mass_source
     assert "geometry_msgs::msg::Pose release = pre_place" in mass_source
     assert "placed_product" not in mass_source
     assert "set_held_product_finger_collision(true)" in mass_source
@@ -463,9 +487,12 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "gripper_left_finger_link" in mass_source
     assert "gripper_right_finger_link" in mass_source
     assert "ALLOWED_COLLISION_MATRIX" in mass_source
-    assert 'post_retreat_validity_request->group_name = "manipulator"' in mass_source
-    assert "post_retreat_validity_response->contacts" in mass_source
-    assert "post-detach retreat state is invalid" in mass_source
+    assert 'request->group_name = "manipulator"' in mass_source
+    assert "response->contacts" in mass_source
+    assert "payload-aware state validity failed" in mass_source
+    assert "request->robot_state.is_diff = true" in mass_source
+    assert "planning_scene_attached_object_proof(true)" in mass_source
+    assert "placement lower trajectory postconditions: PASS" in mass_source
 
 
 def test_navigation_feedback_and_cancellation_contract_is_fail_closed():

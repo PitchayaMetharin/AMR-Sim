@@ -1,0 +1,32 @@
+frame_id: map
+tag_family: 36h11
+station_tag_size: 0.10
+max_hamming: 0
+stations:
+  home:
+    role: home
+    approach: {x: -4.5, y: 0.0, yaw: 0.0}
+    dock: null
+  pickup_a:
+    role: pickup
+    tag_id: 10
+    approach: {x: 1.5, y: 3.0, yaw: 0.0}
+    dock: {x: 2.4, y: 3.0, yaw: 0.0}
+    egress: {x: 1.9, y: 3.0, yaw: 0.0}
+  pickup_b:
+    role: pickup
+    tag_id: 11
+    approach: {x: 1.5, y: 0.0, yaw: 0.0}
+    dock: {x: 2.4, y: 0.0, yaw: 0.0}
+    egress: {x: 1.9, y: 0.0, yaw: 0.0}
+  pickup_c:
+    role: pickup
+    tag_id: 12
+    approach: {x: 1.5, y: -3.0, yaw: 0.0}
+    dock: {x: 2.4, y: -3.0, yaw: 0.0}
+    egress: {x: 1.9, y: -3.0, yaw: 0.0}
+  dispatch:
+    role: dispatch
+    tag_id: 20
+    approach: {x: -2.5, y: 0.0, yaw: 3.141592653589793}
+    dock: {x: -3.4, y: 0.0, yaw: 3.141592653589793}

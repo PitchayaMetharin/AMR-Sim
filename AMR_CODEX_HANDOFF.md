@@ -1,32 +1,10 @@
 # AMR Project Handoff for Codex
 
-Current session-transfer summary: `SESSION_HANDOFF.md`.
-
 ## Role
 You are the Lead Robotics Engineer responsible for completing this industrial AMR project. Do not teach unless asked.
 
-## Current Project Scope — 2026-07-24
-
-- The current project is a simulation-only academic AMR project.
-- All ROS 2, SLAM, localization, navigation, sensor, PLC-authority, drive, and
-  vehicle behavior runs across the approved Ubuntu and Windows laptops using
-  simulated data.
-- Gazebo Harmonic is the selected simulator.
-- No physical hardware will be purchased, installed, wired, commissioned, or
-  certified in the current project.
-- Jetson Orin Nano Developer Kit, Siemens PLC/network hardware, SICK MRS1000,
-  Xsens MTi-8-5A-DK, ZLAC8030D, motors, battery, and safety equipment remain
-  conceptual candidates for a possible future physical implementation.
-- The BOM is a conceptual engineering reference, not an active procurement
-  list.
-- Physical functional-safety compliance is outside scope. The simulation may
-  model safety architecture and state behavior but shall make no PL/SIL or
-  certification claim.
-
 ## Frozen Decisions
 - Jetson Orin Nano
-- Siemens S7-1500F simulated PLC through PLCSIM Advanced
-- Siemens S7-1200F retained only as a conceptual future physical candidate
 - 2× SICK MRS1000
 - Xsens MTi-8
 - ZLAC8030D
@@ -144,23 +122,7 @@ Whenever specifications are required:
 
 Initial unloaded robot mass:
 
-Approximately 30 kg with a preliminary tolerance of ±5 kg.
-
-This value includes the complete operational reference AMR and excludes
-transported payload. It is a provisional simulation input, not a measured
-physical mass.
-
-Simulated payload:
-
-- Default and initially rated simulated payload: 50 kg.
-- Nominal initial total simulated moving mass: approximately 80 kg.
-- Payload mass shall be a manual Xacro or launch parameter so the user can
-  change it before spawning a later simulation run.
-- Live payload adjustment during an active Gazebo session is not required.
-- Payload center of gravity and inertia shall remain physically consistent
-  with the selected payload mass and geometry.
-- A 300 kg payload may be retained as an optional future simulation stress case
-  and physical design target. It is not the current simulated rating.
+50 kg
 
 Use realistic inertial properties based on simplified geometry.
 
@@ -203,20 +165,11 @@ The robot description shall include:
 - Parameterized dimensions
 - Parameterized sensor positions
 - Parameterized ground clearance
-- Parameterized payload mass with a 50 kg default
-- Consistent payload center of gravity, collision geometry, and inertia
-- Manual payload override before spawning a simulation run
 - Valid TF tree
 
 Primitive geometry shall be used initially.
 
 Detailed CAD meshes are not required.
-
-Final CAD is not a prerequisite for the Phase 6 simulation model. The initial
-robot shall use parameterized boxes and cylinders for chassis, payload,
-wheels, casters, and sensor housings. Later CAD meshes may replace visual
-geometry without changing the validated TF, joint, collision, inertia, or
-controller interfaces.
 
 ---
 
@@ -255,10 +208,6 @@ The robot description phase is NOT complete until:
 - Differential-drive rotation-in-place works.
 - IMU frame is correct.
 - Both MRS1000 frames are correct.
-- The default 50 kg payload produces approximately 80 kg total moving mass and
-  valid inertial properties.
-- A manual payload override before model spawn produces consistent mass,
-  center-of-gravity, collision, and inertia values.
 - Joint-state publishing works.
 - All configurable parameters are documented.
 - All assumptions are documented.

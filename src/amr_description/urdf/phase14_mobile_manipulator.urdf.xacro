@@ -1,0 +1,175 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="phase14_mobile_manipulator">
+  <xacro:arg name="include_generic_payload" default="false"/>
+  <xacro:arg name="controller_config" default=""/>
+  <xacro:arg name="loaded_product" default="false"/>
+  <xacro:arg name="factory_attachment" default="false"/>
+  <xacro:include filename="$(find amr_description)/urdf/amr.urdf.xacro"/>
+  <xacro:include filename="$(find kuka_agilus_support)/urdf/kr6_r900_2_macro.xacro"/>
+
+  <xacro:macro name="arm_position_interface" params="joint initial_position">
+    <joint name="${joint}">
+      <command_interface name="position"/>
+      <state_interface name="position">
+        <param name="initial_value">${initial_position}</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:kuka_kr6_r900_2_robot prefix="arm_" package_name="kuka_agilus_support"/>
+  <joint name="arm_mount_joint" type="fixed">
+    <parent link="base_link"/><child link="arm_base_link"/>
+    <!-- KUKA visual mounting face is flush with the remaining AMR top at z=0.33. -->
+    <origin xyz="0 0 0.33" rpy="0 0 0"/>
+  </joint>
+
+  <link name="gripper_base_link">
+    <visual><geometry><box size="0.10 0.10 0.04"/></geometry></visual>
+    <collision><geometry><box size="0.10 0.10 0.04"/></geometry></collision>
+    <xacro:box_inertia mass="0.4" x="0.10" y="0.10" z="0.04"/>
+  </link>
+  <joint name="gripper_mount_joint" type="fixed">
+    <parent link="arm_tool0"/><child link="gripper_base_link"/>
+    <origin xyz="0 0 0.02"/>
+  </joint>
+  <link name="gripper_left_finger_link">
+    <visual><geometry><box size="0.12 0.025 0.025"/></geometry></visual>
+    <collision><geometry><box size="0.12 0.025 0.025"/></geometry></collision>
+    <xacro:box_inertia mass="0.2" x="0.12" y="0.025" z="0.025"/>
+  </link>
+  <joint name="gripper_finger_joint" type="prismatic">
+    <parent link="gripper_base_link"/><child link="gripper_left_finger_link"/>
+    <origin xyz="0.09 0.035 -0.03"/><axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="0.035" effort="60" velocity="0.05"/>
+  </joint>
+  <link name="gripper_right_finger_link">
+    <visual><geometry><box size="0.12 0.025 0.025"/></geometry></visual>
+    <collision><geometry><box size="0.12 0.025 0.025"/></geometry></collision>
+    <xacro:box_inertia mass="0.2" x="0.12" y="0.025" z="0.025"/>
+  </link>
+  <joint name="gripper_right_finger_joint" type="prismatic">
+    <parent link="gripper_base_link"/><child link="gripper_right_finger_link"/>
+    <origin xyz="0.09 -0.035 -0.03"/><axis xyz="0 -1 0"/>
+    <limit lower="0.0" upper="0.035" effort="60" velocity="0.05"/>
+    <mimic joint="gripper_finger_joint" multiplier="1.0" offset="0.0"/>
+  </joint>
+  <link name="gripper_tcp"/>
+  <joint name="gripper_tcp_joint" type="fixed">
+    <parent link="gripper_base_link"/><child link="gripper_tcp"/>
+    <origin xyz="0.15 0 -0.03"/>
+  </joint>
+
+  <xacro:if value="$(arg factory_attachment)">
+    <gazebo reference="gripper_left_finger_link">
+      <sensor name="left_finger_contact" type="contact">
+        <always_on>true</always_on><update_rate>100</update_rate>
+        <contact>
+          <collision>gripper_left_finger_link_collision</collision>
+          <topic>/amr/simulation/contacts/left_finger</topic>
+        </contact>
+      </sensor>
+    </gazebo>
+    <gazebo reference="gripper_right_finger_link">
+      <sensor name="right_finger_contact" type="contact">
+        <always_on>true</always_on><update_rate>100</update_rate>
+        <contact>
+          <collision>gripper_right_finger_link_collision</collision>
+          <topic>/amr/simulation/contacts/right_finger</topic>
+        </contact>
+      </sensor>
+    </gazebo>
+    <gazebo>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>gripper_left_finger_link</parent_link>
+        <child_model>product_a</child_model><child_link>product</child_link>
+        <attach_topic>/amr/simulation/internal/attachment/product_101/attach</attach_topic>
+        <detach_topic>/amr/simulation/internal/attachment/product_101/detach</detach_topic>
+        <output_topic>/amr/simulation/internal/attachment/product_101/state</output_topic>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>gripper_left_finger_link</parent_link>
+        <child_model>product_b</child_model><child_link>product</child_link>
+        <attach_topic>/amr/simulation/internal/attachment/product_102/attach</attach_topic>
+        <detach_topic>/amr/simulation/internal/attachment/product_102/detach</detach_topic>
+        <output_topic>/amr/simulation/internal/attachment/product_102/state</output_topic>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>gripper_left_finger_link</parent_link>
+        <child_model>product_c</child_model><child_link>product</child_link>
+        <attach_topic>/amr/simulation/internal/attachment/product_103/attach</attach_topic>
+        <detach_topic>/amr/simulation/internal/attachment/product_103/detach</detach_topic>
+        <output_topic>/amr/simulation/internal/attachment/product_103/state</output_topic>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+
+  <link name="product_camera_link">
+    <visual><geometry><box size="0.08 0.05 0.05"/></geometry></visual>
+    <collision><geometry><box size="0.08 0.05 0.05"/></geometry></collision>
+    <xacro:box_inertia mass="0.3" x="0.08" y="0.05" z="0.05"/>
+  </link>
+  <joint name="product_camera_joint" type="fixed">
+    <parent link="base_link"/><child link="product_camera_link"/>
+    <origin xyz="0.25 0 0.65" rpy="0 0 0"/>
+  </joint>
+  <link name="product_camera_optical_frame"/>
+  <joint name="product_camera_optical_joint" type="fixed">
+    <parent link="product_camera_link"/><child link="product_camera_optical_frame"/>
+    <origin rpy="-1.57079632679 0 -1.57079632679"/>
+  </joint>
+  <gazebo reference="product_camera_link">
+    <sensor name="product_camera" type="rgbd_camera">
+      <always_on>true</always_on>
+      <update_rate>10</update_rate>
+      <topic>/amr/simulation/sensors/product_camera</topic>
+      <gz_frame_id>product_camera_optical_frame</gz_frame_id>
+      <camera>
+        <horizontal_fov>1.0471975512</horizontal_fov>
+        <image><width>640</width><height>480</height></image>
+        <clip><near>0.1</near><far>5.0</far></clip>
+      </camera>
+    </sensor>
+  </gazebo>
+
+  <xacro:if value="$(arg loaded_product)">
+    <link name="stowed_product_link">
+      <visual><geometry><box size="0.30 0.20 0.15"/></geometry></visual>
+      <collision><geometry><box size="0.30 0.20 0.15"/></geometry></collision>
+      <xacro:box_inertia mass="5.0" x="0.30" y="0.20" z="0.15"/>
+    </link>
+    <joint name="stowed_product_joint" type="fixed">
+      <parent link="gripper_tcp"/><child link="stowed_product_link"/>
+      <origin xyz="0.15 0 0"/>
+    </joint>
+  </xacro:if>
+
+  <ros2_control name="Phase14MobileManipulatorSystem" type="system">
+    <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
+    <xacro:arm_position_interface joint="arm_joint_1" initial_position="0.0"/>
+    <xacro:arm_position_interface joint="arm_joint_2" initial_position="-1.5708"/>
+    <xacro:arm_position_interface joint="arm_joint_3" initial_position="1.5708"/>
+    <xacro:arm_position_interface joint="arm_joint_4" initial_position="0.0"/>
+    <xacro:arm_position_interface joint="arm_joint_5" initial_position="0.0"/>
+    <xacro:arm_position_interface joint="arm_joint_6" initial_position="0.0"/>
+    <joint name="gripper_finger_joint">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.02</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="gripper_right_finger_joint">
+      <param name="mimic">gripper_finger_joint</param>
+      <param name="multiplier">1.0</param>
+      <state_interface name="position"><param name="initial_value">0.02</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(arg controller_config)</parameters>
+    </plugin>
+  </gazebo>
+</robot>

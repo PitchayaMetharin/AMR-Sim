@@ -1,0 +1,39 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+    use_sim_time: true
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+    gripper_controller:
+      type: position_controllers/GripperActionController
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+gz_ros2_control:
+  ros__parameters:
+    position_proportional_gain: 1.0
+
+arm_controller:
+  ros__parameters:
+    joints: [arm_joint_1, arm_joint_2, arm_joint_3, arm_joint_4, arm_joint_5, arm_joint_6]
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    constraints:
+      goal_time: 1.0
+      stopped_velocity_tolerance: 0.01
+      arm_joint_1: {trajectory: 0.05, goal: 0.01}
+      arm_joint_2: {trajectory: 0.05, goal: 0.01}
+      arm_joint_3: {trajectory: 0.05, goal: 0.01}
+      arm_joint_4: {trajectory: 0.05, goal: 0.01}
+      arm_joint_5: {trajectory: 0.05, goal: 0.01}
+      arm_joint_6: {trajectory: 0.05, goal: 0.01}
+
+gripper_controller:
+  ros__parameters:
+    joint: gripper_finger_joint
+    action_monitor_rate: 20.0
+    goal_tolerance: 0.002
+    max_effort: 60.0
+    allow_stalling: true
+    stall_velocity_threshold: 0.001
+    stall_timeout: 1.0

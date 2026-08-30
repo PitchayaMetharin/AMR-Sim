@@ -1,0 +1,120 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Name: SLAM Map
+      Enabled: true
+      Topic:
+        Value: /map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Value: true
+    - Class: rviz_default_plugins/Grid
+      Name: Ground Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 50
+      Color: 160; 160; 164
+      Value: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: AMR Model
+      Enabled: true
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Visual Enabled: true
+      Collision Enabled: false
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: Sensor Frames
+      Enabled: true
+      Frame Timeout: 15
+      Marker Scale: 0.25
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: Front LiDAR Scan (red)
+      Enabled: true
+      Topic: /amr/sensors/front_lidar/scan
+      Color: 255; 0; 0
+      Color Transformer: FlatColor
+      Decay Time: 0.5
+      Queue Size: 10
+      Size (Pixels): 4
+      Style: Flat Squares
+      Use Fixed Frame: true
+      Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: Rear LiDAR Scan (green)
+      Enabled: true
+      Topic: /amr/sensors/rear_lidar/scan
+      Color: 0; 255; 0
+      Color Transformer: FlatColor
+      Decay Time: 0.5
+      Queue Size: 10
+      Size (Pixels): 4
+      Style: Flat Squares
+      Use Fixed Frame: true
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Front LiDAR Cloud (red)
+      Enabled: true
+      Topic: /amr/sensors/front_lidar/points
+      Color: 255; 64; 64
+      Color Transformer: FlatColor
+      Decay Time: 0.5
+      Queue Size: 10
+      Size (Pixels): 2
+      Style: Points
+      Use Fixed Frame: true
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Rear LiDAR Cloud (green)
+      Enabled: true
+      Topic: /amr/sensors/rear_lidar/points
+      Color: 64; 255; 64
+      Color Transformer: FlatColor
+      Decay Time: 0.5
+      Queue Size: 10
+      Size (Pixels): 2
+      Style: Points
+      Use Fixed Frame: true
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 220; 220; 220
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.7
+      Target Frame: base_footprint
+      Yaw: 0.8
+      Value: Orbit (rviz)

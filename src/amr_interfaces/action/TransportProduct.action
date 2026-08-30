@@ -1,0 +1,19 @@
+string pickup_station_id
+string destination_station_id
+---
+uint8 SUCCESS=0
+uint8 NAVIGATION_FAILED=1
+uint8 PICK_FAILED=2
+uint8 PLACE_FAILED=3
+uint8 CANCELED=4
+uint8 INTERLOCK_FAILED=5
+uint8 DEPENDENCY_UNAVAILABLE=6
+
+bool delivered
+uint8 outcome
+string message
+---
+uint8 phase
+uint32 queue_position
+string current_station_id
+bool product_attached

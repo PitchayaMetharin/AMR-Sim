@@ -13,8 +13,8 @@ It does not create a robot model or begin a later phase.
 - Nominal initial total simulated moving mass: approximately 80 kg.
 - Payload will be a manual Xacro or launch parameter selected before model
   spawn.
-- A 300 kg payload is an optional future stress case and physical design target,
-  not the current rating.
+- A 300 kg payload is an optional future simulation stress case, not the
+  current rating.
 - Any payload selection must use consistent mass, center of gravity, collision
   geometry, and inertia.
 
@@ -119,9 +119,8 @@ If higher-load simulation is later requested:
   unacceptable slip, invalid solver behavior, or failed acceptance criteria.
 
 A successful 300 kg simulation would demonstrate only that the selected
-mathematical model remained stable under that scenario. It would not validate
-physical structure, motor torque, thermal capability, caster rating, traction,
-braking, or personnel safety.
+mathematical model remained stable under that scenario. It would not establish
+real-world equipment or personnel-safety performance.
 
 ### Navigation and fault gate
 
@@ -131,8 +130,7 @@ Later phases shall add:
 - LiDAR/IMU noise, delay, dropout, and transform-fault injection;
 - blocked-path, canceled-goal, localization-loss, and communication-loss tests;
 - Nav2 and MPC constraint, recovery, and mission-success testing;
-- simulated PLC permissive, heartbeat, fault-latch, reset, and stopped-state
-  tests.
+- command freshness, plant-watchdog, and stopped-state tests.
 
 ## Idealized Stopping-Distance Bounds
 
@@ -164,5 +162,5 @@ guaranteed emergency-stop performance.
 4. Keep the initial 0.5 m/s and 0.4 rad/s commissioning limits.
 5. Require automated mass, inertia, TF, ground-contact, spawn, and motion tests
    before navigation tuning.
-6. Keep every physical-safety and 300 kg hardware-capability claim explicitly
+6. Keep every real-world equipment, safety, and 300 kg capability claim
    outside simulation evidence.

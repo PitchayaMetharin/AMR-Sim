@@ -1,0 +1,319 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="amr">
+  <!--
+    CAD-visual simulation representation.  The legacy export remains
+    untouched; derived CAD meshes are visual-only and all active collisions
+    use conservative primitives.
+  -->
+  <xacro:arg name="payload_mass" default="50.0"/>
+  <xacro:arg name="payload_x" default="0.70"/>
+  <xacro:arg name="payload_y" default="0.50"/>
+  <xacro:arg name="payload_z" default="0.35"/>
+  <xacro:arg name="include_generic_payload" default="true"/>
+  <xacro:arg name="joint_state_topic" default="/world/amr_world/model/amr/joint_state"/>
+
+  <!-- Geometry values.  Keep the navigation footprint and bottom clearance in lockstep with odometry. -->
+  <xacro:property name="wheel_radius" value="0.1128"/>
+  <xacro:property name="wheel_width" value="0.16"/>
+  <xacro:property name="wheel_separation" value="0.566"/>
+  <xacro:property name="caster_radius" value="0.0393"/>
+  <xacro:property name="caster_width" value="0.0421"/>
+  <xacro:property name="base_footprint_height" value="0.0478"/>
+  <xacro:property name="chassis_x" value="1.20"/>
+  <xacro:property name="chassis_y" value="0.80"/>
+  <xacro:property name="chassis_z" value="0.35"/>
+  <xacro:property name="chassis_center_z" value="0.155"/>
+  <xacro:property name="generic_payload_support_top_z" value="0.54263913635"/>
+  <xacro:property name="generic_payload_clearance" value="0.01"/>
+  <xacro:property name="payload_mass_value" value="$(arg payload_mass)"/>
+  <xacro:property name="payload_x_value" value="$(arg payload_x)"/>
+  <xacro:property name="payload_y_value" value="$(arg payload_y)"/>
+  <xacro:property name="payload_z_value" value="$(arg payload_z)"/>
+  <xacro:property name="payload_mass_checked" value="${payload_mass_value if math.isfinite(payload_mass_value) and payload_mass_value &gt; 0 else xacro.fatal('payload_mass must be finite and positive')}"/>
+  <xacro:property name="payload_x_checked" value="${payload_x_value if math.isfinite(payload_x_value) and payload_x_value &gt; 0 else xacro.fatal('payload_x must be finite and positive')}"/>
+  <xacro:property name="payload_y_checked" value="${payload_y_value if math.isfinite(payload_y_value) and payload_y_value &gt; 0 else xacro.fatal('payload_y must be finite and positive')}"/>
+  <xacro:property name="payload_z_checked" value="${payload_z_value if math.isfinite(payload_z_value) and payload_z_value &gt; 0 else xacro.fatal('payload_z must be finite and positive')}"/>
+
+  <!-- Legacy CAD export colors, made explicit for Gazebo Harmonic. -->
+  <xacro:property name="cad_body_rgba" value="0.752941176470588 0.752941176470588 0.752941176470588 1"/>
+  <xacro:property name="cad_bluegray_rgba" value="0.792156862745098 0.819607843137255 0.933333333333333 1"/>
+
+  <xacro:macro name="cad_material" params="name rgba">
+    <material name="${name}">
+      <color rgba="${rgba}"/>
+    </material>
+  </xacro:macro>
+
+  <xacro:macro name="box_inertia" params="mass x y z">
+    <inertial>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass * (y*y + z*z) / 12.0}"
+               ixy="0" ixz="0"
+               iyy="${mass * (x*x + z*z) / 12.0}"
+               iyz="0" izz="${mass * (x*x + y*y) / 12.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <xacro:macro name="cylinder_inertia" params="mass radius length">
+    <inertial>
+      <mass value="${mass}"/>
+      <inertia ixx="${mass * (3*radius*radius + length*length) / 12.0}"
+               ixy="0" ixz="0"
+               iyy="${mass * (3*radius*radius + length*length) / 12.0}"
+               iyz="0" izz="${mass * radius*radius / 2.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <xacro:macro name="drive_wheel" params="name y rpy axis_z">
+    <link name="${name}">
+      <visual name="cad_visual">
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><mesh filename="package://amr_description/meshes/${name}_link.STL"/></geometry>
+        <xacro:cad_material name="cad_bluegray" rgba="${cad_bluegray_rgba}"/>
+      </visual>
+      <collision>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <xacro:cylinder_inertia mass="2.0" radius="${wheel_radius}" length="${wheel_width}"/>
+    </link>
+    <joint name="${name}_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${name}"/>
+      <!-- Center the drive cylinder at z=0.1128 m in the world. -->
+      <origin xyz="0 ${y} ${wheel_radius - base_footprint_height}" rpy="${rpy} 0 0"/>
+      <axis xyz="0 0 ${axis_z}"/>
+      <dynamics damping="0.7" friction="0.7"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:macro name="passive_caster" params="name x y body_mesh body_z wheel_mesh wheel_x wheel_y">
+    <!-- The mount frame is at the rolling-wheel center and swivels about z. -->
+    <link name="${name}_mount">
+      <visual name="cad_body_visual">
+        <origin xyz="0 0 ${body_z}" rpy="0 0 0"/>
+        <geometry><mesh filename="package://amr_description/meshes/${body_mesh}"/></geometry>
+        <xacro:cad_material name="cad_body" rgba="${cad_body_rgba}"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.04"/>
+        <geometry><box size="0.08 0.08 0.08"/></geometry>
+      </collision>
+      <xacro:box_inertia mass="0.3" x="0.08" y="0.08" z="0.08"/>
+    </link>
+    <joint name="${name}_swivel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${name}_mount"/>
+      <!-- The caster contact point is exactly on the ground plane. -->
+      <origin xyz="${x} ${y} ${caster_radius - base_footprint_height}"/>
+      <axis xyz="0 0 1"/>
+      <dynamics damping="0.05" friction="0.01"/>
+    </joint>
+    <link name="${name}_wheel">
+      <visual name="cad_wheel_visual">
+        <origin xyz="0 0 0" rpy="-1.57079632679 0 0"/>
+        <geometry><mesh filename="package://amr_description/meshes/${wheel_mesh}"/></geometry>
+        <xacro:cad_material name="cad_body" rgba="${cad_body_rgba}"/>
+      </visual>
+      <collision>
+        <geometry><cylinder radius="${caster_radius}" length="${caster_width}"/></geometry>
+      </collision>
+      <xacro:cylinder_inertia mass="0.4" radius="${caster_radius}" length="${caster_width}"/>
+    </link>
+    <joint name="${name}_wheel_joint" type="continuous">
+      <parent link="${name}_mount"/>
+      <child link="${name}_wheel"/>
+      <origin xyz="${wheel_x} ${wheel_y} 0" rpy="1.57079632679 0 0"/>
+      <axis xyz="0 0 1"/>
+      <dynamics damping="0.05" friction="0.01"/>
+    </joint>
+    <gazebo reference="${name}_wheel">
+      <mu1>0.01</mu1>
+      <mu2>0.01</mu2>
+    </gazebo>
+  </xacro:macro>
+
+  <link name="base_footprint"/>
+  <link name="base_link">
+    <!-- Derived CAD visual; the primitive collision preserves the footprint, bottom -0.02, and top 0.33. -->
+    <visual name="cad_visual">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://amr_description/meshes/base_link.STL"/></geometry>
+      <xacro:cad_material name="cad_body" rgba="${cad_body_rgba}"/>
+    </visual>
+    <collision name="lower_chassis_collision">
+      <origin xyz="0 0 ${chassis_center_z}"/>
+      <geometry><box size="${chassis_x} ${chassis_y} ${chassis_z}"/></geometry>
+    </collision>
+    <!-- Provisional base-only mass/inertia; not a hardware rating. -->
+    <xacro:box_inertia mass="22.15" x="${chassis_x}" y="${chassis_y}" z="${chassis_z}"/>
+  </link>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${base_footprint_height}"/>
+  </joint>
+
+  <!-- Generic payload remains base-only default-on at its existing support height. -->
+  <xacro:if value="$(arg include_generic_payload)">
+    <link name="payload_link">
+      <visual>
+        <geometry><box size="${payload_x_checked} ${payload_y_checked} ${payload_z_checked}"/></geometry>
+        <xacro:cad_material name="payload_orange" rgba="1 0.45 0.05 1"/>
+      </visual>
+      <collision>
+        <geometry><box size="${payload_x_checked} ${payload_y_checked} ${payload_z_checked}"/></geometry>
+      </collision>
+      <xacro:box_inertia mass="${payload_mass_checked}" x="${payload_x_checked}" y="${payload_y_checked}" z="${payload_z_checked}"/>
+    </link>
+    <joint name="payload_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="payload_link"/>
+      <origin xyz="0 0 ${generic_payload_support_top_z + generic_payload_clearance + payload_z_checked / 2.0}"/>
+    </joint>
+  </xacro:if>
+
+  <xacro:drive_wheel name="left_wheel" y="${wheel_separation / 2.0}" rpy="-1.57079632679" axis_z="1"/>
+  <xacro:drive_wheel name="right_wheel" y="${-wheel_separation / 2.0}" rpy="1.57079632679" axis_z="-1"/>
+
+  <!-- Exported CAD mount coordinates with passive primitive collisions. -->
+  <xacro:passive_caster name="front_left_caster" x="0.32" y="0.165"
+                        body_mesh="left_caster_front_link_body.STL" body_z="0.0568"
+                        wheel_mesh="left_caster_front_link_wheel.STL"
+                        wheel_x="-0.025" wheel_y="0.0000775"/>
+  <xacro:passive_caster name="front_right_caster" x="0.32" y="-0.165"
+                        body_mesh="right_caster_front_link_body.STL" body_z="0.065"
+                        wheel_mesh="right_caster_front_link_wheel.STL"
+                        wheel_x="-0.025" wheel_y="-0.0000775"/>
+  <xacro:passive_caster name="rear_left_caster" x="-0.32" y="0.165"
+                        body_mesh="left_caster_back_link_body.STL" body_z="0.0568"
+                        wheel_mesh="left_caster_back_link_wheel.STL"
+                        wheel_x="0.025" wheel_y="0.0000775"/>
+  <xacro:passive_caster name="rear_right_caster" x="-0.32" y="-0.165"
+                        body_mesh="right_caster_back_link_body.STL" body_z="0.0568"
+                        wheel_mesh="right_caster_back_link_wheel.STL"
+                        wheel_x="0.025" wheel_y="-0.0000775"/>
+
+  <!-- Preserve the current provisional IMU frame, topic, and behavior. -->
+  <link name="imu_link">
+    <visual>
+      <geometry><box size="0.05 0.05 0.03"/></geometry>
+      <xacro:cad_material name="imu_purple" rgba="0.55 0.2 0.8 1"/>
+    </visual>
+    <xacro:box_inertia mass="0.05" x="0.05" y="0.05" z="0.03"/>
+  </link>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="0 0 0.18"/>
+  </joint>
+
+  <!-- CAD LiDAR poses are retained as the software frame contract. -->
+  <link name="front_lidar_link">
+    <visual name="cad_visual">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://amr_description/meshes/lidar_front_link.STL"/></geometry>
+      <xacro:cad_material name="cad_bluegray" rgba="${cad_bluegray_rgba}"/>
+    </visual>
+    <collision><geometry><cylinder radius="0.08" length="0.10"/></geometry></collision>
+    <xacro:cylinder_inertia mass="0.5" radius="0.08" length="0.10"/>
+  </link>
+  <joint name="front_lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_lidar_link"/>
+    <origin xyz="0.30805 -0.153 0.47468" rpy="0 0 0"/>
+  </joint>
+  <link name="rear_lidar_link">
+    <visual name="cad_visual">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://amr_description/meshes/lidar_back_link.STL"/></geometry>
+      <xacro:cad_material name="cad_bluegray" rgba="${cad_bluegray_rgba}"/>
+    </visual>
+    <collision><geometry><cylinder radius="0.08" length="0.10"/></geometry></collision>
+    <xacro:cylinder_inertia mass="0.5" radius="0.08" length="0.10"/>
+  </link>
+  <joint name="rear_lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="rear_lidar_link"/>
+    <origin xyz="-0.308 0.153 0.47468" rpy="0 0 -3.1416"/>
+  </joint>
+
+  <gazebo reference="front_lidar_link">
+    <sensor name="front_lidar" type="gpu_lidar">
+      <topic>/amr/simulation/sensors/front_lidar/scan</topic>
+      <gz_frame_id>front_lidar_link</gz_frame_id>
+      <update_rate>10</update_rate>
+      <lidar>
+        <scan>
+          <horizontal><samples>720</samples><resolution>1</resolution><min_angle>-2.4</min_angle><max_angle>2.4</max_angle></horizontal>
+          <vertical><samples>4</samples><resolution>1</resolution><min_angle>0.0</min_angle><max_angle>0.065</max_angle></vertical>
+        </scan>
+        <range><min>0.2</min><max>20.0</max><resolution>0.01</resolution></range>
+      </lidar>
+    </sensor>
+  </gazebo>
+  <gazebo reference="rear_lidar_link">
+    <sensor name="rear_lidar" type="gpu_lidar">
+      <topic>/amr/simulation/sensors/rear_lidar/scan</topic>
+      <gz_frame_id>rear_lidar_link</gz_frame_id>
+      <update_rate>10</update_rate>
+      <lidar>
+        <scan>
+          <horizontal><samples>720</samples><resolution>1</resolution><min_angle>-2.4</min_angle><max_angle>2.4</max_angle></horizontal>
+          <vertical><samples>4</samples><resolution>1</resolution><min_angle>0.0</min_angle><max_angle>0.065</max_angle></vertical>
+        </scan>
+        <range><min>0.2</min><max>20.0</max><resolution>0.01</resolution></range>
+      </lidar>
+    </sensor>
+  </gazebo>
+  <gazebo reference="imu_link">
+    <sensor name="imu" type="imu">
+      <topic>/amr/simulation/sensors/imu/data</topic>
+      <gz_frame_id>imu_link</gz_frame_id>
+      <update_rate>100</update_rate>
+    </sensor>
+  </gazebo>
+
+  <gazebo>
+    <!-- Sole native base command input; the watchdog remains fail-closed. -->
+    <plugin filename="amr-command-watchdog-system" name="amr_simulation::CommandWatchdogSystem">
+      <command_topic>/model/amr/cmd_vel</command_topic>
+      <enable_topic>/model/amr/enable</enable_topic>
+      <command_timeout_ms>200</command_timeout_ms>
+    </plugin>
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>${wheel_separation}</wheel_separation>
+      <wheel_radius>${wheel_radius}</wheel_radius>
+      <min_linear_velocity>-0.5</min_linear_velocity>
+      <max_linear_velocity>0.5</max_linear_velocity>
+      <min_angular_velocity>-0.4</min_angular_velocity>
+      <max_angular_velocity>0.4</max_angular_velocity>
+      <min_linear_acceleration>-0.5</min_linear_acceleration>
+      <max_linear_acceleration>0.5</max_linear_acceleration>
+      <min_angular_acceleration>-0.4</min_angular_acceleration>
+      <max_angular_acceleration>0.4</max_angular_acceleration>
+      <!-- Publish stationary and moving odometry at the adapter's 20 Hz
+           freshness budget; an explicit rate prevents the Harmonic DiffDrive
+           default from leaving the raw odometry topic silent. -->
+      <odom_publish_frequency>50</odom_publish_frequency>
+      <topic>/model/amr/cmd_vel</topic>
+      <odom_topic>/model/amr/odometry</odom_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+    </plugin>
+    <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
+      <topic>$(arg joint_state_topic)</topic>
+    </plugin>
+    <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+      <publish_model_pose>true</publish_model_pose>
+      <publish_link_pose>false</publish_link_pose>
+      <publish_sensor_pose>false</publish_sensor_pose>
+      <publish_collision_pose>false</publish_collision_pose>
+      <publish_visual_pose>false</publish_visual_pose>
+      <publish_nested_model_pose>false</publish_nested_model_pose>
+      <use_pose_vector_msg>false</use_pose_vector_msg>
+      <static_publisher>false</static_publisher>
+    </plugin>
+  </gazebo>
+</robot>

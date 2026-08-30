@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -16,12 +17,14 @@
 #include "amr_interfaces/msg/manipulator_status.hpp"
 #include "amr_interfaces/qos_profiles.hpp"
 #include "amr_manipulation/attachment_gate.hpp"
+#include "builtin_interfaces/msg/duration.hpp"
 #include "control_msgs/action/gripper_command.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "moveit/move_group_interface/move_group_interface.h"
 #include "moveit/planning_scene_interface/planning_scene_interface.h"
 #include "moveit/robot_state/conversions.h"
 #include "moveit/robot_state/robot_state.h"
+#include "moveit/robot_trajectory/robot_trajectory.h"
 #include "moveit_msgs/msg/attached_collision_object.hpp"
 #include "moveit_msgs/msg/collision_object.hpp"
 #include "moveit_msgs/msg/planning_scene.hpp"
@@ -38,6 +41,9 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_srvs/srv/trigger.hpp"
+#include "moveit/trajectory_processing/iterative_time_parameterization.h"
+#include "trajectory_msgs/msg/joint_trajectory_point.hpp"
 
 namespace amr_manipulation {
 using namespace std::chrono_literals;
@@ -138,6 +144,8 @@ class MassStageNode final : public rclcpp::Node {
       this, "/amr/mission/navigate_to_pose");
     egress_client_ = rclcpp_action::create_client<nav2_msgs::action::BackUp>(
       this, "/amr/control/dock_egress");
+    bootstrap_client_ = create_client<std_srvs::srv::Trigger>(
+      "/amr/simulation/attachment_bootstrap/verify");
     status_timer_ = create_wall_timer(50ms, [this]() { publish_status(); });
     set_status(amr_interfaces::msg::ManipulatorStatus::STARTING, false, false,
       "Gate 6 mass stage is starting");
@@ -827,6 +835,31 @@ class MassStageNode final : public rclcpp::Node {
     return bounded_reverse(distance, "Dock egress", client_timeout);
   }
 
+  bool verify_attachment_bootstrap(std::chrono::seconds timeout) {
+    if (!bootstrap_client_->wait_for_service(timeout)) {
+      RCLCPP_ERROR(
+        get_logger(), "attachment bootstrap verify service was unavailable");
+      return false;
+    }
+    auto future = bootstrap_client_->async_send_request(
+      std::make_shared<std_srvs::srv::Trigger::Request>());
+    if (future.wait_for(timeout) != std::future_status::ready) {
+      RCLCPP_ERROR(
+        get_logger(), "attachment bootstrap verify request timed out");
+      return false;
+    }
+    const auto response = future.get();
+    if (!response || !response->success) {
+      RCLCPP_ERROR(
+        get_logger(), "attachment bootstrap verify failed: %s",
+        response ? response->message.c_str() : "null response");
+      return false;
+    }
+    RCLCPP_INFO(get_logger(), "Attachment bootstrap verification passed: %s",
+      response->message.c_str());
+    return true;
+  }
+
   bool request_and_confirm_attachment(std::chrono::seconds timeout) {
     const auto selected = selected_product_index();
     {
@@ -878,38 +911,6 @@ class MassStageNode final : public rclcpp::Node {
     std::lock_guard<std::mutex> lock(evidence_mutex_);
     return attachment_states_[selected] == expected &&
       attachment_state_received_[selected] != SteadyTime{};
-  }
-
-  bool request_and_confirm_initial_detachment(std::chrono::seconds timeout) {
-    {
-      std::lock_guard<std::mutex> lock(evidence_mutex_);
-      if (initial_detachment_attempted_) return false;
-      initial_detachment_attempted_ = true;
-      attachment_states_.fill("");
-      attachment_state_received_.fill(SteadyTime{});
-    }
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    auto next_request = SteadyTime{};
-    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
-      const auto now = std::chrono::steady_clock::now();
-      if (next_request == SteadyTime{} || now >= next_request) {
-        for (const auto & publisher : detach_pubs_) {
-          publisher->publish(std_msgs::msg::Empty{});
-        }
-        next_request = now + 200ms;
-      }
-      {
-        std::lock_guard<std::mutex> lock(evidence_mutex_);
-        bool all_detached = true;
-        for (std::size_t index = 0; index < kProductIds.size(); ++index) {
-          all_detached = all_detached && attachment_states_[index] == "detached" &&
-            attachment_state_received_[index] != SteadyTime{};
-        }
-        if (all_detached) return true;
-      }
-      std::this_thread::sleep_for(20ms);
-    }
-    return false;
   }
 
  private:
@@ -968,7 +969,6 @@ class MassStageNode final : public rclcpp::Node {
   bool have_base_{false}, have_odometry_{false};
   bool have_product_pose_{false}, have_robot_pose_{false}, have_joint_states_{false};
   bool have_reference_{false};
-  bool initial_detachment_attempted_{false};
   std::array<std::string, 3> attachment_states_{};
   bool navigation_feedback_received_{false};
   bool navigation_feedback_invalid_{false};
@@ -997,6 +997,7 @@ class MassStageNode final : public rclcpp::Node {
   rclcpp::Subscription<ros_gz_interfaces::msg::Contacts>::SharedPtr right_contact_sub_;
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr navigation_client_;
   rclcpp_action::Client<nav2_msgs::action::BackUp>::SharedPtr egress_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr bootstrap_client_;
   rclcpp::TimerBase::SharedPtr status_timer_;
 };
 
@@ -1273,9 +1274,9 @@ int main(int argc, char ** argv) {
         if (!node->wait_for_motion_permission(8s, product_attached))
           throw std::runtime_error("fresh READY and stationary evidence timed out");
       };
+    if (!node->verify_attachment_bootstrap(5s))
+      throw std::runtime_error("attachment bootstrap was not READY before motion");
     require_motion_permission();
-    if (!node->request_and_confirm_initial_detachment(3s))
-      throw std::runtime_error("initial detached state was not confirmed for all products");
     if (!node->capture_reference_evidence(3s))
       throw std::runtime_error("fresh dock and product reference evidence timed out");
     if (!amr_manipulation::command_gripper(node, 0.035))
@@ -1596,33 +1597,91 @@ int main(int argc, char ** argv) {
       throw std::runtime_error("product attachment evidence was not stable after loaded retreat");
     }
 
+    // Use one payload-aware state-validity helper for every loaded retreat,
+    // placement-lower, and post-detach request.  The joint state is serialized
+    // as a diff so MoveIt's authoritative planning scene (including
+    // held_product while loaded) is retained; a complete state with
+    // is_diff=false can silently validate an unloaded arm.
+    auto validity_client = node->create_client<moveit_msgs::srv::GetStateValidity>(
+      "/check_state_validity");
+    if (!validity_client->wait_for_service(3s))
+      throw std::runtime_error("/check_state_validity service was unavailable");
+    const auto validate_state =
+      [&node, &validity_client](const moveit::core::RobotState & state,
+      const std::string & sample_label) {
+        auto request = std::make_shared<moveit_msgs::srv::GetStateValidity::Request>();
+        moveit::core::robotStateToRobotStateMsg(
+          state, request->robot_state, false);
+        request->robot_state.is_diff = true;
+        request->group_name = "manipulator";
+        auto future = validity_client->async_send_request(request);
+        if (future.wait_for(3s) != std::future_status::ready)
+          throw std::runtime_error(
+                  "/check_state_validity request timed out at " + sample_label);
+        const auto response = future.get();
+        if (!response)
+          throw std::runtime_error(
+                  "/check_state_validity returned no response at " + sample_label);
+        for (const auto & contact : response->contacts) {
+          RCLCPP_WARN(
+            node->get_logger(), "MoveIt validity contact [%s]: %s <-> %s",
+            sample_label.c_str(), contact.contact_body_1.c_str(), contact.contact_body_2.c_str());
+        }
+        if (!response->valid) {
+          RCLCPP_ERROR(
+            node->get_logger(), "first invalid sample: %s", sample_label.c_str());
+          throw std::runtime_error("payload-aware state validity failed at " + sample_label);
+        }
+      };
+
+    const auto planning_scene_attached_object_proof =
+      [&node](const bool require_held_product) {
+        auto client = node->create_client<moveit_msgs::srv::GetPlanningScene>(
+          "/get_planning_scene");
+        if (!client->wait_for_service(3s))
+          throw std::runtime_error("/get_planning_scene service was unavailable");
+        auto request = std::make_shared<moveit_msgs::srv::GetPlanningScene::Request>();
+        request->components.components =
+          moveit_msgs::msg::PlanningSceneComponents::ROBOT_STATE_ATTACHED_OBJECTS;
+        auto future = client->async_send_request(request);
+        if (future.wait_for(3s) != std::future_status::ready)
+          throw std::runtime_error("/get_planning_scene attached-object proof timed out");
+        const auto response = future.get();
+        if (!response)
+          throw std::runtime_error("/get_planning_scene attached-object proof returned no response");
+        const auto & attached = response->scene.robot_state.attached_collision_objects;
+        const auto held = std::find_if(attached.begin(), attached.end(),
+          [](const auto & object) { return object.object.id == "held_product"; });
+        if (!require_held_product) {
+          if (held != attached.end())
+            throw std::runtime_error("held_product remained in the planning scene after detachment");
+          RCLCPP_INFO(node->get_logger(),
+            "Gate 6 planning-scene attached object proof: held_product absent");
+          return;
+        }
+        const std::set<std::string> expected_touch_links{
+          "gripper_left_finger_link", "gripper_right_finger_link", "gripper_base_link"};
+        if (attached.size() != 1 || held == attached.end() ||
+          held->link_name != "gripper_left_finger_link" ||
+          held->touch_links.size() != expected_touch_links.size() ||
+          std::set<std::string>(held->touch_links.begin(), held->touch_links.end()) !=
+          expected_touch_links)
+        {
+          throw std::runtime_error(
+                  "planning-scene held_product attachment/link/touch-link proof failed");
+        }
+        RCLCPP_INFO(node->get_logger(),
+          "Gate 6 planning-scene attached object proof: held_product attached to "
+          "gripper_left_finger_link with exact touch links");
+      };
+
     // Validate a fresh state after the complete retreat, before asking MoveIt
     // to plan any free-space loaded motion.  Every reported contact is kept
     // in the log so an invalid state fails closed with actionable evidence.
     auto current_state = arm.getCurrentState(3.0);
     if (!current_state)
       throw std::runtime_error("fresh MoveIt current state was unavailable");
-    auto validity_client = node->create_client<moveit_msgs::srv::GetStateValidity>(
-      "/check_state_validity");
-    if (!validity_client->wait_for_service(3s))
-      throw std::runtime_error("/check_state_validity service was unavailable");
-    auto validity_request =
-      std::make_shared<moveit_msgs::srv::GetStateValidity::Request>();
-    moveit::core::robotStateToRobotStateMsg(*current_state, validity_request->robot_state);
-    validity_request->group_name = "manipulator";
-    auto validity_future = validity_client->async_send_request(validity_request);
-    if (validity_future.wait_for(3s) != std::future_status::ready)
-      throw std::runtime_error("/check_state_validity request timed out");
-    const auto validity_response = validity_future.get();
-    if (!validity_response)
-      throw std::runtime_error("/check_state_validity returned no response");
-    for (const auto & contact : validity_response->contacts) {
-      RCLCPP_WARN(
-        node->get_logger(), "MoveIt state contact: %s <-> %s",
-        contact.contact_body_1.c_str(), contact.contact_body_2.c_str());
-    }
-    if (!validity_response->valid)
-      throw std::runtime_error("fresh loaded retreat state is invalid");
+    validate_state(*current_state, "loaded retreat");
 
     const std::vector<double> stow{0.0, -1.5708, 1.5708, 0.0, 0.0, 0.0};
     if (!arm.setJointValueTarget(stow)) throw std::runtime_error("loaded stow target was rejected");
@@ -1806,6 +1865,7 @@ int main(int argc, char ** argv) {
     constexpr double kMaxPlacementAlignmentYawError = 0.15;
     constexpr double kMaxPlacementReleaseRadius = 0.785;
     constexpr double kPlacementReachReserve = 0.005;
+    constexpr double kPrePlaceRadialClearance = 0.080;
     constexpr double kDesiredSlotBaseRadius =
       kMaxPlacementReleaseRadius - kMaxPlacementAlignmentPositionError -
       kPlacementReachReserve;
@@ -2057,16 +2117,26 @@ int main(int argc, char ** argv) {
     if (!scene.applyCollisionObject(dispatch_surface))
       throw std::runtime_error("dispatch surface collision object was rejected");
 
-    geometry_msgs::msg::Pose pre_place = grasp;
-    pre_place.position.x = pre_place_base[0];
-    pre_place.position.y = pre_place_base[1];
-    pre_place.position.z = pre_place_base[2] + 0.080;
-    const double pre_place_radial_yaw = std::atan2(pre_place_base[1], pre_place_base[0]);
-    if (!std::isfinite(pre_place_radial_yaw))
-      throw std::runtime_error("placement radial direction was invalid");
     const double release_radius = std::hypot(release_base[0], release_base[1]);
-    if (!std::isfinite(release_radius) || release_radius > kMaxPlacementReleaseRadius)
+    if (!std::isfinite(release_radius) || release_radius <= 0.0 ||
+      !std::isfinite(kPrePlaceRadialClearance) || kPrePlaceRadialClearance <= 0.0 ||
+      release_radius > kMaxPlacementReleaseRadius)
       throw std::runtime_error("placement target was outside the deterministic IK envelope");
+    const double release_radial_yaw = std::atan2(release_base[1], release_base[0]);
+    if (!std::isfinite(release_radial_yaw))
+      throw std::runtime_error("placement radial direction was invalid");
+    // Keep the exact release target unchanged, but approach it from a bounded
+    // outward-and-upward waypoint so the loaded product clears base_link.
+    geometry_msgs::msg::Pose pre_place = grasp;
+    pre_place.position.x = pre_place_base[0] +
+      kPrePlaceRadialClearance * release_base[0] / release_radius;
+    pre_place.position.y = pre_place_base[1] +
+      kPrePlaceRadialClearance * release_base[1] / release_radius;
+    pre_place.position.z = pre_place_base[2] + 0.080;
+    const double pre_place_radial_yaw = std::atan2(
+      pre_place.position.y, pre_place.position.x);
+    if (!std::isfinite(pre_place_radial_yaw))
+      throw std::runtime_error("pre-place radial clearance direction was invalid");
     // The held product is represented in base_footprint.  Invert the fresh
     // base/map yaw so its top-down yaw is map-axis aligned, choosing the
     // equivalent pi branch closest to the map x axis.  Keep the radial yaw
@@ -2086,13 +2156,15 @@ int main(int argc, char ** argv) {
     release.position.x = release_base[0];
     release.position.y = release_base[1];
     release.position.z = release_base[2] + 0.080;
+    geometry_msgs::msg::Pose above_release = release;
+    above_release.position.z = pre_place.position.z;
 
     // KDL's reachable placement branch is narrow.  Probe the release endpoint
-    // with an explicit deterministic seed, then continue that branch upward
-    // before asking OMPL to move from loaded stow; never fall back to
-    // approximate IK or the stow seed.
+    // with an explicit deterministic seed, then retain a deterministic L path
+    // release -> above_release -> pre_place.  Never fall back to approximate
+    // IK or the stow seed.
     const std::vector<double> placement_release_seed{
-      -pre_place_radial_yaw, 0.546225552, 0.335934775, 0.0, -0.882160326, 0.0};
+      -release_radial_yaw, 0.546225552, 0.335934775, 0.0, -0.882160326, 0.0};
     auto placement_ik_state = arm.getCurrentState(3.0);
     if (!placement_ik_state)
       throw std::runtime_error("fresh MoveIt state was unavailable for placement IK preflight");
@@ -2114,47 +2186,77 @@ int main(int argc, char ** argv) {
     {
       throw std::runtime_error("placement IK seeds were invalid");
     }
-    placement_ik_state->setJointGroupPositions(manipulator_group, placement_release_seed);
-    placement_ik_state->update();
-    if (!placement_ik_state->setFromIK(
-        manipulator_group, release, "gripper_tcp", 0.5) ||
-      !placement_ik_state->satisfiesBounds(manipulator_group))
-    {
-      throw std::runtime_error("exact seeded release IK preflight failed");
-    }
-    std::vector<double> release_ik_solution;
-    placement_ik_state->copyJointGroupPositions(manipulator_group, release_ik_solution);
-    if (!finite_joint_values(release_ik_solution))
-      throw std::runtime_error("release IK preflight returned invalid joints");
+    const auto solve_retained_ik =
+      [&placement_ik_state, manipulator_group, &finite_joint_values](
+      const geometry_msgs::msg::Pose & pose, std::vector<double> & seed,
+      const char * label) {
+        placement_ik_state->setJointGroupPositions(manipulator_group, seed);
+        placement_ik_state->update();
+        if (!placement_ik_state->setFromIK(
+            manipulator_group, pose, "gripper_tcp", 0.5) ||
+          !placement_ik_state->satisfiesBounds(manipulator_group))
+        {
+          throw std::runtime_error(std::string("deterministic placement IK failed at ") + label);
+        }
+        placement_ik_state->copyJointGroupPositions(manipulator_group, seed);
+        if (!finite_joint_values(seed))
+          throw std::runtime_error(std::string("placement IK returned invalid joints at ") + label);
+      };
+    std::vector<double> release_ik_solution = placement_release_seed;
+    solve_retained_ik(release, release_ik_solution, "release");
 
-    // Continue deterministically from the release branch in 5 mm increments;
-    // this keeps the pre-place solution on the same collision-safe branch even
-    // when the accepted navigation terminal pose is a few centimetres away
-    // from the nominal alignment target.
-    const double vertical_delta = pre_place.position.z - release.position.z;
-    const auto continuation_steps = static_cast<std::size_t>(
-      std::ceil(std::abs(vertical_delta) / 0.005));
-    if (continuation_steps == 0 || continuation_steps > 100)
-      throw std::runtime_error("placement IK continuation geometry was invalid");
-    std::vector<double> continuation_solution = release_ik_solution;
-    for (std::size_t step = 1; step <= continuation_steps; ++step) {
-      auto continuation_pose = release;
-      continuation_pose.position.z += vertical_delta *
-        static_cast<double>(step) / static_cast<double>(continuation_steps);
-      placement_ik_state->setJointGroupPositions(manipulator_group, continuation_solution);
-      placement_ik_state->update();
-      if (!placement_ik_state->setFromIK(
-          manipulator_group, continuation_pose, "gripper_tcp", 0.5) ||
-        !placement_ik_state->satisfiesBounds(manipulator_group))
-      {
-        throw std::runtime_error("deterministic placement IK continuation failed");
-      }
-      placement_ik_state->copyJointGroupPositions(manipulator_group, continuation_solution);
-      if (!finite_joint_values(continuation_solution))
-        throw std::runtime_error("placement IK continuation returned invalid joints");
+    const auto segment_steps = [](const double distance, const char * label) {
+        if (!std::isfinite(distance) || distance <= 0.0)
+          throw std::runtime_error(std::string("placement L-segment geometry was invalid at ") + label);
+        const auto steps = static_cast<std::size_t>(std::ceil(distance / 0.005));
+        if (steps == 0 || steps > 100)
+          throw std::runtime_error(std::string("placement L-segment spacing was invalid at ") + label);
+        return steps;
+      };
+    const double release_to_above_release_distance = std::abs(
+      above_release.position.z - release.position.z);
+    const double above_release_to_pre_place_distance = std::hypot(
+      pre_place.position.x - above_release.position.x,
+      pre_place.position.y - above_release.position.y);
+    const auto release_to_above_release_steps = segment_steps(
+      release_to_above_release_distance, "release -> above_release");
+    const auto above_release_to_pre_place_steps = segment_steps(
+      above_release_to_pre_place_distance, "above_release -> pre_place");
+    std::vector<std::vector<double>> retained_placement_solutions;
+    retained_placement_solutions.reserve(
+      1 + release_to_above_release_steps + above_release_to_pre_place_steps);
+    retained_placement_solutions.push_back(release_ik_solution);
+
+    // Retain the seeded vertical branch.  The exact above_release corner is
+    // pushed once here and is intentionally not duplicated by the horizontal
+    // branch below.
+    std::vector<double> retained_solution = release_ik_solution;
+    for (std::size_t step = 1; step <= release_to_above_release_steps; ++step) {
+      const double fraction = static_cast<double>(step) /
+        static_cast<double>(release_to_above_release_steps);
+      auto retained_pose = release;
+      retained_pose.position.z +=
+        (above_release.position.z - release.position.z) * fraction;
+      solve_retained_ik(retained_pose, retained_solution, "release -> above_release");
+      retained_placement_solutions.push_back(retained_solution);
     }
-    std::vector<double> pre_place_ik_solution;
-    pre_place_ik_solution = continuation_solution;
+    for (std::size_t step = 1; step <= above_release_to_pre_place_steps; ++step) {
+      const double fraction = static_cast<double>(step) /
+        static_cast<double>(above_release_to_pre_place_steps);
+      auto retained_pose = above_release;
+      retained_pose.position.x +=
+        (pre_place.position.x - above_release.position.x) * fraction;
+      retained_pose.position.y +=
+        (pre_place.position.y - above_release.position.y) * fraction;
+      solve_retained_ik(retained_pose, retained_solution, "above_release -> pre_place");
+      retained_placement_solutions.push_back(retained_solution);
+    }
+    if (retained_placement_solutions.size() !=
+      1 + release_to_above_release_steps + above_release_to_pre_place_steps)
+    {
+      throw std::runtime_error("retained placement L path waypoint count was invalid");
+    }
+    const auto & pre_place_ik_solution = retained_placement_solutions.back();
     if (!finite_joint_values(pre_place_ik_solution))
       throw std::runtime_error("pre-place IK preflight returned invalid joints");
 
@@ -2168,14 +2270,192 @@ int main(int argc, char ** argv) {
     if (arm.execute(pre_place_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("pre-place execution failed");
 
-    std::vector<geometry_msgs::msg::Pose> lower_waypoints{release};
+    // The OMPL pre-place plan and the retained IK continuation must meet at
+    // the same measured joint state.  A loose endpoint would make the
+    // controller jump into the first lower waypoint and can leave MoveIt
+    // reporting a partial Cartesian path.  Keep the existing 10 mrad goal
+    // tolerance and fail closed if the executed pre-place plan did not reach
+    // its deterministic endpoint.
+    const auto measured_pre_place = arm.getCurrentJointValues();
+    if (measured_pre_place.size() != pre_place_ik_solution.size())
+      throw std::runtime_error("measured pre-place joint state was incomplete");
+    double pre_place_joint_error = 0.0;
+    for (std::size_t index = 0; index < measured_pre_place.size(); ++index) {
+      if (!std::isfinite(measured_pre_place[index]) ||
+        !std::isfinite(pre_place_ik_solution[index]))
+      {
+        throw std::runtime_error("measured pre-place joint state was non-finite");
+      }
+      pre_place_joint_error = std::max(
+        pre_place_joint_error, std::abs(measured_pre_place[index] - pre_place_ik_solution[index]));
+    }
+    RCLCPP_INFO(
+      node->get_logger(), "Measured pre-place endpoint error: %.6f rad", pre_place_joint_error);
+    if (!std::isfinite(pre_place_joint_error) || pre_place_joint_error > 0.01)
+      throw std::runtime_error("executed pre-place endpoint did not match retained IK branch");
+
+    // The loaded lower path must prove the exact planning-scene payload before
+    // any sample is accepted.  This catches the historical false-positive in
+    // which a complete state request silently omitted held_product.
+    planning_scene_attached_object_proof(true);
+    RCLCPP_INFO(
+      node->get_logger(), "Gate 6 placement lower validation: planning-scene payload proof PASS");
+
+    // Validate the measured-current-to-first-point segment and every retained
+    // branch segment by joint interpolation at the existing OMPL resolution.
+    // This avoids a second IK solve from the post-OMPL state while retaining
+    // the exact release endpoint and the existing 5 mm Cartesian sampling.
+    auto lower_start_state = arm.getCurrentState(3.0);
+    if (!lower_start_state)
+      throw std::runtime_error("fresh MoveIt state was unavailable for placement lower validation");
+    auto lower_validity_state = std::make_shared<moveit::core::RobotState>(*lower_start_state);
+    std::vector<double> measured_lower_start;
+    lower_start_state->copyJointGroupPositions(manipulator_group, measured_lower_start);
+    if (!finite_joint_values(measured_lower_start))
+      throw std::runtime_error("measured placement lower start was non-finite");
+    const double interpolation_resolution =
+      0.001 * manipulator_group->getMaximumExtent();
+    constexpr std::size_t kMaximumInterpolationSamples = 1000;
+    if (!std::isfinite(interpolation_resolution) || interpolation_resolution <= 0.0)
+      throw std::runtime_error("placement lower interpolation resolution was invalid");
+    const auto execution_solutions = std::vector<std::vector<double>>(
+      retained_placement_solutions.rbegin(), retained_placement_solutions.rend());
+    if (execution_solutions.empty())
+      throw std::runtime_error("placement lower retained sequence was empty");
+    const auto validate_interpolated_segment =
+      [&lower_validity_state, &manipulator_group, &validate_state,
+      &finite_joint_values, interpolation_resolution](const std::vector<double> & from,
+      const std::vector<double> & to, const std::string & segment_label) {
+        if (from.size() != to.size() || from.size() != manipulator_group->getVariableCount() ||
+          !std::all_of(from.begin(), from.end(), [](double value) { return std::isfinite(value); }) ||
+          !std::all_of(to.begin(), to.end(), [](double value) { return std::isfinite(value); }))
+        {
+          throw std::runtime_error("non-finite placement lower segment joints at " + segment_label);
+        }
+        double squared_distance = 0.0;
+        for (std::size_t index = 0; index < from.size(); ++index) {
+          const double delta = to[index] - from[index];
+          squared_distance += delta * delta;
+        }
+        const double distance = std::sqrt(squared_distance);
+        if (!std::isfinite(distance))
+          throw std::runtime_error("non-finite placement lower segment distance at " + segment_label);
+        const auto samples = distance == 0.0 ? std::size_t{1} :
+          static_cast<std::size_t>(std::ceil(distance / interpolation_resolution)) + 1;
+        if (samples == 0 || samples > kMaximumInterpolationSamples)
+          throw std::runtime_error(
+                  "placement lower segment exceeded the derived 1000-sample limit at " +
+                  segment_label);
+        moveit::core::RobotState from_state(*lower_validity_state);
+        moveit::core::RobotState to_state(*lower_validity_state);
+        from_state.setJointGroupPositions(manipulator_group, from);
+        from_state.update();
+        to_state.setJointGroupPositions(manipulator_group, to);
+        to_state.update();
+        for (std::size_t sample = 0; sample < samples; ++sample) {
+          const double fraction = samples == 1 ? 0.0 :
+            static_cast<double>(sample) / static_cast<double>(samples - 1);
+          from_state.interpolate(to_state, fraction, *lower_validity_state, manipulator_group);
+          lower_validity_state->update();
+          if (!lower_validity_state->satisfiesBounds(manipulator_group))
+            throw std::runtime_error("placement lower bounds failed at " + segment_label);
+          std::vector<double> interpolated_joints;
+          lower_validity_state->copyJointGroupPositions(manipulator_group, interpolated_joints);
+          if (!finite_joint_values(interpolated_joints))
+            throw std::runtime_error("non-finite interpolated placement lower sample at " +
+                    segment_label);
+          validate_state(*lower_validity_state,
+            segment_label + " sample " + std::to_string(sample));
+        }
+      };
+    validate_interpolated_segment(
+      measured_lower_start, execution_solutions.front(), "measured current -> first point");
+    for (std::size_t index = 1; index < execution_solutions.size(); ++index) {
+      validate_interpolated_segment(
+        execution_solutions[index - 1], execution_solutions[index],
+        "retained placement segment " + std::to_string(index));
+    }
     moveit_msgs::msg::RobotTrajectory lower_trajectory;
-    if (arm.computeCartesianPath(
-        lower_waypoints, 0.005, 0.0, lower_trajectory, true) < 0.99)
-      throw std::runtime_error("Cartesian placement lower was incomplete");
+    lower_trajectory.joint_trajectory.joint_names = expected_placement_joint_names;
+    lower_trajectory.joint_trajectory.points.reserve(execution_solutions.size());
+    for (const auto & solution : execution_solutions)
+    {
+      trajectory_msgs::msg::JointTrajectoryPoint point;
+      point.positions = solution;
+      lower_trajectory.joint_trajectory.points.push_back(std::move(point));
+    }
+    if (lower_trajectory.joint_trajectory.points.size() != execution_solutions.size())
+      throw std::runtime_error("placement lower trajectory waypoint count was invalid");
+    robot_trajectory::RobotTrajectory lower_robot_trajectory(
+      arm.getRobotModel(), "manipulator");
+    lower_robot_trajectory.setRobotTrajectoryMsg(*lower_start_state, lower_trajectory);
+    trajectory_processing::IterativeParabolicTimeParameterization lower_time_parameterization;
+    if (!lower_time_parameterization.computeTimeStamps(
+        lower_robot_trajectory, 0.2, 0.2))
+      throw std::runtime_error("placement lower time parameterization failed");
+    lower_robot_trajectory.getRobotTrajectoryMsg(lower_trajectory);
+    const auto & lower_points = lower_trajectory.joint_trajectory.points;
+    const auto retained_point_count = execution_solutions.size();
+    if (lower_trajectory.joint_trajectory.joint_names != expected_placement_joint_names ||
+      lower_points.size() != retained_point_count || lower_points.empty())
+    {
+      throw std::runtime_error(
+              "placement lower trajectory joint names or point count changed");
+    }
+    const auto duration_seconds = [](const builtin_interfaces::msg::Duration & duration) {
+        return static_cast<double>(duration.sec) +
+          static_cast<double>(duration.nanosec) * 1e-9;
+      };
+    double previous_timestamp = 0.0;
+    for (std::size_t point_index = 0; point_index < lower_points.size(); ++point_index) {
+      const auto & point = lower_points[point_index];
+      if (point.positions.size() != expected_placement_joint_names.size() ||
+        point.velocities.size() != expected_placement_joint_names.size() ||
+        point.accelerations.size() != expected_placement_joint_names.size() ||
+        !std::all_of(point.positions.begin(), point.positions.end(),
+          [](double value) { return std::isfinite(value); }) ||
+        !std::all_of(point.velocities.begin(), point.velocities.end(),
+          [](double value) { return std::isfinite(value); }) ||
+        !std::all_of(point.accelerations.begin(), point.accelerations.end(),
+          [](double value) { return std::isfinite(value); }))
+      {
+        throw std::runtime_error("placement lower trajectory point was non-finite or incomplete");
+      }
+      const double timestamp = duration_seconds(point.time_from_start);
+      if (!std::isfinite(timestamp) || (point_index > 0 && timestamp <= previous_timestamp))
+        throw std::runtime_error("placement lower trajectory timestamps were invalid");
+      previous_timestamp = timestamp;
+    }
+    if (lower_points.back().positions.size() != release_ik_solution.size())
+      throw std::runtime_error("placement lower release endpoint was not preserved");
+    double release_endpoint_error = 0.0;
+    for (std::size_t index = 0; index < release_ik_solution.size(); ++index) {
+      release_endpoint_error = std::max(
+        release_endpoint_error,
+        std::abs(lower_points.back().positions[index] - release_ik_solution[index]));
+    }
+    if (!std::isfinite(release_endpoint_error) || release_endpoint_error > 1e-9)
+      throw std::runtime_error("placement lower release endpoint was not preserved");
+    RCLCPP_INFO(
+      node->get_logger(),
+      "Gate 6 placement lower trajectory postconditions: PASS points=%zu release_error=%.3e",
+      lower_points.size(), release_endpoint_error);
     MoveGroupInterface::Plan lower_plan;
     lower_plan.trajectory_ = lower_trajectory;
     require_motion_permission();
+    const auto current_before_lower_execute = arm.getCurrentJointValues();
+    if (current_before_lower_execute.size() != lower_points.front().positions.size())
+      throw std::runtime_error("placement lower current start state was incomplete");
+    double lower_start_error = 0.0;
+    for (std::size_t index = 0; index < current_before_lower_execute.size(); ++index) {
+      if (!std::isfinite(current_before_lower_execute[index]))
+        throw std::runtime_error("placement lower current start state was non-finite");
+      lower_start_error = std::max(
+        lower_start_error,
+        std::abs(current_before_lower_execute[index] - lower_points.front().positions[index]));
+    }
+    if (!std::isfinite(lower_start_error) || lower_start_error > 0.01)
+      throw std::runtime_error("placement lower current start exceeded 0.01 rad tolerance");
     if (arm.execute(lower_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("Cartesian placement lower execution failed");
     if (node->selected_slot_position_error() > 0.030)
@@ -2237,27 +2517,10 @@ int main(int argc, char ** argv) {
     auto post_retreat_state = arm.getCurrentState(3.0);
     if (!post_retreat_state)
       throw std::runtime_error("fresh post-retreat MoveIt state was unavailable");
-    if (!validity_client->wait_for_service(3s))
-      throw std::runtime_error("/check_state_validity service was unavailable after retreat");
-    auto post_retreat_validity_request =
-      std::make_shared<moveit_msgs::srv::GetStateValidity::Request>();
-    moveit::core::robotStateToRobotStateMsg(
-      *post_retreat_state, post_retreat_validity_request->robot_state);
-    post_retreat_validity_request->group_name = "manipulator";
-    auto post_retreat_validity_future =
-      validity_client->async_send_request(post_retreat_validity_request);
-    if (post_retreat_validity_future.wait_for(3s) != std::future_status::ready)
-      throw std::runtime_error("/check_state_validity request timed out after retreat");
-    const auto post_retreat_validity_response = post_retreat_validity_future.get();
-    if (!post_retreat_validity_response)
-      throw std::runtime_error("/check_state_validity returned no response after retreat");
-    for (const auto & contact : post_retreat_validity_response->contacts) {
-      RCLCPP_WARN(
-        node->get_logger(), "Post-retreat MoveIt state contact: %s <-> %s",
-        contact.contact_body_1.c_str(), contact.contact_body_2.c_str());
-    }
-    if (!post_retreat_validity_response->valid)
-      throw std::runtime_error("post-detach retreat state is invalid");
+    // The absence proof is required immediately before the post-detach
+    // validity request; a stale complete-state serialization must not infer it.
+    planning_scene_attached_object_proof(false);
+    validate_state(*post_retreat_state, "post-detach retreat");
 
     if (!arm.setJointValueTarget(stow))
       throw std::runtime_error("empty stow target was rejected");
@@ -2277,7 +2540,9 @@ int main(int argc, char ** argv) {
     node->set_status(amr_interfaces::msg::ManipulatorStatus::STOWED_EMPTY,
       true, false, "Gate 6 " + std::to_string(product.mass_kg) +
       " kg grasp, transport, placement, and empty stow passed");
-    RCLCPP_INFO(node->get_logger(), "GATE 6 %.1f KG COMPLETE 1 KG PASS", product.mass_kg);
+    RCLCPP_INFO(
+      node->get_logger(), "GATE 6 %.1f KG COMPLETE %.0f KG PASS",
+      product.mass_kg, product.mass_kg);
     passed = true;
   } catch (const std::exception & error) {
     node->set_status(amr_interfaces::msg::ManipulatorStatus::FAULT,

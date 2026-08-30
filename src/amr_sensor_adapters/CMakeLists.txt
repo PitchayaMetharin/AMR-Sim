@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.8)
+project(amr_sensor_adapters)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(ament_cmake REQUIRED)
+find_package(amr_interfaces REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(sensor_msgs REQUIRED)
+
+function(add_sensor_adapter target source)
+  add_executable(${target} src/${source}.cpp)
+  ament_target_dependencies(${target} amr_interfaces rclcpp_lifecycle sensor_msgs)
+  install(TARGETS ${target} DESTINATION lib/${PROJECT_NAME})
+endfunction()
+
+add_sensor_adapter(front_lidar_adapter_node lidar_adapter_node)
+target_compile_definitions(front_lidar_adapter_node PRIVATE AMR_SENSOR_NAME="front_lidar")
+add_sensor_adapter(rear_lidar_adapter_node lidar_adapter_node)
+target_compile_definitions(rear_lidar_adapter_node PRIVATE AMR_SENSOR_NAME="rear_lidar")
+add_sensor_adapter(imu_adapter_node imu_adapter_node)
+add_sensor_adapter(product_camera_adapter_node product_camera_adapter_node)
+ament_package()

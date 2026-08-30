@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>amr_simulation</name><version>0.1.0</version>
+  <description>Gazebo Harmonic plant and bridge launch for the simulation-only AMR.</description>
+  <maintainer email="amr@example.invalid">AMR project</maintainer><license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>gz-msgs10</depend><depend>gz-sim8</depend><depend>gz-transport13</depend>
+  <exec_depend>amr_base_adapter</exec_depend><exec_depend>amr_control</exec_depend><exec_depend>amr_description</exec_depend><exec_depend>amr_health</exec_depend><exec_depend>amr_localization</exec_depend><exec_depend>amr_mission</exec_depend><exec_depend>amr_mpc_controller</exec_depend><exec_depend>amr_navigation</exec_depend><exec_depend>amr_perception</exec_depend><exec_depend>amr_sensor_adapters</exec_depend><exec_depend>amr_slam</exec_depend>
+  <exec_depend>launch</exec_depend><exec_depend>launch_ros</exec_depend><exec_depend>lifecycle_msgs</exec_depend><exec_depend>robot_state_publisher</exec_depend><exec_depend>ros_gz_bridge</exec_depend><exec_depend>ros_gz_sim</exec_depend><exec_depend>xacro</exec_depend>
+  <test_depend>ament_cmake_gtest</test_depend><test_depend>ament_cmake_pytest</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

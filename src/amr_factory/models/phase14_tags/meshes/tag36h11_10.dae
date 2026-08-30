@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><unit meter="1" name="meter"/><up_axis>Z_UP</up_axis></asset>
+  <library_images><image id="tag-image"><init_from>../materials/textures/tag36h11_10.png</init_from></image></library_images>
+  <library_effects><effect id="tag-effect"><profile_COMMON>
+    <technique sid="standard"><phong>
+      <emission><color>0 0 0 1</color></emission>
+      <ambient><color>1 1 1 1</color></ambient>
+      <diffuse><texture texture="tag-image" texcoord="CHANNEL0"><extra><technique profile="MAYA"><wrapU>FALSE</wrapU><wrapV>FALSE</wrapV><blend_mode>ADD</blend_mode></technique></extra></texture></diffuse>
+      <specular><color>0 0 0 1</color></specular><shininess><float>1</float></shininess>
+      <transparent opaque="RGB_ZERO"><color>1 1 1 1</color></transparent><transparency><float>0</float></transparency>
+    </phong></technique>
+  </profile_COMMON><extra><technique profile="GOOGLEEARTH"><double_sided>1</double_sided></technique></extra></effect></library_effects>
+  <library_materials><material id="tag-material"><instance_effect url="#tag-effect"/></material></library_materials>
+  <library_geometries><geometry id="tag-geometry"><mesh>
+    <source id="positions"><float_array id="positions-array" count="12">-0.5 -0.5 0 0.5 -0.5 0 0.5 0.5 0 -0.5 0.5 0</float_array><technique_common><accessor source="#positions-array" count="4" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <source id="normals"><float_array id="normals-array" count="6">0 0 1 0 0 -1</float_array><technique_common><accessor source="#normals-array" count="2" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <source id="uv"><float_array id="uv-array" count="8">0 0 1 0 1 1 0 1</float_array><technique_common><accessor source="#uv-array" count="4" stride="2"><param name="S" type="float"/><param name="T" type="float"/></accessor></technique_common></source>
+    <vertices id="vertices"><input semantic="POSITION" source="#positions"/></vertices>
+    <triangles count="4" material="tag-material"><input semantic="VERTEX" source="#vertices" offset="0"/><input semantic="NORMAL" source="#normals" offset="1"/><input semantic="TEXCOORD" source="#uv" offset="2" set="0"/><p>0 0 0 1 0 1 2 0 2 0 0 0 2 0 2 3 0 3 2 1 2 1 1 1 0 1 0 3 1 3 2 1 2 0 1 0</p></triangles>
+  </mesh></geometry></library_geometries>
+  <library_visual_scenes><visual_scene id="scene"><node id="tag"><instance_geometry url="#tag-geometry"><bind_material><technique_common><instance_material symbol="tag-material" target="#tag-material"><bind_vertex_input semantic="CHANNEL0" input_semantic="TEXCOORD" input_set="0"/></instance_material></technique_common></bind_material></instance_geometry></node></visual_scene></library_visual_scenes>
+  <scene><instance_visual_scene url="#scene"/></scene>
+</COLLADA>

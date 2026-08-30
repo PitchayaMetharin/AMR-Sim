@@ -5,25 +5,25 @@
       "type": "amr_interfaces/msg/BaseStatus",
       "publisher": "amr_base_adapter/base_adapter_node"
     },
-    "/amr/control/cmd_vel_request": {
+    "/amr/control/cmd_vel": {
       "type": "geometry_msgs/msg/TwistStamped",
       "publisher": "amr_control/command_arbitration_node"
     },
-    "/amr/control/cmd_vel_gated": {
-      "type": "geometry_msgs/msg/TwistStamped",
-      "publisher": "amr_control/motion_gate_node"
+    "/amr/mpc/cmd_vel": {
+      "type": "geometry_msgs/msg/Twist",
+      "publisher": "nav2_controller/controller_server"
     },
-    "/amr/control/gate_status": {
-      "type": "amr_interfaces/msg/GateStatus",
-      "publisher": "amr_control/motion_gate_node"
+    "/amr/health/status": {
+      "type": "amr_interfaces/msg/HealthStatus",
+      "publisher": "amr_health/health_supervisor_node"
     },
-    "/amr/plc/state": {
-      "type": "amr_interfaces/msg/PlcState",
-      "publisher": "amr_plc_gateway/plc_gateway_node"
+    "/amr/manipulation/status": {
+      "type": "amr_interfaces/msg/ManipulatorStatus",
+      "publisher": "amr_manipulation/manipulation_supervisor_node"
     },
-    "/amr/plc/connection_status": {
-      "type": "amr_interfaces/msg/PlcConnectionStatus",
-      "publisher": "amr_plc_gateway/plc_gateway_node"
+    "/amr/factory/status": {
+      "type": "amr_interfaces/msg/FactoryStatus",
+      "publisher": "amr_factory/factory_supervisor_node"
     },
     "/amr/sensors/front_lidar/scan": {
       "type": "sensor_msgs/msg/LaserScan",
@@ -40,12 +40,98 @@
     "/amr/sensors/rear_lidar/points": {
       "type": "sensor_msgs/msg/PointCloud2",
       "publisher": "amr_sensor_adapters/rear_lidar_adapter_node"
+    },
+    "/amr/sensors/product_camera/image_rect": {
+      "type": "sensor_msgs/msg/Image",
+      "publisher": "amr_sensor_adapters/product_camera_adapter_node"
+    },
+    "/amr/sensors/product_camera/camera_info": {
+      "type": "sensor_msgs/msg/CameraInfo",
+      "publisher": "amr_sensor_adapters/product_camera_adapter_node"
+    },
+    "/amr/sensors/product_camera/depth": {
+      "type": "sensor_msgs/msg/Image",
+      "publisher": "amr_sensor_adapters/product_camera_adapter_node"
+    },
+    "/amr/perception/product_tags": {
+      "type": "apriltag_msgs/msg/AprilTagDetectionArray",
+      "publisher": "apriltag_ros/product_tag_detector"
+    },
+    "/amr/perception/front_lidar/points": {
+      "type": "sensor_msgs/msg/PointCloud2",
+      "publisher": "amr_perception/front_lidar_perception_node"
+    },
+    "/amr/perception/rear_lidar/points": {
+      "type": "sensor_msgs/msg/PointCloud2",
+      "publisher": "amr_perception/rear_lidar_perception_node"
+    },
+    "/amr/base/odometry_raw": {
+      "type": "nav_msgs/msg/Odometry",
+      "publisher": "amr_base_adapter/base_adapter_node"
+    },
+    "/amr/base/joint_states": {
+      "type": "sensor_msgs/msg/JointState",
+      "publisher": "amr_base_adapter/base_adapter_node"
+    },
+    "/amr/sensors/imu/data_raw": {
+      "type": "sensor_msgs/msg/Imu",
+      "publisher": "amr_sensor_adapters/imu_adapter_node"
+    },
+    "/amr/localization/wheel_odometry": {
+      "type": "nav_msgs/msg/Odometry",
+      "publisher": "amr_localization/wheel_odometry_node"
+    },
+    "/amr/localization/odometry": {
+      "type": "nav_msgs/msg/Odometry",
+      "publisher": "robot_localization/ekf_filter_node"
+    },
+    "/tf:odom->base_footprint": {
+      "type": "tf2_msgs/msg/TFMessage",
+      "publisher": "robot_localization/ekf_filter_node"
+    },
+    "/tf:map->odom": {
+      "type": "tf2_msgs/msg/TFMessage",
+      "publisher": "slam_toolbox/async_slam_toolbox_node"
     }
   },
   "actions": {
+    "/amr/control/dock_egress": {
+      "type": "nav2_msgs/action/BackUp",
+      "server": "amr_control/command_arbitration_node"
+    },
     "/amr/mission/navigate_to_pose": {
       "type": "nav2_msgs/action/NavigateToPose",
       "server": "amr_mission/mission_supervisor_node"
+    },
+    "/amr/mission/navigate_to_pose_precise": {
+      "type": "nav2_msgs/action/NavigateToPose",
+      "server": "amr_mission/mission_supervisor_node"
+    },
+    "/amr/smooth_path": {
+      "type": "nav2_msgs/action/SmoothPath",
+      "server": "amr_navigation/smoother_server"
+    },
+    "/amr/manipulation/manipulate_product": {
+      "type": "amr_interfaces/action/ManipulateProduct",
+      "server": "amr_manipulation/manipulation_supervisor_node"
+    },
+    "/amr/factory/transport_product": {
+      "type": "amr_interfaces/action/TransportProduct",
+      "server": "amr_factory/factory_supervisor_node"
+    }
+  },
+  "services": {
+    "/amr/factory/set_operation_mode": {
+      "type": "amr_interfaces/srv/SetOperationMode",
+      "server": "amr_factory/factory_supervisor_node"
+    }
+  },
+  "runtime_modes": {
+    "mapping": {
+      "/tf:map->odom": "slam_toolbox/async_slam_toolbox_node"
+    },
+    "factory": {
+      "/tf:map->odom": "nav2_amcl/amcl"
     }
   }
 }

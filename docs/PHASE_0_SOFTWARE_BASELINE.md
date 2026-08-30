@@ -41,9 +41,7 @@ Inspected on 2026-07-24:
 | Compiler | GCC/G++ 11.4.0 |
 | CMake | 3.22.1 |
 
-The workstation is the current and only execution target. Jetson Orin Nano is
-a conceptual candidate for a future physical project and is not a current
-deployment target.
+The laptop workstation is the permanent and only execution target.
 
 ## Simulator lifecycle decision
 

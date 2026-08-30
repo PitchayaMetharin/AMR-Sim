@@ -38,26 +38,117 @@ def test_canonical_interfaces_have_one_named_authority():
     topics = contract["topics"]
 
     assert contract["namespace"] == "/amr"
-    assert topics["/amr/control/cmd_vel_request"] == {
+    assert contract["actions"]["/amr/control/dock_egress"] == {
+        "type": "nav2_msgs/action/BackUp",
+        "server": "amr_control/command_arbitration_node",
+    }
+    assert contract["actions"]["/amr/mission/navigate_to_pose_precise"] == {
+        "type": "nav2_msgs/action/NavigateToPose",
+        "server": "amr_mission/mission_supervisor_node",
+    }
+    assert contract["actions"]["/amr/smooth_path"] == {
+        "type": "nav2_msgs/action/SmoothPath",
+        "server": "amr_navigation/smoother_server",
+    }
+    assert contract["actions"]["/amr/manipulation/manipulate_product"] == {
+        "type": "amr_interfaces/action/ManipulateProduct",
+        "server": "amr_manipulation/manipulation_supervisor_node",
+    }
+    assert contract["actions"]["/amr/factory/transport_product"] == {
+        "type": "amr_interfaces/action/TransportProduct",
+        "server": "amr_factory/factory_supervisor_node",
+    }
+    assert contract["services"]["/amr/factory/set_operation_mode"] == {
+        "type": "amr_interfaces/srv/SetOperationMode",
+        "server": "amr_factory/factory_supervisor_node",
+    }
+    assert topics["/amr/control/cmd_vel"] == {
         "type": "geometry_msgs/msg/TwistStamped",
         "publisher": "amr_control/command_arbitration_node",
     }
-    assert topics["/amr/control/cmd_vel_gated"] == {
-        "type": "geometry_msgs/msg/TwistStamped",
-        "publisher": "amr_control/motion_gate_node",
+    assert topics["/amr/mpc/cmd_vel"] == {
+        "type": "geometry_msgs/msg/Twist",
+        "publisher": "nav2_controller/controller_server",
     }
-    assert topics["/amr/plc/state"]["publisher"] == "amr_plc_gateway/plc_gateway_node"
+    assert topics["/amr/health/status"] == {
+        "type": "amr_interfaces/msg/HealthStatus",
+        "publisher": "amr_health/health_supervisor_node",
+    }
+    assert topics["/amr/factory/status"] == {
+        "type": "amr_interfaces/msg/FactoryStatus",
+        "publisher": "amr_factory/factory_supervisor_node",
+    }
+    assert topics["/amr/manipulation/status"] == {
+        "type": "amr_interfaces/msg/ManipulatorStatus",
+        "publisher": "amr_manipulation/manipulation_supervisor_node",
+    }
     assert topics["/amr/sensors/front_lidar/scan"]["publisher"] != topics[
         "/amr/sensors/rear_lidar/scan"
     ]["publisher"]
+    assert topics["/amr/perception/front_lidar/points"]["publisher"] != topics[
+        "/amr/perception/rear_lidar/points"
+    ]["publisher"]
+    assert topics["/amr/sensors/product_camera/image_rect"] == {
+        "type": "sensor_msgs/msg/Image",
+        "publisher": "amr_sensor_adapters/product_camera_adapter_node",
+    }
+    assert topics["/amr/sensors/product_camera/camera_info"] == {
+        "type": "sensor_msgs/msg/CameraInfo",
+        "publisher": "amr_sensor_adapters/product_camera_adapter_node",
+    }
+    assert topics["/amr/sensors/product_camera/depth"] == {
+        "type": "sensor_msgs/msg/Image",
+        "publisher": "amr_sensor_adapters/product_camera_adapter_node",
+    }
+    assert topics["/amr/perception/product_tags"] == {
+        "type": "apriltag_msgs/msg/AprilTagDetectionArray",
+        "publisher": "apriltag_ros/product_tag_detector",
+    }
+    assert topics["/amr/localization/wheel_odometry"]["publisher"] == (
+        "amr_localization/wheel_odometry_node"
+    )
+    assert topics["/amr/localization/odometry"]["publisher"] == (
+        "robot_localization/ekf_filter_node"
+    )
+    assert topics["/tf:odom->base_footprint"]["publisher"] == (
+        "robot_localization/ekf_filter_node"
+    )
+    assert topics["/tf:map->odom"]["publisher"] == (
+        "slam_toolbox/async_slam_toolbox_node"
+    )
+    assert contract["runtime_modes"]["factory"]["/tf:map->odom"] == (
+        "nav2_amcl/amcl"
+    )
     assert all(isinstance(spec["publisher"], str) for spec in topics.values())
-    assert all(spec["type"] != "geometry_msgs/msg/Twist" for spec in topics.values())
+    unstamped_commands = {
+        name for name, spec in topics.items()
+        if spec["type"] == "geometry_msgs/msg/Twist"
+    }
+    assert unstamped_commands == {"/amr/mpc/cmd_vel"}
 
 
-def test_only_phase_four_packages_are_created():
+def test_workspace_contains_authorized_packages():
     package_names = sorted(
         path.name
         for path in WORKSPACE_SRC.iterdir()
         if (path / "package.xml").is_file()
     )
-    assert package_names == ["amr_bringup", "amr_interfaces"]
+    assert package_names == [
+        "amr_base_adapter",
+        "amr_bringup",
+        "amr_control",
+        "amr_description",
+        "amr_exploration",
+        "amr_factory",
+        "amr_health",
+        "amr_interfaces",
+        "amr_localization",
+        "amr_manipulation",
+        "amr_mission",
+        "amr_mpc_controller",
+        "amr_navigation",
+        "amr_perception",
+        "amr_sensor_adapters",
+        "amr_simulation",
+        "amr_slam",
+    ]
