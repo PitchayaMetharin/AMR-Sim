@@ -1183,3 +1183,89 @@ before Gazebo startup. The current agent environment reported
 No simulation, MoveIt, Gate 6 mass stage, 3 kg/5 kg run, or Gate 7 process was
 started. A fresh direct-host run with an accessible DRM render node remains
 required before Phase 14 can advance.
+
+## Phase 14 continuation — Phase J PASS and Phase K MoveIt boundary — 2026-08-30
+
+The manually verified direct-host Phase J runtime-performance result is
+preserved under `.ros_logs/gate6_1kg_retained_20260830_01/` with
+`AMR_RUN_ID=gate6_1kg_retained_20260830_01`,
+`GZ_PARTITION=amr_gate6_1kg_retained_20260830_01`, and `ROS_DOMAIN_ID=206`.
+The runtime report records `/dev/dri/renderD128`, no forced software renderer,
+3,600 samples, aggregate RTF `0.999999929313705`, median RTF
+`1.000014400208803`, and `verdict=PASS`. Treat Phase J as complete; do not
+redo or tune it.
+
+Phase K source inspection confirmed that the existing project-owned MoveIt
+launch uses the authoritative `phase14_mobile_manipulator.urdf.xacro`,
+`phase14_mobile_manipulator.srdf`, `manipulator` group, OMPL pipeline, and the
+actual `arm_controller`/`gripper_controller` names, with joint states remapped
+to `/amr/base/joint_states`. The composite Xacro passed `check_urdf`, and
+`test_moveit_config.py` passed 4 tests. A bounded MoveIt smoke loaded the
+composite model, OMPL, both controller adapters, and MoveGroup capabilities;
+its log is
+`.ros_logs/gate6_1kg_retained_20260830_01/move_group_18_1788097414517.log`.
+
+The first integrated readiness check returned `Node not found` for
+`/amr/command_arbitration_node`, because this restricted environment cannot
+see or run the direct-host Phase J factory/Nav2 graph. No source/configuration
+or validated Phase J setting was changed. The smoke process was stopped and a
+process scan found no Gazebo, MoveIt, recorder, or Gate 6 processes. No
+Product 101 run was started.
+
+Next action: on the direct Ubuntu host, keep the exact Phase J factory runtime
+and environment alive, start `ros2 launch amr_manipulation move_group.launch.py`,
+complete the Phase K lifecycle/controller/action checks, start the prescribed
+hidden-topic recorder, and run exactly one `product_id:=101` stage. Stop at the
+first failed check and preserve all evidence. Do not start 3 kg, 5 kg, or Gate 7.
+
+## Phase 14 continuation — Phase K integrated readiness and Product 101 PASS — 2026-08-30
+
+Phase J remains closed and its performance evidence was not rerun or changed.
+Phase K was completed on the direct Ubuntu host using the exact preserved
+environment (`AMR_RUN_ID=gate6_1kg_retained_20260830_01`,
+`GZ_PARTITION=amr_gate6_1kg_retained_20260830_01`, `ROS_DOMAIN_ID=206`,
+`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`, `ROS_LOCALHOST_ONLY=1`, and the existing
+workspace-local `ROS_LOG_DIR`). The strict headless factory/Nav2 graph was
+started with `factory_attachment:=true`, followed by the project-owned
+`move_group.launch.py`.
+
+The first direct-host preflight found two stale same-partition Gazebo
+processes, producing duplicate controller-manager/Gazebo-control graph
+entries. Only the identified stale PIDs were stopped. The corrected host
+preflight passed with `/dev/dri/renderD128`, no forced software renderer, and
+no known simulation processes. A first lifecycle CLI query briefly returned
+`Node not found` during service discovery; after the graph settled, the same
+probe and the complete lifecycle set returned `active [3]`. This was a
+host-startup/DDS timing boundary, not a proven source defect, and no source or
+configuration change was made.
+
+Phase K readiness then passed: all 17 lifecycle nodes were active; the
+joint-state, arm, and gripper controllers were active exactly once; visible
+node names had no unexpected duplicates; all required navigation, egress, arm,
+and gripper actions had one server; required services and Product 101 topics
+were present; MoveGroup actions and `/query_planner_interface` responded; and
+`/amr/control/cmd_vel` had exactly one publisher owned by
+`/amr/command_arbitration_node`.
+
+The prescribed hidden-topic recorder reported `Recording...` before exactly
+one Product 101 stage. The run passed bootstrap detachment, gripper/contact
+proof, pickup, attachment safety rejection, dock egress, pickup approach,
+split dispatch navigation, dispatch dock, placement alignment, collision-
+checked lower/release, and empty stow. The stage log ended with:
+
+`GATE 6 1.0 KG COMPLETE 1 KG PASS`
+
+The finalized evidence bag is
+`.ros_logs/gate6_1kg_retained_20260830_01/product101_evidence/` (200,534
+messages, 96.603 seconds). Phase K evidence is under
+`.ros_logs/gate6_1kg_retained_20260830_01/phase_k/evidence/`; the runtime
+stage and MoveIt logs are `gate6_mass_stage_53626_1788099193302.log` and
+`move_group_34342_1788098551620.log`. The final exact-process scan passed with
+no Gazebo, MoveIt, rosbag, or Gate 6 processes remaining. MoveIt emitted its
+known Humble shutdown destructor segfault after the successful stage; it did
+not affect the acceptance path.
+
+Current boundary: Phase K PASS and the single Product 101 run passed, while
+products 102/103 and Gate 7 remain unvalidated. Review the complete evidence
+before any later work. Do not rerun or tune Phase J, do not start 3 kg, 5 kg,
+or Gate 7 from this handoff, and do not modify `AMR_CODEX_HANDOFF.md`.
