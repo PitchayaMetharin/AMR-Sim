@@ -80,6 +80,16 @@ class PreparationError(RuntimeError):
     """A fail-closed preparation failure."""
 
 
+class NavigationAbortedError(PreparationError):
+    """A terminal navigation failure with fresh localized pose evidence."""
+
+    def __init__(
+        self, detail: str, localized_pose: Tuple[float, float, float]
+    ) -> None:
+        super().__init__(detail)
+        self.localized_pose = localized_pose
+
+
 @dataclass(frozen=True)
 class ProductMetadata:
     product_id: int
@@ -193,6 +203,32 @@ def _xy_distance(first: Tuple[float, float, float], second: Tuple[float, float, 
     return math.hypot(first[0] - second[0], first[1] - second[1])
 
 
+def _dock_travel_target(
+    current: Tuple[float, float, float],
+    dock: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    current_values = _finite_values(current, "current robot pose")
+    dock_values = _finite_values(dock, "dock target")
+    dx = dock_values[0] - current_values[0]
+    dy = dock_values[1] - current_values[1]
+    travel_yaw = (
+        dock_values[2] if dx == 0.0 and dy == 0.0 else math.atan2(dy, dx)
+    )
+    if not math.isfinite(travel_yaw):
+        raise PreparationError("dock travel bearing was non-finite")
+    return dock_values[0], dock_values[1], travel_yaw
+
+
+def _recoverable_dock_abort(
+    localized: Tuple[float, float, float],
+    target: Tuple[float, float, float],
+) -> bool:
+    """Gate a failed dock action into recovery, never into acceptance."""
+    localized_values = _finite_values(localized, "aborted localized dock pose")
+    target_values = _finite_values(target, "dock target")
+    return _xy_distance(localized_values, target_values) <= DOCK_POSITION_TOLERANCE_M
+
+
 def _dock_bias(
     physical: Tuple[float, float, float],
     localized: Tuple[float, float, float],
@@ -301,8 +337,6 @@ class ProductPreparation(Node):
             ControlWorld, "/world/factory_world/control")
         self._set_pose_client = self.create_client(
             SetEntityPose, "/world/factory_world/set_pose")
-        self._bootstrap_client = self.create_client(
-            Trigger, "/amr/simulation/attachment_bootstrap/verify")
         self._set_initial_pose_client = self.create_client(
             SetInitialPose, "/amr/set_initial_pose")
         self._normal_navigation = ActionClient(
@@ -519,15 +553,37 @@ class ProductPreparation(Node):
             raise PreparationError(f"Gazebo rejected reset pose for product {self.product_id}")
 
     def _verify_attachment_bootstrap(self) -> None:
-        if not self._bootstrap_client.wait_for_service(timeout_sec=5.0):
-            raise PreparationError(
-                "attachment bootstrap verify service is unavailable; refusing product preparation")
-        response = self._wait_future(
-            self._bootstrap_client.call_async(Trigger.Request()), 5.0,
-            "attachment bootstrap verification")
-        if not response.success:
-            raise PreparationError(
-                f"attachment bootstrap verification failed: {response.message}")
+        bootstrap_node = rclpy.create_node(
+            "gate6_bootstrap_verify_client", context=self.context)
+        bootstrap_client = bootstrap_node.create_client(
+            Trigger, "/amr/simulation/attachment_bootstrap/verify")
+        executor = SingleThreadedExecutor(context=self.context)
+        executor.add_node(bootstrap_node)
+        future = None
+        try:
+            if not bootstrap_client.wait_for_service(timeout_sec=5.0):
+                raise PreparationError(
+                    "attachment bootstrap verify service is unavailable; refusing product preparation")
+            future = bootstrap_client.call_async(Trigger.Request())
+            executor.spin_until_future_complete(future, timeout_sec=5.0)
+            if not future.done():
+                bootstrap_client.remove_pending_request(future)
+                raise PreparationError("attachment bootstrap verification timed out")
+            response = future.result()
+            if response is None:
+                raise PreparationError("attachment bootstrap verification returned no response")
+            if not response.success:
+                raise PreparationError(
+                    f"attachment bootstrap verification failed: {response.message}")
+        finally:
+            if future is not None and not future.done():
+                try:
+                    bootstrap_client.remove_pending_request(future)
+                except Exception:
+                    pass
+            executor.remove_node(bootstrap_node)
+            executor.shutdown(timeout_sec=0.0)
+            bootstrap_node.destroy_node()
 
     def _wait_selected_pose_stable(self) -> None:
         start = time.monotonic()
@@ -607,6 +663,14 @@ class ProductPreparation(Node):
                 self._wait_stationary()
                 return
 
+    def _final_dock_travel_target(self) -> Tuple[float, float, float]:
+        self._wait_stationary()
+        self._spin_until(
+            lambda: self._robot_pose is not None and self._fresh(self._robot_pose_at),
+            2.0, "fresh physical dock pose before final dock")
+        assert self._robot_pose is not None
+        return _dock_travel_target(_pose_tuple(self._robot_pose), self.selected.dock)
+
     def _navigate(
         self, target: Tuple[float, float, float], precise: bool, retreat: bool = False
     ) -> Tuple[float, float, float]:
@@ -660,9 +724,14 @@ class ProductPreparation(Node):
                 self.get_logger().error(f"failed to cancel timed-out {endpoint} goal")
             raise
         if result.status != GoalStatus.STATUS_SUCCEEDED:
-            raise PreparationError(
+            detail = (
                 f"navigation endpoint {endpoint} to "
                 f"({target[0]:.3f}, {target[1]:.3f}, {target[2]:.3f}) failed")
+            if result.status != GoalStatus.STATUS_ABORTED or \
+                    latest_localized is None or not self._fresh(
+                    latest_localized_at, NAVIGATION_FEEDBACK_MAX_AGE_S):
+                raise PreparationError(detail)
+            raise NavigationAbortedError(detail, latest_localized)
         if latest_localized is None or not self._fresh(
                 latest_localized_at, NAVIGATION_FEEDBACK_MAX_AGE_S):
             raise PreparationError(
@@ -800,8 +869,30 @@ class ProductPreparation(Node):
             approach_position_error, approach_yaw_error = _pose_error(self._robot_pose, self.selected.approach)
             if approach_position_error > 0.07 or approach_yaw_error > 0.15:
                 self._navigate(self.selected.approach, precise=False)
+            # A normal goal can satisfy its checker while the physical base is
+            # still settling inside the goal tolerance.  Establish the same
+            # stationary boundary used by recovery before issuing a precise
+            # goal, then use the registered clearance pose before the dock.
+            if self.selected.egress is None:
+                raise PreparationError("selected pickup station has no registered egress")
+            self._wait_stationary()
+            self._navigate(self.selected.egress, precise=False)
+            self._wait_stationary()
+            dock_travel_target = self._final_dock_travel_target()
             amcl_generation_before_dock = self._amcl_pose_generation
-            localized_dock = self._navigate(self.selected.dock, precise=True)
+            dock_navigation_aborted = False
+            try:
+                localized_dock = self._navigate(dock_travel_target, precise=True)
+                localized_dock = self._navigate(self.selected.dock, precise=True)
+            except NavigationAbortedError as error:
+                if not _recoverable_dock_abort(
+                        error.localized_pose, self.selected.dock):
+                    raise
+                localized_dock = error.localized_pose
+                dock_navigation_aborted = True
+                self.get_logger().warning(
+                    "Precise dock action aborted inside the existing position "
+                    "window; requiring registered recovery")
             terminal_amcl_generation = self._amcl_pose_generation
             if terminal_amcl_generation <= amcl_generation_before_dock:
                 raise PreparationError("no AMCL sample was received during dock navigation")
@@ -813,7 +904,8 @@ class ProductPreparation(Node):
             physical_dock = _pose_tuple(self._robot_pose)
             physical_position_error, physical_yaw_error = _pose_error(
                 self._robot_pose, self.selected.dock)
-            if physical_position_error > DOCK_POSITION_TOLERANCE_M or \
+            if dock_navigation_aborted or \
+                    physical_position_error > DOCK_POSITION_TOLERANCE_M or \
                     physical_yaw_error > DOCK_YAW_TOLERANCE_RAD:
                 initial_bias = _dock_bias(physical_dock, localized_dock)
                 self.get_logger().info(
@@ -850,9 +942,23 @@ class ProductPreparation(Node):
                 self._wait_stationary()
                 if self.selected.egress is None:
                     raise PreparationError("selected pickup station has no registered egress")
-                self._navigate(self.selected.egress, precise=True)
+                self._navigate(self.selected.egress, precise=False)
                 self._wait_stationary()
-                self._navigate(self.selected.dock, precise=True)
+                dock_travel_target = self._final_dock_travel_target()
+                try:
+                    self._navigate(dock_travel_target, precise=True)
+                    self._navigate(self.selected.dock, precise=True)
+                except NavigationAbortedError as error:
+                    if not _recoverable_dock_abort(
+                            error.localized_pose, self.selected.dock):
+                        raise
+                    self.get_logger().warning(
+                        "Recovery precise dock action aborted inside the existing "
+                        "position window; requiring independent final proof")
+                    self._wait_stationary()
+                    self._spin_until(
+                        lambda: self._robot_pose is not None and self._fresh(self._robot_pose_at),
+                        2.0, "fresh physical dock pose after recovery abort")
         self._verify_dock_and_product_geometry()
         self._set_status(
             ManipulatorStatus.STOWED_EMPTY, True, False,

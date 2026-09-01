@@ -1,3 +1,4 @@
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -58,7 +59,11 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert bootstrap < reference < gripper
     assert "request_and_confirm_initial_detachment" not in mass_source
     assert 'unsafe wrist-flipped staging branch rejected' in mass_source
-    assert "pregrasp.position.x = 0.85; pregrasp.position.z = 1.00;" in mass_source
+    assert (
+        "pregrasp.position.x = 0.85;\n"
+        "    pregrasp.position.y = pickup_product_lateral;\n"
+        "    pregrasp.position.z = 1.00;"
+    ) in mass_source
     assert 'arm.setJointValueTarget(pregrasp, "gripper_tcp")' not in mass_source
     assert "pregrasp_seed{" in mass_source
     assert "-0.000032311, -0.760907950, 0.661511204" in mass_source
@@ -99,25 +104,63 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     command_end = mass_source.index(
         "std::array<double, 3> map_point_to_base", command_start)
     command_source = mass_source[command_start:command_end]
-    assert "auto goal_handle = sent.get();" in command_source
-    result_timeout = command_source.index("result.wait_for(30s)")
+    assert '"/gripper_controller/gripper_cmd"' in command_source
+    assert '"/gripper_right_controller/gripper_cmd"' in command_source
+    left_send = command_source.index(
+        "auto left_sent = left_client->async_send_goal(left_goal);")
+    right_send = command_source.index(
+        "auto right_sent = right_client->async_send_goal(right_goal);")
+    acceptance_wait = command_source.index(
+        "auto left_acceptance = std::async(std::launch::async", right_send)
+    assert left_send < right_send < acceptance_wait
+    assert command_source.count("async_send_goal") == 2
+    assert "left_sent.wait_for(3s)" in command_source
+    assert "right_sent.wait_for(3s)" in command_source
+    assert "auto left_goal_handle = left_acceptance_ready ? left_sent.get() : nullptr;" in command_source
+    assert "auto right_goal_handle = right_acceptance_ready ? right_sent.get() : nullptr;" in command_source
+    acceptance_failure = command_source.index(
+        "if (!left_acceptance_ready || !right_acceptance_ready ||")
+    partial_left_cancel = command_source.index(
+        'cancel_accepted_goal("left", left_client, left_goal_handle, left_result)',
+        acceptance_failure)
+    partial_right_cancel = command_source.index(
+        'cancel_accepted_goal("right", right_client, right_goal_handle, right_result)',
+        partial_left_cancel)
+    partial_return = command_source.index("return false;", partial_right_cancel)
+    left_guard = command_source.index("if (left_goal_handle)", acceptance_failure)
+    right_guard = command_source.index("if (right_goal_handle)", left_guard)
+    assert acceptance_failure < left_guard < partial_left_cancel
+    assert partial_left_cancel < right_guard < partial_right_cancel < partial_return
+    result_futures = command_source.index(
+        "auto left_result = left_client->async_get_result(left_goal_handle);", partial_return)
+    right_result_future = command_source.index(
+        "auto right_result = right_client->async_get_result(right_goal_handle);", result_futures)
+    assert right_send < result_futures < right_result_future
+    cancel_helper = command_source.index("const auto cancel_accepted_goal")
     cancel_goal = command_source.index(
-        "async_cancel_goal(goal_handle)", result_timeout)
+        "async_cancel_goal(goal_handle)", cancel_helper)
     cancel_wait = command_source.index("cancel.wait_for(3s)", cancel_goal)
     terminal_wait = command_source.index("result.wait_for(3s)", cancel_wait)
     terminal_code = command_source.index(
         "terminal.code != rclcpp_action::ResultCode::CANCELED", terminal_wait)
-    timeout_failure = command_source.index("return false;", cancel_goal)
-    assert result_timeout < cancel_goal < cancel_wait < terminal_wait < terminal_code
+    assert cancel_helper < cancel_goal < cancel_wait < terminal_wait < terminal_code
     assert "response->goals_canceling" in command_source
     assert "goal_info.goal_id.uuid == goal_id" in command_source
-    assert terminal_code < timeout_failure
+    result_timeout = command_source.index("result.wait_for(30s)")
+    timeout_cancel = command_source.index(
+        "cancel_accepted_goal(side, client, goal_handle, result)", result_timeout)
+    timeout_return = command_source.index("return false;", timeout_cancel)
+    assert result_timeout < timeout_cancel < timeout_return
     result_code_check = command_source.index(
         "wrapped.code != rclcpp_action::ResultCode::SUCCEEDED")
     result_pointer_check = command_source.index("!wrapped.result")
     result_flags = command_source.index("wrapped.result->reached_goal")
     assert max(result_code_check, result_pointer_check) < result_flags
     assert "wrapped.result->reached_goal || wrapped.result->stalled" in command_source
+    assert "const bool left_ok = left_completion.get();" in command_source
+    assert "const bool right_ok = right_completion.get();" in command_source
+    assert "return left_ok && right_ok;" in command_source
+    assert "left >= threshold && right >= threshold" in mass_source
     close = mass_source.index("command_gripper(node, 0.020)")
     finger_positions = mass_source.index(
         "gripper_positions_above(0.020, 3s)", close)
@@ -338,8 +381,8 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "kMaxPlacementReleaseRadius - kMaxPlacementAlignmentPositionError" in mass_source
     assert "desired_slot_direction_radius =" in mass_source
     assert "desired_slot_scale = kDesiredSlotBaseRadius / desired_slot_direction_radius" in mass_source
-    assert "desired_slot_base_x = kDesiredSlotBaseX * desired_slot_scale" in mass_source
-    assert "desired_slot_base_y = kDesiredSlotBaseY * desired_slot_scale" in mass_source
+    assert "desired_slot_base_x = desired_slot_direction_x * desired_slot_scale" in mass_source
+    assert "desired_slot_base_y = desired_slot_direction_y * desired_slot_scale" in mass_source
     assert "desired placement stance radius was invalid" in mass_source
     assert "desired placement stance scaling was non-finite" in mass_source
     assert "placement_alignment_physical" in mass_source
@@ -495,6 +538,64 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "placement lower trajectory postconditions: PASS" in mass_source
 
 
+def test_dispatch_stance_is_slot_aware_and_keeps_center_alignment_bounded():
+    source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
+    stance_start = source.index("const double selected_slot_lateral_offset")
+    stance_end = source.index("const double dispatch_yaw", stance_start)
+    stance = source[stance_start:stance_end]
+    assert "selected_slot[1] - product.dispatch_dock[1]" in stance
+    assert "product.id" not in stance
+    upper_start = stance.index("if (selected_slot_lateral_offset > 0.0)")
+    lower_start = stance.index("} else if (selected_slot_lateral_offset < 0.0)", upper_start)
+    center_start = stance.index("} else {", lower_start)
+    upper_branch = stance[upper_start:lower_start]
+    lower_branch = stance[lower_start:center_start]
+    center_branch = stance[center_start:]
+    assert "desired_slot_direction_x = kDesiredSlotBaseX;" in upper_branch
+    assert "desired_slot_direction_y = kDesiredSlotBaseY;" in upper_branch
+    assert "desired_slot_direction_x = kDesiredSlotBaseX;" in lower_branch
+    assert "desired_slot_direction_y = -kDesiredSlotBaseY;" in lower_branch
+    assert "desired_slot_direction_x = 1.0;" in center_branch
+    assert "desired_slot_direction_y = 0.0;" in center_branch
+    assert "const double desired_slot_base_x = desired_slot_direction_x * desired_slot_scale;" in stance
+    assert "const double desired_slot_base_y = desired_slot_direction_y * desired_slot_scale;" in stance
+    assert "const double desired_slot_base_x = kDesiredSlotBaseX * desired_slot_scale;" not in stance
+    assert "const double desired_slot_base_y = kDesiredSlotBaseY * desired_slot_scale;" not in stance
+
+    desired_radius = 0.785 - 0.070 - 0.005
+    center_stance = (-4.10 + desired_radius, 0.0)
+    observed_dock = (-3.332, 0.002)
+    center_alignment = math.hypot(
+        center_stance[0] - observed_dock[0], center_stance[1] - observed_dock[1])
+    assert math.isclose(center_stance[0], -3.390, abs_tol=1e-9)
+    assert math.isclose(center_stance[1], 0.0, abs_tol=1e-9)
+    assert math.isclose(center_alignment, 0.058034, abs_tol=0.0005)
+    assert center_alignment < 0.35
+
+
+def test_higher_mass_placement_uses_collision_aware_route_without_changing_1kg_path():
+    source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
+    execution = source.index("std::vector<std::vector<double>> execution_solutions;")
+    one_kg_branch = source.index("if (product.id == 101)", execution)
+    higher_mass_branch = source.index("} else {", one_kg_branch)
+    common_validation = source.index(
+        "const auto validate_interpolated_segment", higher_mass_branch)
+    one_kg_source = source[one_kg_branch:higher_mass_branch]
+    higher_mass_source = source[higher_mass_branch:common_validation]
+
+    assert "retained_placement_solutions.rbegin()" in one_kg_source
+    assert "arm.plan(collision_aware_lower_plan)" not in one_kg_source
+    assert "arm.setStartStateToCurrentState()" in higher_mass_source
+    assert "arm.setJointValueTarget(release_ik_solution)" in higher_mass_source
+    assert "arm.plan(collision_aware_lower_plan)" in higher_mass_source
+    assert "planned_trajectory.joint_names != expected_placement_joint_names" in higher_mass_source
+    assert "planned_endpoint_error > 0.01" in higher_mass_source
+    assert "execution_solutions.back() = release_ik_solution" in higher_mass_source
+    assert "validate_interpolated_segment" not in higher_mass_source
+    assert "planning_scene_attached_object_proof(true)" in source
+    assert "placement lower trajectory postconditions: PASS" in source
+
+
 def test_navigation_feedback_and_cancellation_contract_is_fail_closed():
     source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
     start = source.index("void reset_navigation_feedback")
@@ -528,3 +629,56 @@ def test_gate6_pickup_approach_reverse_is_registry_bounded():
     assert "pickup_approach_distance <= 0.0" in launch_source
     assert "pickup_approach_distance > egress_max_distance" in launch_source
     assert "registered pickup approach reverse exceeds the arbitration distance limit" in launch_source
+
+
+def test_mass_stage_publishes_motion_block_after_stationary_feedback():
+    source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
+    start = source.index("bool wait_for_motion_permission")
+    end = source.index("bool capture_reference_evidence", start)
+    permission = source[start:end]
+    first_stationary_wait = permission.index("if (!wait_until_stationary")
+    status_transition = permission.index("set_status(")
+    announced = permission.index("const auto announced", status_transition)
+    second_stationary_wait = permission.index("return wait_until_stationary", announced)
+    assert first_stationary_wait < status_transition < announced < second_stationary_wait
+    assert "now - stationary_since >= 500ms" in permission
+    assert "now - announced >= 400ms" in permission
+    assert "Dispatch detachment confirmed; opening gripper" not in source
+
+
+def test_pickup_geometry_uses_fresh_relative_lateral_pose():
+    source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
+    reference = source.index("capture_reference_evidence(3s)")
+    pickup_product_pose = source.index(
+        "geometry_msgs::msg::PoseStamped pickup_product_pose", reference)
+    pickup_robot_pose = source.index(
+        "geometry_msgs::msg::PoseStamped pickup_robot_pose", pickup_product_pose)
+    pickup_product_base = source.index(
+        "const auto pickup_product_base = amr_manipulation::map_point_to_base",
+        pickup_robot_pose)
+    pickup_pedestal_base = source.index(
+        "const auto pickup_pedestal_base = amr_manipulation::map_point_to_base",
+        pickup_product_base)
+    pickup_geometry_finite = source.index(
+        '"pickup base-frame geometry was non-finite"', pickup_pedestal_base)
+    pickup_scene = source.index("scene.applyCollisionObjects(obstacles)", pickup_geometry_finite)
+    pickup_target = source.index(
+        "pregrasp.position.y = pickup_product_lateral", pickup_scene)
+    pregrasp_execute = source.index("arm.execute(pregrasp_plan)", pickup_target)
+
+    assert reference < pickup_product_pose < pickup_robot_pose < pickup_product_base
+    assert pickup_product_base < pickup_pedestal_base < pickup_geometry_finite < pickup_scene
+    assert pickup_scene < pickup_target < pregrasp_execute
+    assert "latest_product_pose(pickup_product_pose)" in source
+    assert "latest_robot_pose(pickup_robot_pose)" in source
+    assert "fresh pickup product or robot pose was unavailable" in source
+    assert "fresh pickup product or robot pose was non-finite" in source
+    assert "pickup_product_pose.pose.position.x + 0.05" in source
+    assert "pickup_product_pose.pose.position.z - 0.45" in source
+    assert "const double pickup_product_lateral = pickup_product_base[1]" in source
+    assert "const double pickup_pedestal_lateral = pickup_pedestal_base[1]" in source
+    assert '{0.85, pickup_product_lateral, 0.925}' in source
+    assert '{0.90, pickup_pedestal_lateral, 0.375}' in source
+    assert '{0.85, pickup_product_lateral, 0.825}' in source
+    assert "wait_for_bilateral_contact(3s)" in source
+    assert 'native_attachment_state_is("attached")' in source

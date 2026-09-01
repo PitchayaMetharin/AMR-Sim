@@ -31,6 +31,16 @@ def test_launch_has_planner_but_no_motion_runtime():
         assert forbidden not in launch
 
 
+def test_lifecycle_manager_starts_after_planning_construction_barrier():
+    launch = (ROOT / "launch" / "amr_navigation.launch.py").read_text()
+    barrier = "TimerAction(period=1.0, actions=[lifecycle_manager])"
+    assert "lifecycle_manager = Node(" in launch
+    assert barrier in launch
+    barrier_index = launch.index(barrier)
+    assert launch.index('executable="planner_server"') < barrier_index
+    assert launch.index('executable="smoother_server"') < barrier_index
+
+
 def test_smoother_is_collision_checked_and_lifecycle_managed():
     config = yaml.safe_load((ROOT / "config" / "planner.yaml").read_text())
     smoother = config["/amr/smoother_server"]["ros__parameters"]

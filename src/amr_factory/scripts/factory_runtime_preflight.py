@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
-"""Fail-closed renderer and Gazebo real-time-factor evidence checks."""
+"""Fail-closed renderer, graph, lifecycle, and runtime evidence checks."""
 
 import argparse
+from collections import Counter
 import grp
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import re
 import statistics
 import subprocess
 import sys
+import time
 
 
 MIN_SAMPLES = 10
@@ -25,6 +27,59 @@ PROCESS_MARKERS = (
     "ros2 bag record",
     "rosbag2",
 )
+REQUIRED_GRAPH_NODES = (
+    "/amr/amcl",
+    "/amr/base_adapter_node",
+    "/amr/command_arbitration_node",
+    "/amr/controller_server",
+    "/amr/front_lidar_adapter_node",
+    "/amr/front_lidar_perception_node",
+    "/amr/global_costmap/global_costmap",
+    "/amr/imu_adapter_node",
+    "/amr/local_costmap/local_costmap",
+    "/amr/map_server",
+    "/amr/mission_supervisor_node",
+    "/amr/planner_server",
+    "/amr/product_camera_adapter_node",
+    "/amr/rear_lidar_adapter_node",
+    "/amr/rear_lidar_perception_node",
+    "/amr/smoother_server",
+    "/amr/wheel_odometry_node",
+    "/move_group",
+)
+GRAPH_DISCOVERY_TIMEOUT_SECONDS = 30.0
+GRAPH_STABILITY_SECONDS = 2.0
+GRAPH_POLL_SECONDS = 0.1
+REQUIRED_LIFECYCLE_NODES = (
+    "/amr/amcl",
+    "/amr/base_adapter_node",
+    "/amr/command_arbitration_node",
+    "/amr/controller_server",
+    "/amr/front_lidar_adapter_node",
+    "/amr/front_lidar_perception_node",
+    "/amr/global_costmap/global_costmap",
+    "/amr/imu_adapter_node",
+    "/amr/local_costmap/local_costmap",
+    "/amr/map_server",
+    "/amr/mission_supervisor_node",
+    "/amr/planner_server",
+    "/amr/product_camera_adapter_node",
+    "/amr/rear_lidar_adapter_node",
+    "/amr/rear_lidar_perception_node",
+    "/amr/smoother_server",
+    "/amr/wheel_odometry_node",
+)
+LIFECYCLE_DISCOVERY_TIMEOUT_SECONDS = 30.0
+LIFECYCLE_STABILITY_SECONDS = 2.0
+LIFECYCLE_RESPONSE_TIMEOUT_SECONDS = 1.0
+LIFECYCLE_POLL_SECONDS = 0.1
+LIFECYCLE_ACTIVE_STATE_ID = 3
+LIFECYCLE_ACTIVE_STATE_LABEL = "active"
+MOVEIT_SERVICE_NAME = "/query_planner_interface"
+MOVEIT_DISCOVERY_TIMEOUT_SECONDS = 30.0
+MOVEIT_RESPONSE_TIMEOUT_SECONDS = 1.0
+MOVEIT_POLL_SECONDS = 0.1
+MOVEIT_REQUIRED_PIPELINE_ID = "ompl"
 
 
 def accessible_render_devices(dri_path="/dev/dri"):
@@ -337,16 +392,643 @@ def runtime_preflight(evidence_dir):
     return 1 if errors else 0
 
 
+def canonical_node_name(name, namespace):
+    namespace = namespace.rstrip("/")
+    return f"{namespace}/{name}" if namespace else f"/{name}"
+
+
+def graph_snapshot(node):
+    names = [
+        canonical_node_name(name, namespace)
+        for name, namespace in node.get_node_names_and_namespaces()
+    ]
+    counts = Counter(names)
+    observed = tuple(sorted(counts))
+    missing = tuple(sorted(set(REQUIRED_GRAPH_NODES) - set(observed)))
+    duplicates = tuple(
+        name for name in REQUIRED_GRAPH_NODES if counts.get(name, 0) > 1
+    )
+    return observed, missing, duplicates
+
+
+def observe_required_graph(
+        node, spin_once, monotonic=time.monotonic,
+        discovery_timeout=GRAPH_DISCOVERY_TIMEOUT_SECONDS,
+        stability_seconds=GRAPH_STABILITY_SECONDS,
+        poll_seconds=GRAPH_POLL_SECONDS):
+    """Observe one persistent ROS graph until it is complete and stable."""
+    start = monotonic()
+    complete_since = None
+    samples = 0
+    transitions = []
+    last_state = None
+    observed = ()
+    missing = REQUIRED_GRAPH_NODES
+    duplicates = ()
+
+    while True:
+        elapsed = monotonic() - start
+        remaining = discovery_timeout - elapsed
+        if remaining <= 0.0:
+            break
+        spin_once(node, timeout_sec=min(poll_seconds, remaining))
+        samples += 1
+        now = monotonic()
+        observed, missing, duplicates = graph_snapshot(node)
+        state = (missing, duplicates)
+        if state != last_state:
+            transitions.append({
+                "elapsed": now - start,
+                "observed_count": len(observed),
+                "missing": missing,
+                "duplicates": duplicates,
+            })
+            last_state = state
+
+        if not missing and not duplicates:
+            if complete_since is None:
+                complete_since = now
+            if now - complete_since >= stability_seconds:
+                return {
+                    "passed": True,
+                    "elapsed": now - start,
+                    "samples": samples,
+                    "stable_seconds": now - complete_since,
+                    "observed": observed,
+                    "missing": missing,
+                    "duplicates": duplicates,
+                    "transitions": transitions,
+                }
+        else:
+            complete_since = None
+
+    now = monotonic()
+    return {
+        "passed": False,
+        "elapsed": now - start,
+        "samples": samples,
+        "stable_seconds": (
+            now - complete_since if complete_since is not None else 0.0
+        ),
+        "observed": observed,
+        "missing": missing,
+        "duplicates": duplicates,
+        "transitions": transitions,
+    }
+
+
+def graph_preflight(evidence_dir):
+    """Require one persistent observer to see the complete stable runtime graph."""
+    import rclpy
+    from rclpy.utilities import get_rmw_implementation_identifier
+
+    lines = [
+        "mode=graph",
+        "observer=persistent_rclpy",
+        f"ros_domain_id={os.environ.get('ROS_DOMAIN_ID', '<unset>')}",
+        f"ros_localhost_only={os.environ.get('ROS_LOCALHOST_ONLY', '<unset>')}",
+        "fastdds_builtin_transports="
+        f"{os.environ.get('FASTDDS_BUILTIN_TRANSPORTS', '<unset>')}",
+        f"rmw_environment={os.environ.get('RMW_IMPLEMENTATION', '<default>')}",
+        f"discovery_timeout_seconds={GRAPH_DISCOVERY_TIMEOUT_SECONDS:.1f}",
+        f"stability_seconds={GRAPH_STABILITY_SECONDS:.1f}",
+        "required_nodes=" + " ".join(REQUIRED_GRAPH_NODES),
+    ]
+    node = None
+    initialized = False
+    try:
+        rclpy.init(args=[])
+        initialized = True
+        lines.append(f"rmw_actual={get_rmw_implementation_identifier()}")
+        node = rclpy.create_node("amr_factory_graph_readiness")
+        result = observe_required_graph(node, rclpy.spin_once)
+    except Exception as error:  # Fail closed and retain the cause in evidence.
+        lines.extend(["verdict=FAIL", f"error={type(error).__name__}: {error}"])
+        result = None
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if initialized:
+            rclpy.try_shutdown()
+
+    if result is not None:
+        for index, transition in enumerate(result["transitions"], start=1):
+            lines.append(
+                f"observation={index} elapsed={transition['elapsed']:.3f} "
+                f"observed_count={transition['observed_count']} "
+                "missing=" + (
+                    " ".join(transition["missing"])
+                    if transition["missing"] else "<none>"
+                ) + " duplicates=" + (
+                    " ".join(transition["duplicates"])
+                    if transition["duplicates"] else "<none>"
+                )
+            )
+        lines.extend([
+            f"samples={result['samples']}",
+            f"elapsed_seconds={result['elapsed']:.3f}",
+            f"stable_seconds={result['stable_seconds']:.3f}",
+            "final_observed_nodes=" + " ".join(result["observed"]),
+            "final_missing=" + (
+                " ".join(result["missing"]) if result["missing"] else "<none>"
+            ),
+            "final_duplicates=" + (
+                " ".join(result["duplicates"])
+                if result["duplicates"] else "<none>"
+            ),
+            "verdict=" + ("PASS" if result["passed"] else "FAIL"),
+        ])
+        if not result["passed"]:
+            lines.append(
+                "error=required graph did not remain complete and unique for "
+                f"{GRAPH_STABILITY_SECONDS:.1f} seconds"
+            )
+
+    path = write_report(evidence_dir, "graph_readiness.txt", lines)
+    for line in lines:
+        print(line)
+    print(f"evidence={path}")
+    return 0 if result is not None and result["passed"] else 1
+
+
+def query_lifecycle_state(
+        node, client, spin_once, request_factory, monotonic,
+        response_timeout=LIFECYCLE_RESPONSE_TIMEOUT_SECONDS,
+        poll_seconds=LIFECYCLE_POLL_SECONDS):
+    """Issue one bounded lifecycle query through an existing persistent client."""
+    start = monotonic()
+    try:
+        if not client.service_is_ready():
+            return {
+                "status": "service_unavailable",
+                "latency": monotonic() - start,
+            }
+        future = client.call_async(request_factory())
+    except Exception as error:
+        return {
+            "status": "query_error",
+            "detail": f"{type(error).__name__}: {error}",
+            "latency": monotonic() - start,
+        }
+
+    while not future.done():
+        remaining = response_timeout - (monotonic() - start)
+        if remaining <= 0.0:
+            try:
+                client.remove_pending_request(future)
+            except Exception:
+                pass
+            return {
+                "status": "response_timeout",
+                "latency": monotonic() - start,
+            }
+        spin_once(node, timeout_sec=min(poll_seconds, remaining))
+
+    try:
+        response = future.result()
+        state = response.current_state
+        state_id = int(state.id)
+        state_label = str(state.label)
+    except Exception as error:
+        return {
+            "status": "query_error",
+            "detail": f"{type(error).__name__}: {error}",
+            "latency": monotonic() - start,
+        }
+    return {
+        "status": "ok",
+        "state_id": state_id,
+        "state_label": state_label,
+        "latency": monotonic() - start,
+    }
+
+
+def lifecycle_state_groups(states, required_nodes):
+    unavailable = tuple(
+        name for name in required_nodes
+        if states.get(name, {}).get("status") == "service_unavailable"
+    )
+    response_timeouts = tuple(
+        name for name in required_nodes
+        if states.get(name, {}).get("status") == "response_timeout"
+    )
+    query_errors = tuple(
+        name for name in required_nodes
+        if states.get(name, {}).get("status") in {"query_error", "not_queried"}
+    )
+    nonactive = tuple(
+        name for name in required_nodes
+        if states.get(name, {}).get("status") == "ok"
+        and (
+            states[name].get("state_id") != LIFECYCLE_ACTIVE_STATE_ID
+            or states[name].get("state_label") != LIFECYCLE_ACTIVE_STATE_LABEL
+        )
+    )
+    return unavailable, response_timeouts, query_errors, nonactive
+
+
+def lifecycle_observation_result(
+        passed, start, now, samples, active_since, states, transitions,
+        required_nodes):
+    unavailable, response_timeouts, query_errors, nonactive = (
+        lifecycle_state_groups(states, required_nodes)
+    )
+    return {
+        "passed": passed,
+        "elapsed": now - start,
+        "samples": samples,
+        "stable_seconds": (
+            now - active_since if active_since is not None else 0.0
+        ),
+        "final_states": states,
+        "unavailable_services": unavailable,
+        "response_timeouts": response_timeouts,
+        "query_errors": query_errors,
+        "nonactive": nonactive,
+        "transitions": transitions,
+    }
+
+
+def observe_required_lifecycle(
+        node, clients, spin_once, request_factory, monotonic=time.monotonic,
+        discovery_timeout=LIFECYCLE_DISCOVERY_TIMEOUT_SECONDS,
+        stability_seconds=LIFECYCLE_STABILITY_SECONDS,
+        response_timeout=LIFECYCLE_RESPONSE_TIMEOUT_SECONDS,
+        poll_seconds=LIFECYCLE_POLL_SECONDS,
+        required_nodes=REQUIRED_LIFECYCLE_NODES):
+    """Observe lifecycle state with one participant until all nodes are stable."""
+    start = monotonic()
+    active_since = None
+    samples = 0
+    transitions = []
+    last_signature = None
+    states = {
+        name: {"status": "not_queried", "latency": 0.0}
+        for name in required_nodes
+    }
+
+    while monotonic() - start < discovery_timeout:
+        current = {}
+        for name in required_nodes:
+            remaining = discovery_timeout - (monotonic() - start)
+            if remaining <= 0.0:
+                current[name] = {"status": "not_queried", "latency": 0.0}
+                continue
+            current[name] = query_lifecycle_state(
+                node,
+                clients[name],
+                spin_once,
+                request_factory,
+                monotonic,
+                response_timeout=min(response_timeout, remaining),
+                poll_seconds=poll_seconds,
+            )
+        samples += 1
+        states = current
+        now = monotonic()
+        signature = tuple(
+            (
+                name,
+                states[name].get("status"),
+                states[name].get("state_id"),
+                states[name].get("state_label"),
+                states[name].get("detail"),
+            )
+            for name in required_nodes
+        )
+        if signature != last_signature:
+            transitions.append({
+                "elapsed": now - start,
+                "states": {name: dict(states[name]) for name in required_nodes},
+            })
+            last_signature = signature
+
+        unavailable, response_timeouts, query_errors, nonactive = (
+            lifecycle_state_groups(states, required_nodes)
+        )
+        all_active = not (
+            unavailable or response_timeouts or query_errors or nonactive
+        )
+        if all_active:
+            if active_since is None:
+                active_since = now
+            if now - active_since >= stability_seconds:
+                return lifecycle_observation_result(
+                    True, start, now, samples, active_since, states,
+                    transitions, required_nodes
+                )
+        else:
+            active_since = None
+
+        remaining = discovery_timeout - (monotonic() - start)
+        if remaining > 0.0:
+            spin_once(node, timeout_sec=min(poll_seconds, remaining))
+
+    now = monotonic()
+    return lifecycle_observation_result(
+        False, start, now, samples, active_since, states, transitions,
+        required_nodes
+    )
+
+
+def format_lifecycle_states(states):
+    formatted = []
+    for name, state in states.items():
+        entry = f"{name}:{state['status']}"
+        if state["status"] == "ok":
+            entry += f":{state['state_id']}:{state['state_label']}"
+        if state.get("detail"):
+            entry += f":{state['detail']}"
+        entry += f":latency={state['latency']:.6f}"
+        formatted.append(entry)
+    return " ".join(formatted)
+
+
+def lifecycle_preflight(evidence_dir):
+    """Require all runtime lifecycle nodes to remain exactly active."""
+    import rclpy
+    from lifecycle_msgs.srv import GetState
+    from rclpy.utilities import get_rmw_implementation_identifier
+
+    lines = [
+        "mode=lifecycle",
+        "observer=persistent_rclpy",
+        f"ros_domain_id={os.environ.get('ROS_DOMAIN_ID', '<unset>')}",
+        f"ros_localhost_only={os.environ.get('ROS_LOCALHOST_ONLY', '<unset>')}",
+        "fastdds_builtin_transports="
+        f"{os.environ.get('FASTDDS_BUILTIN_TRANSPORTS', '<unset>')}",
+        f"rmw_environment={os.environ.get('RMW_IMPLEMENTATION', '<default>')}",
+        f"discovery_timeout_seconds={LIFECYCLE_DISCOVERY_TIMEOUT_SECONDS:.1f}",
+        f"response_timeout_seconds={LIFECYCLE_RESPONSE_TIMEOUT_SECONDS:.1f}",
+        f"stability_seconds={LIFECYCLE_STABILITY_SECONDS:.1f}",
+        "required_nodes=" + " ".join(REQUIRED_LIFECYCLE_NODES),
+    ]
+    node = None
+    initialized = False
+    result = None
+    try:
+        rclpy.init(args=[])
+        initialized = True
+        lines.append(f"rmw_actual={get_rmw_implementation_identifier()}")
+        node = rclpy.create_node("amr_factory_lifecycle_readiness")
+        clients = {
+            name: node.create_client(GetState, f"{name}/get_state")
+            for name in REQUIRED_LIFECYCLE_NODES
+        }
+        result = observe_required_lifecycle(
+            node, clients, rclpy.spin_once, GetState.Request
+        )
+    except Exception as error:  # Fail closed and retain the cause in evidence.
+        lines.extend(["verdict=FAIL", f"error={type(error).__name__}: {error}"])
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if initialized:
+            rclpy.try_shutdown()
+
+    if result is not None:
+        for index, transition in enumerate(result["transitions"], start=1):
+            lines.append(
+                f"observation={index} elapsed={transition['elapsed']:.3f} "
+                f"states={format_lifecycle_states(transition['states'])}"
+            )
+        lines.extend([
+            f"samples={result['samples']}",
+            f"elapsed_seconds={result['elapsed']:.3f}",
+            f"stable_seconds={result['stable_seconds']:.3f}",
+            "final_states=" + format_lifecycle_states(result["final_states"]),
+            "final_unavailable_services=" + (
+                " ".join(result["unavailable_services"])
+                if result["unavailable_services"] else "<none>"
+            ),
+            "final_response_timeouts=" + (
+                " ".join(result["response_timeouts"])
+                if result["response_timeouts"] else "<none>"
+            ),
+            "final_query_errors=" + (
+                " ".join(result["query_errors"])
+                if result["query_errors"] else "<none>"
+            ),
+            "final_nonactive=" + (
+                " ".join(result["nonactive"])
+                if result["nonactive"] else "<none>"
+            ),
+            "verdict=" + ("PASS" if result["passed"] else "FAIL"),
+        ])
+        if not result["passed"]:
+            lines.append(
+                "error=required lifecycle nodes did not remain exactly active "
+                f"for {LIFECYCLE_STABILITY_SECONDS:.1f} seconds"
+            )
+
+    path = write_report(evidence_dir, "lifecycle_readiness.txt", lines)
+    for line in lines:
+        print(line)
+    print(f"evidence={path}")
+    return 0 if result is not None and result["passed"] else 1
+
+
+def query_moveit_planner_service(
+        node, client, spin_once, request_factory, monotonic,
+        response_timeout=MOVEIT_RESPONSE_TIMEOUT_SECONDS,
+        poll_seconds=MOVEIT_POLL_SECONDS):
+    """Issue one bounded planner-interface query on a persistent client."""
+    start = monotonic()
+    try:
+        future = client.call_async(request_factory())
+    except Exception as error:
+        return {
+            "status": "query_error",
+            "detail": f"{type(error).__name__}: {error}",
+            "pipeline_ids": (),
+            "response_latency": monotonic() - start,
+        }
+
+    while not future.done():
+        remaining = response_timeout - (monotonic() - start)
+        if remaining <= 0.0:
+            try:
+                client.remove_pending_request(future)
+            except Exception:
+                pass
+            return {
+                "status": "response_timeout",
+                "detail": (
+                    "planner-interface response did not arrive within "
+                    f"{response_timeout:.1f} seconds"
+                ),
+                "pipeline_ids": (),
+                "response_latency": monotonic() - start,
+            }
+        spin_once(node, timeout_sec=min(poll_seconds, remaining))
+
+    try:
+        response = future.result()
+        planner_interfaces = response.planner_interfaces
+        pipeline_ids = []
+        for interface in planner_interfaces:
+            pipeline_id = getattr(interface, "pipeline_id")
+            if not isinstance(pipeline_id, str):
+                raise ValueError("planner interface pipeline_id is not a string")
+            pipeline_ids.append(pipeline_id)
+        pipeline_ids = tuple(pipeline_ids)
+    except Exception as error:
+        return {
+            "status": "query_error",
+            "detail": f"{type(error).__name__}: {error}",
+            "pipeline_ids": (),
+            "response_latency": monotonic() - start,
+        }
+
+    response_latency = monotonic() - start
+    if MOVEIT_REQUIRED_PIPELINE_ID not in pipeline_ids:
+        return {
+            "status": "missing_required_pipeline",
+            "detail": (
+                f"required pipeline_id={MOVEIT_REQUIRED_PIPELINE_ID!r} "
+                "was not returned"
+            ),
+            "pipeline_ids": pipeline_ids,
+            "response_latency": response_latency,
+        }
+    return {
+        "status": "ok",
+        "pipeline_ids": pipeline_ids,
+        "response_latency": response_latency,
+    }
+
+
+def observe_moveit_planner_service(
+        node, client, spin_once, request_factory, monotonic=time.monotonic,
+        discovery_timeout=MOVEIT_DISCOVERY_TIMEOUT_SECONDS,
+        response_timeout=MOVEIT_RESPONSE_TIMEOUT_SECONDS,
+        poll_seconds=MOVEIT_POLL_SECONDS):
+    """Wait for one planner service, then issue one bounded query."""
+    discovery_start = monotonic()
+    while True:
+        try:
+            if client.service_is_ready():
+                break
+        except Exception as error:
+            return {
+                "status": "query_error",
+                "detail": f"{type(error).__name__}: {error}",
+                "pipeline_ids": (),
+                "discovery_latency": monotonic() - discovery_start,
+                "response_latency": 0.0,
+            }
+
+        remaining = discovery_timeout - (monotonic() - discovery_start)
+        if remaining <= 0.0:
+            return {
+                "status": "service_unavailable",
+                "detail": (
+                    "planner-interface service was not ready within "
+                    f"{discovery_timeout:.1f} seconds"
+                ),
+                "pipeline_ids": (),
+                "discovery_latency": monotonic() - discovery_start,
+                "response_latency": 0.0,
+            }
+        spin_once(node, timeout_sec=min(poll_seconds, remaining))
+
+    discovery_latency = monotonic() - discovery_start
+    result = query_moveit_planner_service(
+        node,
+        client,
+        spin_once,
+        request_factory,
+        monotonic,
+        response_timeout=response_timeout,
+        poll_seconds=poll_seconds,
+    )
+    result["discovery_latency"] = discovery_latency
+    return result
+
+
+def moveit_preflight(evidence_dir):
+    """Require a persistent planner-service query to return the OMPL pipeline."""
+    lines = [
+        "mode=moveit",
+        "observer=persistent_rclpy",
+        f"service={MOVEIT_SERVICE_NAME}",
+        "service_type=moveit_msgs/srv/QueryPlannerInterfaces",
+        f"required_pipeline_id={MOVEIT_REQUIRED_PIPELINE_ID}",
+        f"ros_domain_id={os.environ.get('ROS_DOMAIN_ID', '<unset>')}",
+        f"ros_localhost_only={os.environ.get('ROS_LOCALHOST_ONLY', '<unset>')}",
+        "fastdds_builtin_transports="
+        f"{os.environ.get('FASTDDS_BUILTIN_TRANSPORTS', '<unset>')}",
+        f"rmw_environment={os.environ.get('RMW_IMPLEMENTATION', '<default>')}",
+        f"discovery_timeout_seconds={MOVEIT_DISCOVERY_TIMEOUT_SECONDS:.1f}",
+        f"response_timeout_seconds={MOVEIT_RESPONSE_TIMEOUT_SECONDS:.1f}",
+        f"poll_seconds={MOVEIT_POLL_SECONDS:.1f}",
+    ]
+    rclpy = None
+    node = None
+    initialized = False
+    result = None
+    try:
+        import rclpy
+        from moveit_msgs.srv import QueryPlannerInterfaces
+        from rclpy.utilities import get_rmw_implementation_identifier
+
+        rclpy.init(args=[])
+        initialized = True
+        lines.append(f"rmw_actual={get_rmw_implementation_identifier()}")
+        node = rclpy.create_node("amr_factory_moveit_readiness")
+        client = node.create_client(QueryPlannerInterfaces, MOVEIT_SERVICE_NAME)
+        result = observe_moveit_planner_service(
+            node,
+            client,
+            rclpy.spin_once,
+            QueryPlannerInterfaces.Request,
+        )
+    except Exception as error:  # Fail closed and retain the cause in evidence.
+        lines.extend(["verdict=FAIL", f"error={type(error).__name__}: {error}"])
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if initialized:
+            rclpy.try_shutdown()
+
+    if result is not None:
+        lines.extend([
+            f"status={result['status']}",
+            f"discovery_latency_seconds={result['discovery_latency']:.9f}",
+            f"response_latency_seconds={result['response_latency']:.9f}",
+            "planner_pipeline_ids=" + (
+                " ".join(result["pipeline_ids"])
+                if result["pipeline_ids"] else "<none>"
+            ),
+        ])
+        passed = result["status"] == "ok"
+        lines.append("verdict=" + ("PASS" if passed else "FAIL"))
+        if not passed:
+            lines.append("error=" + result.get("detail", result["status"]))
+
+    path = write_report(evidence_dir, "moveit_readiness.txt", lines)
+    for line in lines:
+        print(line)
+    print(f"evidence={path}")
+    return 0 if result is not None and result["status"] == "ok" else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="factory_runtime_preflight.py")
     subparsers = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("host", "runtime"):
+    for mode in ("host", "runtime", "graph", "lifecycle", "moveit"):
         command = subparsers.add_parser(mode)
         command.add_argument("--evidence-dir", type=Path, required=True)
     arguments = parser.parse_args(argv)
     if arguments.mode == "host":
         return host_preflight(arguments.evidence_dir)
-    return runtime_preflight(arguments.evidence_dir)
+    if arguments.mode == "runtime":
+        return runtime_preflight(arguments.evidence_dir)
+    if arguments.mode == "graph":
+        return graph_preflight(arguments.evidence_dir)
+    if arguments.mode == "lifecycle":
+        return lifecycle_preflight(arguments.evidence_dir)
+    return moveit_preflight(arguments.evidence_dir)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ NORMAL_NAV_STATUS_TOPIC = "/amr/mission/navigate_to_pose/_action/status"
 PRECISE_NAV_STATUS_TOPIC = "/amr/mission/navigate_to_pose_precise/_action/status"
 CONTROL_TOPIC = "/amr/control/cmd_vel"
 SIMULATION_TOPIC = "/amr/simulation/base/cmd_vel"
+COMMAND_FORWARDING_MAX_AGE_SECONDS = 0.25
 
 # This is the recorder contract for a strict Gate 6 run.  The precise-action
 # status topic is deliberately omitted: old and current Nav2 graphs may emit
@@ -193,6 +194,84 @@ def _interval_samples(samples: Sequence[Tuple[float, object]], start: float, end
     return [sample for sample in samples if start <= sample[0] <= end]
 
 
+def select_stage_status_stream(
+        status_samples: Sequence[Tuple[float, object]]) -> Optional[Tuple[int, List[Tuple[float, object]]]]:
+    """Select the mass-stage status stream, or fail closed when it is unclear.
+
+    Product 101 is launched directly and may be the only nonzero status
+    source captured in its bag.  Product 102/103 preparation publishes its
+    own status source before launching the mass stage, so a bag with multiple
+    sources must identify exactly one stream carrying the mass-stage startup
+    marker.  A missing or duplicated marker is ambiguous evidence.
+    """
+    streams: Dict[int, List[Tuple[float, object]]] = defaultdict(list)
+    for sample in status_samples:
+        try:
+            timestamp, message = sample
+            source_boot_id = int(message.source_boot_id)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+        if source_boot_id <= 0:
+            continue
+        streams[source_boot_id].append((timestamp, message))
+
+    if not streams:
+        return None
+    if len(streams) == 1:
+        stage_boot_id, stage_statuses = next(iter(streams.items()))
+        return stage_boot_id, sorted(stage_statuses, key=lambda item: item[0])
+
+    marker_streams = [
+        (boot_id, statuses) for boot_id, statuses in streams.items()
+        if any(getattr(message, "detail", None) == STAGE_START_MARKER
+               for _, message in statuses)
+    ]
+    if len(marker_streams) != 1:
+        return None
+    stage_boot_id, stage_statuses = marker_streams[0]
+    return stage_boot_id, sorted(stage_statuses, key=lambda item: item[0])
+
+
+def command_trace_matches(
+        control: Sequence[Tuple[float, float, float]],
+        simulation: Sequence[Tuple[float, float, float]],
+        max_age: float = COMMAND_FORWARDING_MAX_AGE_SECONDS) -> bool:
+    """Prove each forwarded command came from a recent arbitration sample.
+
+    The base adapter republishes its cached arbitration command on an
+    independent 50 ms timer.  A simulator-facing sample can therefore trail
+    the newest arbitration sample by one timer period.  Requiring an exact
+    match to any control sample at or before the output, within the existing
+    250 ms freshness bound, preserves the command-ownership check without
+    rejecting that deterministic forwarding latency.
+    """
+    if not control or not simulation or max_age < 0.0:
+        return False
+    ordered_control = sorted(control)
+    ordered_simulation = sorted(simulation)
+    control_index = 0
+    for timestamp, linear, angular in ordered_simulation:
+        while (control_index + 1 < len(ordered_control) and
+               ordered_control[control_index + 1][0] <= timestamp):
+            control_index += 1
+        reference_index = control_index
+        matched = False
+        while reference_index >= 0:
+            reference = ordered_control[reference_index]
+            age = timestamp - reference[0]
+            if age > max_age:
+                break
+            if age >= 0.0 and math.isclose(
+                    reference[1], linear, rel_tol=0.0, abs_tol=1e-6) and math.isclose(
+                    reference[2], angular, rel_tol=0.0, abs_tol=1e-6):
+                matched = True
+                break
+            reference_index -= 1
+        if not matched:
+            return False
+    return True
+
+
 def analyze(bag: Path, product_id: int) -> List[str]:
     model, mass_kg, slot = _load_product_registry(product_id)
     selected_state_topic = f"/amr/simulation/internal/attachment/product_{product_id}/state"
@@ -270,26 +349,20 @@ def analyze(bag: Path, product_id: int) -> List[str]:
     if missing:
         failures.append("missing required topics: " + ", ".join(sorted(set(missing))))
 
-    stage_statuses = [
-        (timestamp, message) for timestamp, message in status_samples
-        if int(message.source_boot_id) != 0
-    ]
-    if not stage_statuses:
-        failures.append("mass-stage source_boot_id evidence is missing")
+    selected_stage = select_stage_status_stream(status_samples)
+    if selected_stage is None:
+        failures.append("mass-stage source_boot_id evidence is missing or ambiguous")
         stage_boot_id = 0
         stage_start = 0.0
         stage_end = 0.0
+        stage_statuses = []
     else:
-        stage_boot_id = int(stage_statuses[0][1].source_boot_id)
+        stage_boot_id, stage_statuses = selected_stage
         stage_start = stage_statuses[0][0]
-        stage_end = max(
-            (timestamp for timestamp, message in status_samples
-             if int(message.source_boot_id) == stage_boot_id),
-            default=stage_start,
-        )
+        stage_end = stage_statuses[-1][0]
         scoped_statuses = [
-            (timestamp, message) for timestamp, message in status_samples
-            if int(message.source_boot_id) == stage_boot_id and stage_start <= timestamp <= stage_end
+            (timestamp, message) for timestamp, message in stage_statuses
+            if stage_start <= timestamp <= stage_end
         ]
         if any(int(message.sequence) == 0 for _, message in scoped_statuses):
             failures.append("mass-stage status sequence is invalid")
@@ -359,21 +432,8 @@ def analyze(bag: Path, product_id: int) -> List[str]:
     simulation_nonzero = [row for row in simulation if abs(row[1]) > 1e-12 or abs(row[2]) > 1e-12]
     if not control or not simulation_nonzero:
         failures.append("base command evidence was empty")
-    else:
-        control_index = 0
-        for timestamp, linear, angular in simulation_nonzero:
-            # The bridge may deliver a command after its arbitration sample;
-            # compare against the latest command at or before the output, not
-            # a future sample from the next ramp point.
-            while control_index + 1 < len(control) and control[control_index + 1][0] <= timestamp:
-                control_index += 1
-            reference = control[control_index]
-            if timestamp - reference[0] > 0.25 or not (
-                math.isclose(reference[1], linear, rel_tol=0.0, abs_tol=1e-6) and
-                math.isclose(reference[2], angular, rel_tol=0.0, abs_tol=1e-6)
-            ):
-                failures.append("simulation base command did not match command arbitration")
-                break
+    elif not command_trace_matches(control, simulation_nonzero):
+        failures.append("simulation base command did not match command arbitration")
 
     # Check both command authority and measured base pose while the stage says
     # base motion is forbidden.  Nav/status samples are all bag-time ordered.

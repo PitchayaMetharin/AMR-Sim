@@ -163,36 +163,46 @@ class MassStageNode final : public rclcpp::Node {
   }
 
   bool wait_for_motion_permission(std::chrono::seconds timeout, bool attached = false) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto wait_until_stationary = [this, deadline](SteadyTime & stationary_since,
+      const SteadyTime announced) {
+        while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+          const auto now = std::chrono::steady_clock::now();
+          bool acceptable = false;
+          {
+            std::lock_guard<std::mutex> lock(evidence_mutex_);
+            const bool base_fresh = have_base_ && now - base_received_ <= 200ms;
+            const bool odom_fresh = have_odometry_ && now - odometry_received_ <= 200ms;
+            const auto & twist = odometry_.twist.twist;
+            acceptable = base_fresh && odom_fresh && base_status_.valid &&
+              base_status_.source_boot_id != 0U && base_status_.sequence != 0U &&
+              base_status_.state == amr_interfaces::msg::BaseStatus::READY &&
+              base_status_.reason == amr_interfaces::msg::BaseStatus::REASON_READY &&
+              std::abs(twist.linear.x) <= 0.01 && std::abs(twist.linear.y) <= 0.01 &&
+              std::abs(twist.angular.z) <= 0.01;
+          }
+          stationary_since = acceptable ?
+            (stationary_since == SteadyTime{} ? now : stationary_since) : SteadyTime{};
+          if (stationary_since != SteadyTime{} && now - stationary_since >= 500ms &&
+            (announced == SteadyTime{} || now - announced >= 400ms))
+          {
+            return true;
+          }
+          std::this_thread::sleep_for(20ms);
+        }
+        return false;
+      };
+
+    // Let a completed navigation command and the command/adapter pipeline
+    // settle before publishing the state that forbids motion.  The second
+    // feedback-qualified wait preserves the required post-announcement guard.
+    SteadyTime stationary_since{};
+    if (!wait_until_stationary(stationary_since, SteadyTime{})) return false;
     set_status(amr_interfaces::msg::ManipulatorStatus::MOVING, false, attached,
       "Arm command inhibited pending fresh READY and 500 ms stationary evidence");
     const auto announced = std::chrono::steady_clock::now();
-    const auto deadline = announced + timeout;
-    SteadyTime stationary_since{};
-    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
-      const auto now = std::chrono::steady_clock::now();
-      bool acceptable = false;
-      {
-        std::lock_guard<std::mutex> lock(evidence_mutex_);
-        const bool base_fresh = have_base_ && now - base_received_ <= 200ms;
-        const bool odom_fresh = have_odometry_ && now - odometry_received_ <= 200ms;
-        const auto & twist = odometry_.twist.twist;
-        acceptable = base_fresh && odom_fresh && base_status_.valid &&
-          base_status_.source_boot_id != 0U && base_status_.sequence != 0U &&
-          base_status_.state == amr_interfaces::msg::BaseStatus::READY &&
-          base_status_.reason == amr_interfaces::msg::BaseStatus::REASON_READY &&
-          std::abs(twist.linear.x) <= 0.01 && std::abs(twist.linear.y) <= 0.01 &&
-          std::abs(twist.angular.z) <= 0.01;
-      }
-      stationary_since = acceptable ?
-        (stationary_since == SteadyTime{} ? now : stationary_since) : SteadyTime{};
-      if (now - announced >= 400ms && stationary_since != SteadyTime{} &&
-        now - stationary_since >= 500ms)
-      {
-        return true;
-      }
-      std::this_thread::sleep_for(20ms);
-    }
-    return false;
+    stationary_since = SteadyTime{};
+    return wait_until_stationary(stationary_since, announced);
   }
 
   bool capture_reference_evidence(std::chrono::seconds timeout) {
@@ -406,7 +416,7 @@ class MassStageNode final : public rclcpp::Node {
             right = joint_states_.position[i];
           }
         }
-          if (left_found && right_found && left > threshold && right > threshold) {
+          if (left_found && right_found && left >= threshold && right >= threshold) {
             RCLCPP_INFO(get_logger(),
               "Bilateral gripper stall proven: left %.4f m, right %.4f m", left, right);
             proven = true;
@@ -1023,105 +1033,186 @@ moveit_msgs::msg::CollisionObject box(const std::string & id,
 bool command_gripper(const std::shared_ptr<rclcpp::Node> & node, double position) {
   using Action = control_msgs::action::GripperCommand;
   const auto started = std::chrono::steady_clock::now();
-  auto client = rclcpp_action::create_client<Action>(node, "/gripper_controller/gripper_cmd");
-  if (!client->wait_for_action_server(3s)) {
-    RCLCPP_ERROR(node->get_logger(), "Gripper action server timed out after 3 seconds");
-    return false;
-  }
-  Action::Goal goal;
-  goal.command.position = position;
-  goal.command.max_effort = 60.0;
-  auto sent = client->async_send_goal(goal);
-  if (sent.wait_for(3s) != std::future_status::ready) {
-    RCLCPP_ERROR(node->get_logger(), "Gripper goal acceptance timed out after 3 seconds");
-    return false;
-  }
-  auto goal_handle = sent.get();
-  if (!goal_handle) {
-    RCLCPP_ERROR(node->get_logger(), "Gripper goal was rejected");
-    return false;
-  }
-  auto result = client->async_get_result(goal_handle);
-  if (result.wait_for(30s) != std::future_status::ready) {
+  auto left_client = rclcpp_action::create_client<Action>(
+    node, "/gripper_controller/gripper_cmd");
+  auto right_client = rclcpp_action::create_client<Action>(
+    node, "/gripper_right_controller/gripper_cmd");
+  auto left_server = std::async(std::launch::async, [left_client]() {
+      return left_client->wait_for_action_server(3s);
+    });
+  auto right_server = std::async(std::launch::async, [right_client]() {
+      return right_client->wait_for_action_server(3s);
+    });
+  const bool left_server_ready = left_server.get();
+  const bool right_server_ready = right_server.get();
+  if (!left_server_ready || !right_server_ready) {
     RCLCPP_ERROR(
-      node->get_logger(), "Gripper result timed out after 30 seconds; canceling accepted goal");
-    try {
-      auto cancel = client->async_cancel_goal(goal_handle);
-      if (cancel.wait_for(3s) != std::future_status::ready) {
-        RCLCPP_ERROR(
-          node->get_logger(), "Gripper cancellation response timed out after 3 seconds");
-      } else {
-        const auto response = cancel.get();
-        if (!response) {
-          RCLCPP_ERROR(node->get_logger(), "Gripper cancellation returned a null response");
-        } else {
-          const auto & goal_id = goal_handle->get_goal_id();
-          const bool goal_canceling = std::any_of(
-            response->goals_canceling.begin(), response->goals_canceling.end(),
-            [&goal_id](const auto & goal_info) {
-              return goal_info.goal_id.uuid == goal_id;
-            });
-          if (!goal_canceling) {
-            RCLCPP_ERROR(
-              node->get_logger(),
-              "Gripper cancellation response did not list the accepted goal as canceling");
-          }
-        }
-      }
-    } catch (const std::exception & error) {
-      RCLCPP_ERROR(
-        node->get_logger(), "Gripper cancellation request failed: %s", error.what());
-    }
+      node->get_logger(),
+      "Gripper action server timed out after 3 seconds: left=%s right=%s",
+      left_server_ready ? "ready" : "missing", right_server_ready ? "ready" : "missing");
+    return false;
+  }
 
-    if (result.wait_for(3s) != std::future_status::ready) {
-      RCLCPP_ERROR(
-        node->get_logger(),
-        "Gripper goal did not reach a terminal result within 3 seconds of cancellation");
-    } else {
+  const auto cancel_accepted_goal = [node](
+    const char * side, const auto & client, const auto & goal_handle, auto result) {
+      bool cancellation_ok = true;
       try {
-        const auto terminal = result.get();
-        if (terminal.code != rclcpp_action::ResultCode::CANCELED) {
+        auto cancel = client->async_cancel_goal(goal_handle);
+        if (cancel.wait_for(3s) != std::future_status::ready) {
           RCLCPP_ERROR(
             node->get_logger(),
-            "Gripper goal terminal result after cancellation was code %d, expected CANCELED",
-            static_cast<int>(terminal.code));
+            "%s gripper cancellation response timed out after 3 seconds", side);
+          cancellation_ok = false;
+        } else {
+          const auto response = cancel.get();
+          if (!response) {
+            RCLCPP_ERROR(
+              node->get_logger(), "%s gripper cancellation returned a null response", side);
+            cancellation_ok = false;
+          } else {
+            const auto & goal_id = goal_handle->get_goal_id();
+            const bool goal_canceling = std::any_of(
+              response->goals_canceling.begin(), response->goals_canceling.end(),
+              [&goal_id](const auto & goal_info) {
+                return goal_info.goal_id.uuid == goal_id;
+              });
+            if (!goal_canceling) {
+              RCLCPP_ERROR(
+                node->get_logger(),
+                "%s gripper cancellation response did not list the accepted goal as canceling",
+                side);
+              cancellation_ok = false;
+            }
+          }
         }
       } catch (const std::exception & error) {
         RCLCPP_ERROR(
-          node->get_logger(), "Gripper terminal result confirmation failed: %s", error.what());
+          node->get_logger(), "%s gripper cancellation request failed: %s", side, error.what());
+        cancellation_ok = false;
       }
+
+      if (result.wait_for(3s) != std::future_status::ready) {
+        RCLCPP_ERROR(
+          node->get_logger(),
+          "%s gripper goal did not reach a terminal result within 3 seconds of cancellation",
+          side);
+        cancellation_ok = false;
+      } else {
+        try {
+          const auto terminal = result.get();
+          if (terminal.code != rclcpp_action::ResultCode::CANCELED) {
+            RCLCPP_ERROR(
+              node->get_logger(),
+              "%s gripper goal terminal result after cancellation was code %d, expected CANCELED",
+              side, static_cast<int>(terminal.code));
+            cancellation_ok = false;
+          }
+        } catch (const std::exception & error) {
+          RCLCPP_ERROR(
+            node->get_logger(), "%s gripper terminal result confirmation failed: %s",
+            side, error.what());
+          cancellation_ok = false;
+        }
+      }
+      return cancellation_ok;
+    };
+
+  Action::Goal left_goal;
+  left_goal.command.position = position;
+  left_goal.command.max_effort = 60.0;
+  Action::Goal right_goal = left_goal;
+  auto left_sent = left_client->async_send_goal(left_goal);
+  auto right_sent = right_client->async_send_goal(right_goal);
+  auto left_acceptance = std::async(std::launch::async, [&left_sent]() {
+      return left_sent.wait_for(3s) == std::future_status::ready;
+    });
+  auto right_acceptance = std::async(std::launch::async, [&right_sent]() {
+      return right_sent.wait_for(3s) == std::future_status::ready;
+    });
+  const bool left_acceptance_ready = left_acceptance.get();
+  const bool right_acceptance_ready = right_acceptance.get();
+  if (!left_acceptance_ready) {
+    RCLCPP_ERROR(
+      node->get_logger(), "Left gripper goal acceptance timed out after 3 seconds");
+  }
+  if (!right_acceptance_ready) {
+    RCLCPP_ERROR(
+      node->get_logger(), "Right gripper goal acceptance timed out after 3 seconds");
+  }
+  auto left_goal_handle = left_acceptance_ready ? left_sent.get() : nullptr;
+  auto right_goal_handle = right_acceptance_ready ? right_sent.get() : nullptr;
+  if (!left_goal_handle) {
+    RCLCPP_ERROR(node->get_logger(), "Left gripper goal was rejected");
+  }
+  if (!right_goal_handle) {
+    RCLCPP_ERROR(node->get_logger(), "Right gripper goal was rejected");
+  }
+  if (!left_acceptance_ready || !right_acceptance_ready ||
+    !left_goal_handle || !right_goal_handle)
+  {
+    RCLCPP_ERROR(
+      node->get_logger(),
+      "Bilateral gripper goal acceptance/rejection was incomplete; canceling accepted goals");
+    if (left_goal_handle) {
+      auto left_result = left_client->async_get_result(left_goal_handle);
+      (void)cancel_accepted_goal("left", left_client, left_goal_handle, left_result);
+    }
+    if (right_goal_handle) {
+      auto right_result = right_client->async_get_result(right_goal_handle);
+      (void)cancel_accepted_goal("right", right_client, right_goal_handle, right_result);
     }
     return false;
   }
-  const auto wrapped = result.get();
-  if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED) {
-    RCLCPP_ERROR(
-      node->get_logger(), "Gripper action returned non-success result code %d",
-      static_cast<int>(wrapped.code));
-    return false;
-  }
-  if (!wrapped.result) {
-    RCLCPP_ERROR(node->get_logger(), "Gripper action succeeded with a null result");
-    return false;
-  }
-  if (!(wrapped.result->reached_goal || wrapped.result->stalled)) {
-    RCLCPP_ERROR(
-      node->get_logger(),
-      "Gripper result rejected: requested=%.4f m measured=%.4f m "
-      "reached_goal=false stalled=false",
-      position, wrapped.result->position);
-    return false;
-  }
-  const double elapsed = std::chrono::duration<double>(
-    std::chrono::steady_clock::now() - started).count();
-  RCLCPP_INFO(
-    node->get_logger(),
-    "Gripper command succeeded: requested=%.4f m measured=%.4f m elapsed_wall=%.3f s "
-    "reached_goal=%s stalled=%s",
-    position, wrapped.result->position, elapsed,
-    wrapped.result->reached_goal ? "true" : "false",
-    wrapped.result->stalled ? "true" : "false");
-  return true;
+
+  auto left_result = left_client->async_get_result(left_goal_handle);
+  auto right_result = right_client->async_get_result(right_goal_handle);
+  const auto wait_for_result = [node, position, started, cancel_accepted_goal](
+    const char * side, const auto & client, const auto & goal_handle, auto result) {
+      if (result.wait_for(30s) != std::future_status::ready) {
+        RCLCPP_ERROR(
+          node->get_logger(),
+          "%s gripper result timed out after 30 seconds; canceling accepted goal", side);
+        (void)cancel_accepted_goal(side, client, goal_handle, result);
+        return false;
+      }
+      const auto wrapped = result.get();
+      if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED) {
+        RCLCPP_ERROR(
+          node->get_logger(), "%s gripper action returned non-success result code %d", side,
+          static_cast<int>(wrapped.code));
+        return false;
+      }
+      if (!wrapped.result) {
+        RCLCPP_ERROR(
+          node->get_logger(), "%s gripper action succeeded with a null result", side);
+        return false;
+      }
+      if (!(wrapped.result->reached_goal || wrapped.result->stalled)) {
+        RCLCPP_ERROR(
+          node->get_logger(),
+          "%s gripper result rejected: requested=%.4f m measured=%.4f m "
+          "reached_goal=false stalled=false",
+          side, position, wrapped.result->position);
+        return false;
+      }
+      const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+      RCLCPP_INFO(
+        node->get_logger(),
+        "%s gripper command succeeded: requested=%.4f m measured=%.4f m elapsed_wall=%.3f s "
+        "reached_goal=%s stalled=%s",
+        side, position, wrapped.result->position, elapsed,
+        wrapped.result->reached_goal ? "true" : "false",
+        wrapped.result->stalled ? "true" : "false");
+      return true;
+    };
+  auto left_completion = std::async(
+    std::launch::async, wait_for_result, "left", left_client, left_goal_handle, left_result);
+  auto right_completion = std::async(
+    std::launch::async, wait_for_result, "right", right_client, right_goal_handle, right_result);
+  const bool left_ok = left_completion.get();
+  const bool right_ok = right_completion.get();
+  return left_ok && right_ok;
 }
 
 std::array<double, 3> map_point_to_base(
@@ -1286,6 +1377,42 @@ int main(int argc, char ** argv) {
     if (!node->reference_evidence_stable())
       throw std::runtime_error("dock or product moved while opening the gripper");
 
+    geometry_msgs::msg::PoseStamped pickup_product_pose;
+    geometry_msgs::msg::PoseStamped pickup_robot_pose;
+    if (!node->latest_product_pose(pickup_product_pose) ||
+      !node->latest_robot_pose(pickup_robot_pose))
+    {
+      throw std::runtime_error("fresh pickup product or robot pose was unavailable");
+    }
+    const auto finite_pose = [](const geometry_msgs::msg::PoseStamped & pose) {
+        const auto & position = pose.pose.position;
+        const auto & orientation = pose.pose.orientation;
+        return std::isfinite(position.x) && std::isfinite(position.y) &&
+          std::isfinite(position.z) && std::isfinite(orientation.x) &&
+          std::isfinite(orientation.y) && std::isfinite(orientation.z) &&
+          std::isfinite(orientation.w);
+      };
+    if (!finite_pose(pickup_product_pose) || !finite_pose(pickup_robot_pose))
+      throw std::runtime_error("fresh pickup product or robot pose was non-finite");
+    const auto pickup_product_base = amr_manipulation::map_point_to_base(
+      {pickup_product_pose.pose.position.x, pickup_product_pose.pose.position.y,
+        pickup_product_pose.pose.position.z}, pickup_robot_pose);
+    const auto pickup_pedestal_base = amr_manipulation::map_point_to_base(
+      {pickup_product_pose.pose.position.x + 0.05,
+        pickup_product_pose.pose.position.y,
+        pickup_product_pose.pose.position.z - 0.45}, pickup_robot_pose);
+    const auto finite_base_coordinates = [](const std::array<double, 3> & coordinates) {
+        return std::all_of(coordinates.begin(), coordinates.end(),
+          [](double value) { return std::isfinite(value); });
+      };
+    if (!finite_base_coordinates(pickup_product_base) ||
+      !finite_base_coordinates(pickup_pedestal_base))
+      throw std::runtime_error("pickup base-frame geometry was non-finite");
+    // Keep the accepted arm branch's nominal x/z geometry while compensating
+    // the pickup scene and target for the fresh base-frame lateral offset.
+    const double pickup_product_lateral = pickup_product_base[1];
+    const double pickup_pedestal_lateral = pickup_pedestal_base[1];
+
     PlanningSceneInterface scene;
     const auto set_pickup_support_collision = [&node, &scene](bool allowed) {
         auto client = node->create_client<moveit_msgs::srv::GetPlanningScene>(
@@ -1365,10 +1492,13 @@ int main(int argc, char ** argv) {
         return scene.applyPlanningScene(update);
       };
     auto pickup_handle = amr_manipulation::box(
-      "pickup_handle", {0.04, 0.10, 0.05}, {0.85, 0.0, 0.925});
+      "pickup_handle", {0.04, 0.10, 0.05}, {0.85, pickup_product_lateral, 0.925});
     const std::vector<moveit_msgs::msg::CollisionObject> obstacles{
-      amr_manipulation::box("pickup_pedestal", {0.40, 0.50, 0.75}, {0.90, 0.0, 0.375}),
-      amr_manipulation::box("pickup_product", product.size, {0.85, 0.0, 0.825}),
+      amr_manipulation::box(
+        "pickup_pedestal", {0.40, 0.50, 0.75},
+        {0.90, pickup_pedestal_lateral, 0.375}),
+      amr_manipulation::box(
+        "pickup_product", product.size, {0.85, pickup_product_lateral, 0.825}),
       pickup_handle,
     };
     if (!scene.applyCollisionObjects(obstacles))
@@ -1424,7 +1554,9 @@ int main(int argc, char ** argv) {
       throw std::runtime_error("dock or product moved during over-chassis staging");
 
     geometry_msgs::msg::Pose pregrasp = staging;
-    pregrasp.position.x = 0.85; pregrasp.position.z = 1.00;
+    pregrasp.position.x = 0.85;
+    pregrasp.position.y = pickup_product_lateral;
+    pregrasp.position.z = 1.00;
     const std::vector<double> pregrasp_seed{
       -0.000032311, -0.760907950, 0.661511204,
       0.000037514, 0.099207379, -0.000017083};
@@ -1853,10 +1985,10 @@ int main(int argc, char ** argv) {
     // put the selected slot at the proven reachable base-frame offset; do not
     // add another registry pose or silently exceed the bounded segment cap.
     const auto selected_slot = product.dispatch_slots.at(product.selected_slot_index);
-    // This radial stance is the nearest production-KDL branch that also
-    // clears the AMR chassis with the held product at the release height.
-    // Reach it through bounded navigation segments; each segment remains at
-    // or below the existing 0.15 m alignment bound.
+    // Use the existing upper/off-center radial stance, mirror its lateral sign
+    // for a lower slot, and use a forward stance for a centered slot. Reach
+    // the selected stance through bounded navigation segments; each segment
+    // remains at or below the existing 0.15 m alignment bound.
     constexpr double kDesiredSlotBaseX = 0.520000000;
     constexpr double kDesiredSlotBaseY = -0.580000000;
     constexpr double kMaxPlacementAlignmentSegmentDisplacement = 0.15;
@@ -1880,16 +2012,32 @@ int main(int argc, char ** argv) {
     // sequencing, not controller parameters or safety limits.
     constexpr double kMaxPlacementCommandDisplacement =
       kMaxPlacementAlignmentSegmentDisplacement - kMaxPlacementAlignmentPositionError;
+    const double selected_slot_lateral_offset =
+      selected_slot[1] - product.dispatch_dock[1];
+    if (!std::isfinite(selected_slot_lateral_offset))
+      throw std::runtime_error("desired placement stance lateral offset was non-finite");
+    double desired_slot_direction_x;
+    double desired_slot_direction_y;
+    if (selected_slot_lateral_offset > 0.0) {
+      desired_slot_direction_x = kDesiredSlotBaseX;
+      desired_slot_direction_y = kDesiredSlotBaseY;
+    } else if (selected_slot_lateral_offset < 0.0) {
+      desired_slot_direction_x = kDesiredSlotBaseX;
+      desired_slot_direction_y = -kDesiredSlotBaseY;
+    } else {
+      desired_slot_direction_x = 1.0;
+      desired_slot_direction_y = 0.0;
+    }
     const double desired_slot_direction_radius =
-      std::hypot(kDesiredSlotBaseX, kDesiredSlotBaseY);
+      std::hypot(desired_slot_direction_x, desired_slot_direction_y);
     if (!std::isfinite(desired_slot_direction_radius) || desired_slot_direction_radius <= 0.0 ||
       !std::isfinite(kDesiredSlotBaseRadius) || kDesiredSlotBaseRadius <= 0.0)
     {
       throw std::runtime_error("desired placement stance radius was invalid");
     }
     const double desired_slot_scale = kDesiredSlotBaseRadius / desired_slot_direction_radius;
-    const double desired_slot_base_x = kDesiredSlotBaseX * desired_slot_scale;
-    const double desired_slot_base_y = kDesiredSlotBaseY * desired_slot_scale;
+    const double desired_slot_base_x = desired_slot_direction_x * desired_slot_scale;
+    const double desired_slot_base_y = desired_slot_direction_y * desired_slot_scale;
     if (!std::isfinite(desired_slot_scale) || !std::isfinite(desired_slot_base_x) ||
       !std::isfinite(desired_slot_base_y))
     {
@@ -2318,8 +2466,56 @@ int main(int argc, char ** argv) {
     constexpr std::size_t kMaximumInterpolationSamples = 1000;
     if (!std::isfinite(interpolation_resolution) || interpolation_resolution <= 0.0)
       throw std::runtime_error("placement lower interpolation resolution was invalid");
-    const auto execution_solutions = std::vector<std::vector<double>>(
-      retained_placement_solutions.rbegin(), retained_placement_solutions.rend());
+    std::vector<std::vector<double>> execution_solutions;
+    if (product.id == 101) {
+      // Product 101 has an accepted runtime path.  Keep its retained L path
+      // unchanged so the higher-mass camera-clearance correction cannot alter
+      // the established 1 kg behavior.
+      execution_solutions.assign(
+        retained_placement_solutions.rbegin(), retained_placement_solutions.rend());
+    } else {
+      // The center/lower higher-mass slots can intersect the fixed product
+      // camera on the retained Cartesian L path.  Let the existing collision-
+      // aware planner find a joint-space detour from the validated pre-place
+      // state to the exact release branch, then retain and independently
+      // validate every returned waypoint below.
+      arm.setStartStateToCurrentState();
+      if (!arm.setJointValueTarget(release_ik_solution))
+        throw std::runtime_error("exact higher-mass release joint target was rejected");
+      MoveGroupInterface::Plan collision_aware_lower_plan;
+      if (arm.plan(collision_aware_lower_plan) != moveit::core::MoveItErrorCode::SUCCESS)
+        throw std::runtime_error("collision-aware higher-mass placement planning failed");
+      const auto & planned_trajectory = collision_aware_lower_plan.trajectory_.joint_trajectory;
+      if (planned_trajectory.joint_names != expected_placement_joint_names ||
+        planned_trajectory.points.empty())
+      {
+        throw std::runtime_error("collision-aware placement trajectory was incomplete");
+      }
+      execution_solutions.reserve(planned_trajectory.points.size());
+      for (const auto & point : planned_trajectory.points) {
+        if (point.positions.size() != expected_placement_joint_names.size() ||
+          !finite_joint_values(point.positions))
+        {
+          throw std::runtime_error("collision-aware placement waypoint was invalid");
+        }
+        execution_solutions.push_back(point.positions);
+      }
+      double planned_endpoint_error = 0.0;
+      for (std::size_t index = 0; index < release_ik_solution.size(); ++index) {
+        planned_endpoint_error = std::max(
+          planned_endpoint_error,
+          std::abs(execution_solutions.back().at(index) - release_ik_solution.at(index)));
+      }
+      if (!std::isfinite(planned_endpoint_error) || planned_endpoint_error > 0.01)
+        throw std::runtime_error("collision-aware placement endpoint missed release branch");
+      // Preserve the exact release endpoint required by the placement gate;
+      // common interpolation validation below covers this final correction.
+      execution_solutions.back() = release_ik_solution;
+      RCLCPP_INFO(
+        node->get_logger(),
+        "Retained collision-aware higher-mass placement path: points=%zu endpoint_error=%.6f rad",
+        execution_solutions.size(), planned_endpoint_error);
+    }
     if (execution_solutions.empty())
       throw std::runtime_error("placement lower retained sequence was empty");
     const auto validate_interpolated_segment =
@@ -2472,8 +2668,6 @@ int main(int argc, char ** argv) {
     if (!attachment_gate.confirm_detached(product.id))
       throw std::runtime_error("fresh native detachment confirmation was not accepted");
     product_attached = false;
-    node->set_status(amr_interfaces::msg::ManipulatorStatus::MOVING,
-      false, false, "Dispatch detachment confirmed; opening gripper");
     require_motion_permission();
     if (!amr_manipulation::command_gripper(node, 0.035))
       throw std::runtime_error("gripper opening after detachment failed");

@@ -6,6 +6,17 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_ros_live_control_behavior_test_uses_an_isolated_domain():
+    cmake = (ROOT / "CMakeLists.txt").read_text()
+    properties = cmake.index(
+        "set_tests_properties(\n    control_configuration_test PROPERTIES")
+    test_environment = cmake[properties:cmake.index(
+        "ament_add_pytest_test", properties)]
+
+    assert "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_logs" in test_environment
+    assert "ROS_DOMAIN_ID=211" in test_environment
+
+
 def test_control_lifecycle_registers_activation_before_configuration():
     launch = (ROOT / "launch" / "amr_control.launch.py").read_text()
     managed_start = launch.index("def managed_node")

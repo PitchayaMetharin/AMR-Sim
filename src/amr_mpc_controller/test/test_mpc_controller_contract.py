@@ -124,3 +124,10 @@ def test_local_costmap_uses_local_state_and_both_perception_clouds():
 def test_controller_output_is_internal_to_arbitration():
     launch = (ROOT / "launch" / "amr_mpc_controller.launch.py").read_text()
     assert '("cmd_vel", "/amr/mpc/cmd_vel")' in launch
+
+
+def test_lifecycle_manager_starts_after_controller_construction_barrier():
+    launch = (ROOT / "launch" / "amr_mpc_controller.launch.py").read_text()
+    assert "controller_server = Node(" in launch
+    assert "lifecycle_manager = Node(" in launch
+    assert "TimerAction(period=1.0, actions=[lifecycle_manager])" in launch

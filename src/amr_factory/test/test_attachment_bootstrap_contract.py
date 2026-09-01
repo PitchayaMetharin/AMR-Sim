@@ -25,7 +25,8 @@ def test_bootstrap_is_only_enabled_for_native_attachment_mode():
     assert 'OnProcessExit(target_action=pause_gate, on_exit=[spawn])' in launch
     assert 'OnProcessExit(target_action=spawn, on_exit=[inserted_gate])' in launch
     assert 'OnProcessExit(target_action=ready_gate, on_exit=[joint_states])' in launch
-    assert 'OnProcessExit(target_action=gripper_controller, on_exit=[controller_ready_gate])' in launch
+    assert 'OnProcessExit(target_action=gripper_controller, on_exit=[gripper_right_controller])' in launch
+    assert 'OnProcessExit(target_action=gripper_right_controller, on_exit=[controller_ready_gate])' in launch
     assert 'on_exit=deferred_factory_actions' in launch
     assert '"/world/factory_world/set_pose@ros_gz_interfaces/srv/SetEntityPose"' not in launch
     assert 'actions.append(bootstrap)' in launch
@@ -92,11 +93,13 @@ def test_controller_gate_holds_deferred_graph_on_failure():
         "    return actions", 1)[0]
     assert "condition=IfCondition" not in controller_gate_block
     assert "deferred_factory_actions" in launch
-    assert "OnProcessExit(target_action=gripper_controller, on_exit=[controller_ready_gate])" in false_mode_block
+    assert "OnProcessExit(target_action=gripper_controller, on_exit=[gripper_right_controller])" in false_mode_block
+    assert "OnProcessExit(target_action=gripper_right_controller, on_exit=[controller_ready_gate])" in false_mode_block
     assert "OnProcessExit(target_action=controller_ready_gate" in false_mode_block
     assert "on_exit=deferred_factory_actions" in false_mode_block
     assert "actions.extend(deferred_factory_actions)" not in false_mode_block
     assert "REQUIRED_CONTROLLERS" in source
+    assert '"gripper_right_controller"' in source
     assert "CONTROLLER_SERVICE_TIMEOUT_SEC = 5.0" in source
     assert "controller-manager service" in source
     assert "refusing deferred factory graph" in source

@@ -120,6 +120,253 @@ def test_canonical_map_has_exact_geometry_and_metadata():
     assert 255 in pixels
 
 
+def test_pickup_pedestal_map_cells_match_sdf_geometry():
+    metadata = yaml.safe_load((ROOT / "maps" / "factory.yaml").read_text())
+    resolution = metadata["resolution"]
+    origin_x, origin_y, _ = metadata["origin"]
+    occupied_cutoff = (1.0 - metadata["occupied_thresh"]) * 255.0
+
+    with (ROOT / "maps" / "factory.pgm").open("rb") as image:
+        assert image.readline() == b"P5\n"
+        dimensions = image.readline().strip()
+        while dimensions.startswith(b"#"):
+            dimensions = image.readline().strip()
+        width, height = map(int, dimensions.split())
+        assert image.readline() == b"255\n"
+        pixels = image.read()
+
+    assert len(pixels) == width * height
+
+    def grid_index(value, origin):
+        index = (value - origin) / resolution
+        assert math.isclose(index, round(index), abs_tol=1e-9)
+        return int(round(index))
+
+    def is_occupied(row, column):
+        assert 0 <= row < height and 0 <= column < width
+        return pixels[row * width + column] <= occupied_cutoff
+
+    sdf = ET.fromstring((ROOT / "worlds" / "factory.sdf").read_text())
+    for station_name, expected_rows in (
+        ("pickup_a", range(35, 45)),
+        ("pickup_b", range(95, 105)),
+        ("pickup_c", range(155, 165)),
+    ):
+        collision = sdf.find(
+            f".//collision[@name='{station_name}_pedestal']")
+        pose = [float(value) for value in collision.find("pose").text.split()]
+        size = [float(value) for value in collision.find(
+            "geometry/box/size").text.split()]
+        min_column = grid_index(pose[0] - size[0] / 2.0, origin_x)
+        max_column = grid_index(pose[0] + size[0] / 2.0, origin_x)
+        min_map_row = grid_index(pose[1] - size[1] / 2.0, origin_y)
+        max_map_row = grid_index(pose[1] + size[1] / 2.0, origin_y)
+        image_rows = range(height - max_map_row, height - min_map_row)
+        image_columns = range(min_column, max_column)
+
+        assert tuple(image_rows) == tuple(expected_rows)
+        assert tuple(image_columns) == tuple(range(182, 190))
+        expected_occupied = {
+            (row, column)
+            for row in image_rows
+            for column in image_columns
+        }
+        local_window_rows = range(image_rows.start - 1, image_rows.stop)
+        local_window_columns = range(image_columns.start, image_columns.stop + 2)
+        observed_occupied = {
+            (row, column)
+            for row in local_window_rows
+            for column in local_window_columns
+            if is_occupied(row, column)
+        }
+        assert observed_occupied == expected_occupied, (
+            f"{station_name} pedestal occupancy differs from its SDF-derived "
+            f"cell block: unexpected={observed_occupied - expected_occupied}, "
+            f"missing={expected_occupied - observed_occupied}"
+        )
+
+
+def test_factory_right_side_map_cells_match_sdf_geometry():
+    metadata = yaml.safe_load((ROOT / "maps" / "factory.yaml").read_text())
+    resolution = metadata["resolution"]
+    origin_x, origin_y, _ = metadata["origin"]
+    occupied_cutoff = (1.0 - metadata["occupied_thresh"]) * 255.0
+
+    with (ROOT / "maps" / "factory.pgm").open("rb") as image:
+        assert image.readline() == b"P5\n"
+        width, height = map(int, image.readline().split())
+        assert image.readline() == b"255\n"
+        pixels = image.read()
+    assert len(pixels) == width * height
+
+    def lower_cell_index(value, origin):
+        return math.floor((value - origin) / resolution + 1e-9)
+
+    def upper_cell_index(value, origin):
+        return math.ceil((value - origin) / resolution - 1e-9)
+
+    def cells_for_bounds(bounds):
+        min_x, max_x, min_y, max_y = bounds
+        min_column = max(0, lower_cell_index(min_x, origin_x))
+        max_column = min(width, upper_cell_index(max_x, origin_x))
+        min_map_row = max(0, lower_cell_index(min_y, origin_y))
+        max_map_row = min(height, upper_cell_index(max_y, origin_y))
+        return {
+            (row, column)
+            for row in range(height - max_map_row, height - min_map_row)
+            for column in range(min_column, max_column)
+        }
+
+    def is_occupied(row, column):
+        return pixels[row * width + column] <= occupied_cutoff
+
+    def sdf_box_bounds(collision):
+        pose = [float(value) for value in collision.find("pose").text.split()]
+        size = [float(value) for value in collision.find(
+            "geometry/box/size").text.split()]
+        return (
+            pose[0] - size[0] / 2.0,
+            pose[0] + size[0] / 2.0,
+            pose[1] - size[1] / 2.0,
+            pose[1] + size[1] / 2.0,
+        )
+
+    sdf = ET.fromstring((ROOT / "worlds" / "factory.sdf").read_text())
+    world = sdf.find("world")
+    expected_occupied = set()
+    for boundary_name in ("east", "north", "south"):
+        collision = world.find(
+            f"./model[@name='factory_boundary']/link/collision[@name='{boundary_name}']"
+        )
+        expected_occupied.update(cells_for_bounds(sdf_box_bounds(collision)))
+
+    dae_namespace = {"c": "http://www.collada.org/2005/11/COLLADASchema"}
+    dae = ET.fromstring((ROOT / "models" /
+                         "aws_robomaker_warehouse_ShelfD_01" /
+                         "meshes/aws_robomaker_warehouse_ShelfD_01_collision.DAE"
+                         ).read_text())
+    unit = float(dae.find("./c:asset/c:unit", dae_namespace).attrib["meter"])
+    matrix = [float(value) for value in dae.find(
+        ".//c:visual_scene/c:node/c:matrix", dae_namespace).text.split()]
+    position_source = next(
+        source for source in dae.findall(".//c:source", dae_namespace)
+        if source.attrib["id"].endswith("-POSITION")
+    )
+    raw_values = [float(value) for value in position_source.find(
+        "c:float_array", dae_namespace).text.split()]
+    raw_points = list(zip(raw_values[0::3], raw_values[1::3], raw_values[2::3]))
+
+    def dae_transform(point):
+        point_m = [value * unit for value in point]
+        return tuple(
+            sum(matrix[row * 4 + column] * point_m[column]
+                for column in range(3))
+            + matrix[row * 4 + 3] * unit
+            for row in range(3)
+        )
+
+    triangles = dae.find(".//c:triangles", dae_namespace)
+    inputs = triangles.findall("c:input", dae_namespace)
+    vertex_input = next(
+        item for item in inputs if item.attrib["semantic"] == "VERTEX"
+    )
+    vertex_offset = int(vertex_input.attrib["offset"])
+    stride = max(int(item.attrib["offset"]) for item in inputs) + 1
+    indices = [int(value) for value in triangles.find(
+        "c:p", dae_namespace).text.split()]
+    vertex_indices = indices[vertex_offset::stride]
+    assert len(vertex_indices) % 3 == 0
+
+    adjacency = {index: set() for index in range(len(raw_points))}
+    for first, second, third in zip(
+        vertex_indices[0::3], vertex_indices[1::3], vertex_indices[2::3]
+    ):
+        for left, right in ((first, second), (second, third), (third, first)):
+            adjacency[left].add(right)
+            adjacency[right].add(left)
+    components = []
+    unseen = set(adjacency)
+    while unseen:
+        pending = [unseen.pop()]
+        component = set(pending)
+        while pending:
+            for neighbor in adjacency[pending.pop()] & unseen:
+                unseen.remove(neighbor)
+                component.add(neighbor)
+                pending.append(neighbor)
+        components.append(component)
+
+    transformed_components = [
+        [dae_transform(raw_points[index]) for index in component]
+        for component in components
+    ]
+    lidar_height = 0.52248
+    scan_components = [
+        component for component in transformed_components
+        if min(point[2] for point in component) <= lidar_height <= max(
+            point[2] for point in component
+        )
+    ]
+    assert len(scan_components) == 3
+
+    expected_scan_rows = {
+        "pickup_a": {2, 3, 41, 42, 80, 81},
+        "pickup_b": {60, 61, 99, 100, 138, 139},
+        "pickup_c": {118, 119, 157, 158, 196, 197},
+    }
+    for station_name in ("pickup_a", "pickup_b", "pickup_c"):
+        include = next(
+            include for include in world.findall("./include")
+            if include.findtext("name") == f"{station_name}_shelf"
+        )
+        pose = [float(value) for value in include.find("pose").text.split()]
+        cosine = math.cos(pose[5])
+        sine = math.sin(pose[5])
+        station_scan_cells = set()
+        for component in scan_components:
+            world_points = [
+                (
+                    pose[0] + cosine * point[0] - sine * point[1],
+                    pose[1] + sine * point[0] + cosine * point[1],
+                )
+                for point in component
+            ]
+            bounds = (
+                min(point[0] for point in world_points),
+                max(point[0] for point in world_points),
+                min(point[1] for point in world_points),
+                max(point[1] for point in world_points),
+            )
+            station_scan_cells.update(cells_for_bounds(bounds))
+        assert {row for row, _ in station_scan_cells} == expected_scan_rows[
+            station_name
+        ]
+        assert {column for _, column in station_scan_cells} == set(
+            range(218, 236)
+        )
+        expected_occupied.update(station_scan_cells)
+
+    local_window_start = lower_cell_index(4.0, origin_x)
+    assert local_window_start == 200
+    local_window = {
+        (row, column)
+        for row in range(height)
+        for column in range(local_window_start, width)
+    }
+    expected_local_occupied = expected_occupied & local_window
+    observed_local_occupied = {
+        (row, column)
+        for row, column in local_window
+        if is_occupied(row, column)
+    }
+    assert observed_local_occupied == expected_local_occupied, (
+        "right-side map occupancy differs from the transformed SDF/DAE "
+        "geometry: "
+        f"unexpected={observed_local_occupied - expected_local_occupied}, "
+        f"missing={expected_local_occupied - observed_local_occupied}"
+    )
+
+
 def test_registry_navigation_poses_have_required_map_clearance():
     metadata = yaml.safe_load((ROOT / "maps" / "factory.yaml").read_text())
     resolution = metadata["resolution"]
@@ -174,6 +421,21 @@ def test_pickup_egress_geometry_is_collinear_bounded_and_reverse():
         assert 0.0 < dot < approach_distance * approach_distance
         assert math.isclose(distance, 0.50, abs_tol=1e-9)
         assert egress["yaw"] == dock["yaw"] == approach["yaw"]
+
+
+def test_factory_amcl_motion_noise_is_zero_for_deterministic_simulation():
+    config = yaml.safe_load((ROOT / "config" / "amcl.yaml").read_text())
+    parameters = config["/amr/amcl"]["ros__parameters"]
+    assert {
+        key: parameters[key]
+        for key in ("alpha1", "alpha2", "alpha3", "alpha4", "alpha5")
+    } == {
+        "alpha1": 0.0,
+        "alpha2": 0.0,
+        "alpha3": 0.0,
+        "alpha4": 0.0,
+        "alpha5": 0.0,
+    }
 
 
 def test_factory_localization_launch_uses_amcl_and_never_slam():

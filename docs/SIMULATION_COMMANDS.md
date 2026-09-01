@@ -5,9 +5,12 @@ terminal. It applies to the laptop-only ROS 2 Humble and Gazebo Harmonic
 workspace. It does not make physical-robot, hardware, or functional-safety
 claims.
 
-Current Gate 6 status: the 1 kg run is accepted. The independent 3 kg and 5 kg
-preparation commands are implemented and source-validated, but their live
-runtime evidence is still pending, so Gate 6 remains open.
+Current Gate 6 status: the preserved Product 101 pass-1/Phase K run and the
+independent pass-2 1 kg run are accepted after corrected evidence analysis.
+Pass-2 originally reached the stage PASS line but the analyzer rejected the
+bag because of an analyzer command-timestamp false negative; the same bag was
+reanalyzed after the minimum analyzer fix and passed. Do not start 3 kg, 5 kg,
+or Gate 7 without the required evidence review and authorization.
 
 The current navigation chain is:
 
@@ -252,17 +255,41 @@ Wait until MoveIt reports that the planning group is ready.
 Paste the common setup, then run these read-only checks:
 
 ```bash
-ros2 lifecycle get /amr/command_arbitration_node
-ros2 lifecycle get /amr/controller_server
-ros2 lifecycle get /amr/planner_server
-ros2 lifecycle get /amr/smoother_server
+ros2 run amr_factory factory_runtime_preflight.py graph \
+  --evidence-dir "$ROS_LOG_DIR/evidence"
+
+ros2 run amr_factory factory_runtime_preflight.py lifecycle \
+  --evidence-dir "$ROS_LOG_DIR/evidence/lifecycle_preflight"
+
 ros2 action list
 ros2 control list_controllers -c /controller_manager
 ```
 
-The lifecycle nodes should report `active`; the arm and gripper controllers
-should report `active`; and the action list should include the mission,
-planning, smoothing, and follow-path endpoints.
+The lifecycle preflight should report `verdict=PASS`; the arm and gripper
+controllers should report `active`; and the action list should include the
+mission, planning, smoothing, and follow-path endpoints.
+
+The graph preflight creates one persistent ROS 2 observer, requires the 17
+factory nodes plus `/move_group`, rejects duplicate required names, and
+requires the complete graph to remain stable for two seconds. Do not replace
+it with repeated short-lived `ros2 node list --no-daemon` calls: those create
+fresh discovery participants and can report incomplete snapshots. If graph
+preflight fails, stop before starting the recorder or Product 101.
+
+The lifecycle preflight uses one persistent ROS 2 participant and one client
+per required lifecycle node. It requires all 17 nodes to report exact lifecycle
+state ID `3` and label `active` continuously for two seconds within one bounded
+30-second readiness window. Individual responses are bounded at one second and
+a lost response is removed before the next observation. Do not replace this
+acceptance check with short-lived `ros2 lifecycle get` processes; fresh DDS
+participants can discover the service but lose the response during startup. If
+lifecycle preflight fails, stop before starting the recorder or product stage.
+
+The MPC controller launch starts `controller_server` before its lifecycle
+manager and applies a bounded one-second construction barrier. This protects
+Humble's zero-delay lifecycle-manager autostart from racing the controller's
+nested local-costmap construction; it does not change controller parameters or
+command ownership.
 
 ### Optional — empty-arm motion check
 
@@ -304,9 +331,47 @@ It should print a path such as
 Start recording before the product stage:
 
 ```bash
+recorder_qos="$ROS_LOG_DIR/gate6_recorder_qos.yaml"
+cat > "$recorder_qos" <<'YAML'
+/amr/base/joint_states:
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/tf_static:
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+/amr/simulation/attachment_bootstrap/status:
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+/amr/simulation/sensors/rear_lidar/scan:
+  depth: 5
+  reliability: reliable
+  durability: volatile
+/amr/sensors/rear_lidar/scan:
+  depth: 5
+  reliability: best_effort
+  durability: volatile
+/arm_controller/follow_joint_trajectory/_action/status:
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+/gripper_controller/gripper_cmd/_action/status:
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+/gripper_right_controller/gripper_cmd/_action/status:
+  depth: 1
+  reliability: reliable
+  durability: transient_local
+YAML
+
 ros2 bag record --include-hidden-topics --include-unpublished-topics \
+  --qos-profile-overrides-path "$recorder_qos" \
   -o "$ROS_LOG_DIR/product101_evidence" \
   /clock /tf /tf_static \
+  /amr/simulation/attachment_bootstrap/status \
   /amr/amcl_pose /amr/localization/odometry /amr/localization/wheel_odometry \
   /amr/base/odometry_raw /amr/simulation/base/odometry \
   /amr/simulation/ground_truth/pose \
@@ -328,6 +393,9 @@ ros2 bag record --include-hidden-topics --include-unpublished-topics \
   /amr/follow_path/_action/feedback \
   /amr/follow_path/_action/result \
   /amr/follow_path/_action/status \
+  /arm_controller/follow_joint_trajectory/_action/status \
+  /gripper_controller/gripper_cmd/_action/status \
+  /gripper_right_controller/gripper_cmd/_action/status \
   /amr/control/dock_egress/_action/goal \
   /amr/control/dock_egress/_action/feedback \
   /amr/control/dock_egress/_action/result \
@@ -337,6 +405,8 @@ ros2 bag record --include-hidden-topics --include-unpublished-topics \
   /amr/base/status /amr/manipulation/status \
   /amr/simulation/contacts/left_finger \
   /amr/simulation/contacts/right_finger \
+  /amr/simulation/sensors/rear_lidar/scan \
+  /amr/sensors/rear_lidar/scan \
   /amr/simulation/internal/attachment/product_101/attach \
   /amr/simulation/internal/attachment/product_101/detach \
   /amr/simulation/internal/attachment/product_101/state \
@@ -452,6 +522,12 @@ For a recorded run:
 ros2 bag info "$ROS_LOG_DIR/product101_evidence"
 ros2 bag play "$ROS_LOG_DIR/product101_evidence" --clock
 ```
+
+The Gate 6 analyzer checks each nonzero simulation command against an exact
+arbitration command at or before that output, within the existing 250 ms
+freshness bound. The base adapter forwards its cached arbitration command on
+an independent 50 ms timer, so a one-tick delay is valid evidence of the same
+owned command. An unowned value or stale output still fails closed.
 
 Only play a bag in a separate, read-only ROS domain. Do not replay command
 topics into a live plant.

@@ -263,6 +263,12 @@ def launch_robot(context):
         arguments=["gripper_controller", "--controller-manager-timeout", "30"],
         output="screen",
     )
+    gripper_right_controller = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["gripper_right_controller", "--controller-manager-timeout", "30"],
+        output="screen",
+    )
     bootstrap = Node(
         package="amr_factory",
         executable="gate6_attachment_bootstrap",
@@ -354,10 +360,12 @@ def launch_robot(context):
             OnProcessExit(target_action=arm_controller, on_exit=[gripper_controller])))
         # The native attachment bootstrap must prove READY before the
         # controller chain starts.  Keep the sensor/navigation graph deferred
-        # until all three controllers are active so its startup load cannot
+        # until all four controllers are active so its startup load cannot
         # starve the Gazebo controller-manager callback thread.
         actions.append(RegisterEventHandler(
-            OnProcessExit(target_action=gripper_controller, on_exit=[controller_ready_gate])))
+            OnProcessExit(target_action=gripper_controller, on_exit=[gripper_right_controller])))
+        actions.append(RegisterEventHandler(
+            OnProcessExit(target_action=gripper_right_controller, on_exit=[controller_ready_gate])))
         actions.append(RegisterEventHandler(
             OnProcessExit(target_action=controller_ready_gate,
                           on_exit=deferred_factory_actions)))
@@ -372,7 +380,9 @@ def launch_robot(context):
             RegisterEventHandler(
                 OnProcessExit(target_action=arm_controller, on_exit=[gripper_controller])),
             RegisterEventHandler(
-                OnProcessExit(target_action=gripper_controller, on_exit=[controller_ready_gate])),
+                OnProcessExit(target_action=gripper_controller, on_exit=[gripper_right_controller])),
+            RegisterEventHandler(
+                OnProcessExit(target_action=gripper_right_controller, on_exit=[controller_ready_gate])),
             RegisterEventHandler(
                 OnProcessExit(target_action=controller_ready_gate,
                               on_exit=deferred_factory_actions)),

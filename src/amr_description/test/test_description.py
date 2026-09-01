@@ -617,9 +617,10 @@ def test_phase14_composite_control_and_moveit_contracts():
     controlled = [joint.attrib["name"] for joint in control.findall("joint")]
     assert controlled == [f"arm_joint_{index}" for index in range(1, 7)] + [
         "gripper_finger_joint", "gripper_right_finger_joint"]
-    mimic = control.find("./joint[@name='gripper_right_finger_joint']")
-    assert mimic.find("./param[@name='mimic']").text == "gripper_finger_joint"
-    assert float(mimic.find("./param[@name='multiplier']").text) == 1.0
+    right_joint = control.find("./joint[@name='gripper_right_finger_joint']")
+    assert right_joint.find("./command_interface[@name='position']") is not None
+    assert right_joint.find("./param[@name='mimic']") is None
+    assert right_joint.find("./param[@name='multiplier']") is None
 
     controllers = yaml.safe_load(
         (ROOT / "config" / "phase14_mobile_manipulator_controllers.yaml").read_text())
@@ -628,6 +629,11 @@ def test_phase14_composite_control_and_moveit_contracts():
         "joint_trajectory_controller/JointTrajectoryController")
     assert manager["gripper_controller"]["type"] == (
         "position_controllers/GripperActionController")
+    assert manager["gripper_right_controller"]["type"] == (
+        "position_controllers/GripperActionController")
+    left_gripper = controllers["gripper_controller"]["ros__parameters"]
+    right_gripper = controllers["gripper_right_controller"]["ros__parameters"]
+    assert right_gripper == {**left_gripper, "joint": "gripper_right_finger_joint"}
     arm_constraints = controllers["arm_controller"]["ros__parameters"]["constraints"]
     assert arm_constraints["goal_time"] == 1.0
     assert arm_constraints["stopped_velocity_tolerance"] == 0.01

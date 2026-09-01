@@ -21,6 +21,7 @@ REQUIRED_CONTROLLERS = {
     "joint_state_broadcaster",
     "arm_controller",
     "gripper_controller",
+    "gripper_right_controller",
 }
 CONTROLLER_SERVICE_TIMEOUT_SEC = 5.0
 

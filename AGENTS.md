@@ -1,69 +1,95 @@
 # AMR Workspace Guide
 
-Work deliberately and keep process proportional to risk. The current user
-instruction and `SESSION_HANDOFF.md` phase authority govern this workspace.
+The current user instruction and `SESSION_HANDOFF.md` define phase authority and scope.
 
-## Non-negotiable rules
+## Core rules
 
-- Before edits, run `git status --short`; preserve unrelated work.
-- Never modify, stage, discard, normalize, or commit `AMR_CODEX_HANDOFF.md`
-  without explicit user direction.
-- Do not push, force-push, rewrite history, or make external changes without
-  explicit approval.
-- Work only in an explicitly approved phase. Do not create future-phase
-  artifacts while waiting for authorization.
-- Preserve the fail-closed motion path and declared ownership boundaries. Do
-  not invent, substitute, or silently promote hardware values or safety claims.
+* Before edits, run `git status --short` and preserve unrelated work.
+* Never modify, stage, discard, normalize, or commit `AMR_CODEX_HANDOFF.md` without explicit user direction.
+* Do not push, rewrite history, install dependencies, change system configuration, or make external changes without approval.
+* Work only inside the approved phase and paths.
+* Preserve fail-closed behavior, ownership boundaries, public interfaces, safety gates, thresholds, and documented hardware values unless explicitly authorized.
+* Never weaken a test or gate merely to obtain a pass.
 
-## Efficient operating defaults
+## Roles
 
-- Read the current handoff and only files directly relevant to the task; do not
-  reload prior phases unless a needed detail is absent.
-- Make the smallest coherent change. Avoid speculative abstractions, duplicate
-  documentation, and unrelated cleanup.
-- Use concise progress updates and final reports. State only decisions,
-  changes, validation, risks, and blockers relevant to the task.
-- Match validation to risk: run focused checks for focused edits and broader
-  builds/tests only when interfaces, behavior, or integration can be affected.
-- Use subagents only for independent, bounded work that materially reduces
-  elapsed time; do not delegate simple inspection or routine edits.
+**Sol/high** = read-only analysis, diagnosis, debugging, evidence review, planning.
 
-## Implementation and phase completion
+**Luna/max** = approved implementation and focused validation.
 
-- Preserve public interfaces, fail-closed behavior, and time/authority rules
-  unless the approved phase explicitly changes them.
-- Record behavior-affecting assumptions in the relevant artifact; do not add
-  commentary that repeats established project context.
-- At an approved phase end, follow the handoff's required documentation,
-  validation, approval, and commit sequence. This file intentionally does not
-  duplicate those detailed phase instructions.
+Default workflow:
 
-## Reusable diagnosis-to-implementation workflow
+`Sol diagnosis -> Luna implementation -> Sol review`
 
-- Always use **Sol/high** for read-only planning, debugging, analysis,
-  diagnosis, and evidence, and **Luna/max** for approved implementation and
-  focused verification. A separate runtime-evidence pass is optional and only
-  runs when explicitly authorized after source validation.
-- Sol/high must trace the reported behavior to a concrete mechanism, record
-  the exact affected paths and invariants, and hand off a concise analyst
-  packet containing evidence, non-goals, validation commands, and blockers.
-- Luna/max starts only from that packet plus an approved plan, rechecks
-  `git status --short`, makes the smallest scoped edit, inspects the combined
-  diff, and runs focused checks before any broader or runtime validation.
-- Treat this as a serialized shared workspace: one writer at a time, no
-  concurrent edits to the same file or interface, and no reset, checkout,
-  normalization, staging, commit, push, or deletion of another agent's work.
-  Every handoff must identify the current worktree state; the receiving role
-  must re-read the relevant files and status before writing.
-- Escalate and stop when phase authority, target ownership, existing dirty
-  state, safety boundaries, or required test baselines are ambiguous; when a
-  change would exceed the approved paths; or when validation needs new
-  privileges, dependencies, downloads, live-system access, or a workaround.
-  Do not silently substitute tuning, weaken a gate, or reclassify a failure.
-- A context handoff must state the objective, diagnosis, exact allowed files,
-  preserved invariants and non-goals, commands and results, and unresolved
-  risks. Runtime evidence must remain a separately bounded activity and must
-  stop at the first failed gate.
-- Do not create a custom plugin, call an external API, install a dependency,
-  or download an asset by default. Use repository-local tools and existing
-  interfaces unless the user explicitly approves the expansion.
+One writer at a time. Luna must not improvise a different fix if evidence contradicts Sol's diagnosis; stop and return to Sol.
+
+## Diagnosis before editing
+
+Before Luna changes source, Sol must establish:
+
+* observed vs expected behavior
+* concrete failure mechanism
+* supporting evidence
+* exact affected files
+* preserved invariants and non-goals
+* a falsifiable prediction
+* focused validation commands
+
+If the cause is `UNKNOWN`, gather evidence instead of editing code.
+
+## Debug-loop breaker
+
+Every debugging iteration must produce new information by confirming, falsifying, or narrowing a hypothesis.
+
+Do not repeat essentially the same patch or retry without new evidence.
+For repeated, unresolved, integration, or timing-sensitive failures, follow DEBUG_PLAYBOOK.md before further source edits.
+Maximum:
+
+* **2 implementation attempts per root-cause hypothesis**
+* **3 rejected root-cause hypotheses for the same blocker**
+
+After either limit is reached, stop autonomous patching and report the evidence, rejected hypotheses, strongest remaining explanation, and uncertainty to the user.
+
+A failed implementation must return to Sol for re-diagnosis before another source change.
+
+## Runtime validation
+
+Runtime evidence is separate from source implementation.
+
+* Run focused source validation first.
+* Runtime runs require authorization when specified by the handoff.
+* Preserve evidence and stop at the first failed mandatory gate.
+* Do not patch immediately after a runtime failure; return the evidence to Sol first.
+* Do not treat build/unit success as runtime proof.
+
+Timing changes require timing evidence. Prefer waiting on observable state over arbitrary sleeps.
+
+## Implementation discipline
+
+Luna must:
+
+1. recheck `git status --short`
+2. re-read the target files
+3. make the smallest coherent change
+4. inspect the complete diff
+5. run focused checks
+6. report commands, results, changed files, and remaining risks
+
+Avoid speculative refactors, unrelated cleanup, and future-phase work.
+
+## Handoffs
+
+Every Sol -> Luna handoff should state:
+
+* objective
+* diagnosis and confidence
+* evidence
+* allowed files
+* invariants/non-goals
+* prediction
+* validation commands
+* current worktree state
+* stop conditions
+
+For detailed difficult-debugging procedure, follow `DEBUG_PLAYBOOK.md`.
+For repeated, unresolved, integration, or timing-sensitive failures, follow DEBUG_PLAYBOOK.md before further source edits.

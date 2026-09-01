@@ -45,7 +45,8 @@ if(BUILD_TESTING)
     rclcpp_action rclcpp_lifecycle sensor_msgs tf2 tf2_geometry_msgs tf2_ros)
   set_tests_properties(
     control_configuration_test PROPERTIES
-    ENVIRONMENT "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_logs")
+    ENVIRONMENT
+    "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_logs;ROS_DOMAIN_ID=211")
   ament_add_pytest_test(control_contract_test test/test_control_contract.py)
 endif()
 

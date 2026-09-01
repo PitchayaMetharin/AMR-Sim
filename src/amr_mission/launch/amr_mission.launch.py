@@ -1,6 +1,6 @@
 """Launch and activate the fail-closed mission boundary."""
 from launch import LaunchDescription
-from launch.actions import EmitEvent, RegisterEventHandler
+from launch.actions import EmitEvent, LogInfo, RegisterEventHandler, TimerAction
 from launch.events import matches_action
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
@@ -18,16 +18,22 @@ def generate_launch_description():
     )
     return LaunchDescription([
         mission,
-        EmitEvent(event=ChangeState(
-            lifecycle_node_matcher=matches_action(mission),
-            transition_id=Transition.TRANSITION_CONFIGURE,
-        )),
+        TimerAction(period=1.0, actions=[
+            LogInfo(msg="MISSION_SUPERVISOR_CONFIGURE_TRANSITION_START"),
+            EmitEvent(event=ChangeState(
+                lifecycle_node_matcher=matches_action(mission),
+                transition_id=Transition.TRANSITION_CONFIGURE,
+            )),
+        ]),
         RegisterEventHandler(OnStateTransition(
             target_lifecycle_node=mission,
             goal_state="inactive",
-            entities=[EmitEvent(event=ChangeState(
-                lifecycle_node_matcher=matches_action(mission),
-                transition_id=Transition.TRANSITION_ACTIVATE,
-            ))],
+            entities=[
+                LogInfo(msg="MISSION_SUPERVISOR_ACTIVATE_TRANSITION_START"),
+                EmitEvent(event=ChangeState(
+                    lifecycle_node_matcher=matches_action(mission),
+                    transition_id=Transition.TRANSITION_ACTIVATE,
+                )),
+            ],
         )),
     ])

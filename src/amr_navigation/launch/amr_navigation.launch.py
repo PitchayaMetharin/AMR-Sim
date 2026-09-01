@@ -3,12 +3,21 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import TimerAction
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     parameters = os.path.join(
         get_package_share_directory("amr_navigation"), "config", "planner.yaml")
+    lifecycle_manager = Node(
+        package="nav2_lifecycle_manager",
+        executable="lifecycle_manager",
+        name="lifecycle_manager_planning",
+        namespace="/amr",
+        output="screen",
+        parameters=[parameters],
+    )
     return LaunchDescription([
         Node(
             package="nav2_planner",
@@ -26,12 +35,5 @@ def generate_launch_description():
             output="screen",
             parameters=[parameters],
         ),
-        Node(
-            package="nav2_lifecycle_manager",
-            executable="lifecycle_manager",
-            name="lifecycle_manager_planning",
-            namespace="/amr",
-            output="screen",
-            parameters=[parameters],
-        ),
+        TimerAction(period=1.0, actions=[lifecycle_manager]),
     ])
