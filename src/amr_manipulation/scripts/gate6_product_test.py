@@ -734,8 +734,29 @@ class ProductPreparation(Node):
             raise NavigationAbortedError(detail, latest_localized)
         if latest_localized is None or not self._fresh(
                 latest_localized_at, NAVIGATION_FEEDBACK_MAX_AGE_S):
-            raise PreparationError(
-                f"fresh localized terminal pose from {endpoint} was unavailable")
+            # A same-position precise goal can complete before the mission
+            # supervisor forwards its final controller feedback.  For normal
+            # precise docking legs only, use the independent AMCL stream
+            # within its existing bounded terminal age; the caller still
+            # requires stationary physical dock and product proofs afterward.
+            if precise and not retreat:
+                amcl_pose = self._amcl_pose
+                if amcl_pose is not None and \
+                        amcl_pose.header.frame_id == "map" and \
+                        self._fresh(
+                            self._amcl_pose_at, RELOCALIZATION_TERMINAL_AMCL_MAX_AGE_S):
+                    try:
+                        latest_localized = _finite_values(
+                            _amcl_pose_tuple(amcl_pose), "fresh AMCL terminal pose")
+                    except (AttributeError, PreparationError, TypeError, ValueError):
+                        latest_localized = None
+                    else:
+                        self.get_logger().warning(
+                            f"{endpoint} succeeded without a fresh public feedback pose; "
+                            "using bounded fresh AMCL terminal pose")
+            if latest_localized is None:
+                raise PreparationError(
+                    f"fresh localized terminal pose from {endpoint} was unavailable")
         self.get_logger().info(
             f"{endpoint} localized terminal pose: "
             f"x={latest_localized[0]:.4f} y={latest_localized[1]:.4f} "

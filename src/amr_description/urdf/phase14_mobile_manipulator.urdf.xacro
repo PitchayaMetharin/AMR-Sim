@@ -112,7 +112,10 @@
   </link>
   <joint name="product_camera_joint" type="fixed">
     <parent link="base_link"/><child link="product_camera_link"/>
-    <origin xyz="0.25 0 0.65" rpy="0 0 0"/>
+    <!-- Lateral AMR mount clears the centered manipulator sweep while the
+         optical frame remains forward-facing and the body collision stays
+         active. -->
+    <origin xyz="0.25 0.20 0.65" rpy="0 0 0"/>
   </joint>
   <link name="product_camera_optical_frame"/>
   <joint name="product_camera_optical_joint" type="fixed">

@@ -571,7 +571,10 @@ def test_phase14_composite_has_unique_names_fixed_mount_and_mass_budget():
                for joint in arm_joints)
 
     camera_joint = robot.find("./joint[@name='product_camera_joint']/origin")
-    assert camera_joint.attrib["xyz"] == "0.25 0 0.65"
+    assert camera_joint.attrib["xyz"] == "0.25 0.20 0.65"
+    camera_link = robot.find("./link[@name='product_camera_link']")
+    assert camera_link.find("./collision/geometry/box").attrib["size"] == (
+        "0.08 0.05 0.05")
     camera = robot.find(
         "./gazebo[@reference='product_camera_link']/sensor[@name='product_camera']")
     assert camera.attrib["type"] == "rgbd_camera"

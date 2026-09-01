@@ -75,6 +75,16 @@ def test_persistent_product_runner_is_limited_and_fail_closed():
     assert '"gate6_mass_stage.launch.py"' in source
     assert "product_id:=unknown" not in source
     assert "feedback_callback=feedback_callback" in source
+    navigate_start = source.index("    def _navigate(")
+    navigate_end = source.index("    def _relocalize_at_reference", navigate_start)
+    navigate_source = source[navigate_start:navigate_end]
+    assert "if precise and not retreat:" in navigate_source
+    terminal_fallback = navigate_source[navigate_source.index("if precise and not retreat:"):]
+    assert "self._amcl_pose" in terminal_fallback
+    assert 'amcl_pose.header.frame_id == "map"' in terminal_fallback
+    assert "RELOCALIZATION_TERMINAL_AMCL_MAX_AGE_S" in terminal_fallback
+    assert '"fresh AMCL terminal pose"' in terminal_fallback
+    assert "succeeded without a fresh public feedback pose" in terminal_fallback
     assert "egress: Optional[Tuple[float, float, float]]" in source
     assert 'station.get("egress")' in source
     assert "def _retreat_from_other_pickup_dock" in source

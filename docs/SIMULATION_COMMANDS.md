@@ -5,12 +5,12 @@ terminal. It applies to the laptop-only ROS 2 Humble and Gazebo Harmonic
 workspace. It does not make physical-robot, hardware, or functional-safety
 claims.
 
-Current Gate 6 status: the preserved Product 101 pass-1/Phase K run and the
-independent pass-2 1 kg run are accepted after corrected evidence analysis.
-Pass-2 originally reached the stage PASS line but the analyzer rejected the
-bag because of an analyzer command-timestamp false negative; the same bag was
-reanalyzed after the minimum analyzer fix and passed. Do not start 3 kg, 5 kg,
-or Gate 7 without the required evidence review and authorization.
+Current Gate 6 status: Product102 (3 kg) passed the strict direct-host run at
+`.ros_logs/gate6_product102_geometry_20260902_03/`, including exact stage
+markers, final slot, independent bag analysis, cleanup, and hash integrity.
+Product103 (5 kg) was not attempted. The Product102 branch is accepted, but
+full Gate 6 and Gate 7 remain pending the authorized Product103 result. Do not
+rerun an accepted product merely for progression.
 
 The current navigation chain is:
 
@@ -131,19 +131,24 @@ ros2 run amr_factory factory_runtime_preflight.py host \
 ros2 launch amr_factory factory_localization.launch.py \
   headless:=false software_rendering:=false \
   require_hardware_rendering:=true \
-  factory_attachment:=false \
+  factory_attachment:=true \
   initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
 
 # Headless mode:
 # ros2 launch amr_factory factory_localization.launch.py \
 #   headless:=true software_rendering:=false \
 #   require_hardware_rendering:=true \
-#   factory_attachment:=false \
+#   factory_attachment:=true \
 #   initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
 ```
 
 If the host preflight fails, stop and fix the host/device access problem. Do
 not substitute software rendering for timing-sensitive evidence.
+
+`factory_attachment:=true` is mandatory for Gate 6 product runs because it
+starts the native attachment bootstrap and detachable-joint interfaces used
+by the fail-closed attachment proof. Keep `factory_attachment:=false` only for
+non-product visualization or mapping sessions.
 
 ### Factory online mapping (manual or autonomous commissioning)
 
@@ -369,7 +374,7 @@ YAML
 
 ros2 bag record --include-hidden-topics --include-unpublished-topics \
   --qos-profile-overrides-path "$recorder_qos" \
-  -o "$ROS_LOG_DIR/product101_evidence" \
+  -o "$ROS_LOG_DIR/product_evidence" \
   /clock /tf /tf_static \
   /amr/simulation/attachment_bootstrap/status \
   /amr/amcl_pose /amr/localization/odometry /amr/localization/wheel_odometry \
@@ -410,13 +415,19 @@ ros2 bag record --include-hidden-topics --include-unpublished-topics \
   /amr/simulation/internal/attachment/product_101/attach \
   /amr/simulation/internal/attachment/product_101/detach \
   /amr/simulation/internal/attachment/product_101/state \
-  /model/product_a/pose
+  /amr/simulation/internal/attachment/product_102/attach \
+  /amr/simulation/internal/attachment/product_102/detach \
+  /amr/simulation/internal/attachment/product_102/state \
+  /amr/simulation/internal/attachment/product_103/attach \
+  /amr/simulation/internal/attachment/product_103/detach \
+  /amr/simulation/internal/attachment/product_103/state \
+  /model/product_a/pose /model/product_b/pose /model/product_c/pose
 ```
 
 Every continuation backslash (`\`) must be the final character on its line;
-do not use doubled backslashes or add extra text after it. The attachment
-state topic is `/amr/simulation/internal/attachment/product_101/state`, and
-the product pose topic is `/model/product_a/pose`.
+do not use doubled backslashes or add extra text after it. Recording all three
+registered products keeps one strict recorder command valid for any selected
+Gate 6 product; unused product topics may have zero messages.
 
 Wait for `Recording...` before starting the stage. Stop the recorder with
 `Ctrl-C` only after the stage has finished so the remaining messages are
@@ -424,11 +435,12 @@ written.
 
 ### Terminal 5 — product stage
 
-Paste the common setup, then choose exactly one test. The accepted 1 kg path is
-unchanged and should not be rerun for the 3 kg or 5 kg tests:
+Paste the common setup, then choose exactly one test. Product102 (3 kg) is
+accepted and should not be rerun merely for progression. Product103 (5 kg)
+remains pending explicit runtime authorization:
 
 ```bash
-# Existing accepted 1 kg path — unchanged:
+# Product101, 1 kg reference entry point:
 ros2 launch amr_manipulation gate6_mass_stage.launch.py product_id:=101
 ```
 
@@ -438,10 +450,10 @@ product to its registered pickup station, leaves the AMR at its current pose,
 then navigates to that product's dock before starting the existing mass stage:
 
 ```bash
-# Product B, 3 kg (tag 102):
+# Product B, 3 kg (tag 102) — accepted current command:
 ros2 launch amr_manipulation gate6_3kg_test.launch.py
 
-# Product C, 5 kg (tag 103):
+# Product C, 5 kg (tag 103) — pending authorization:
 # ros2 launch amr_manipulation gate6_5kg_test.launch.py
 ```
 
@@ -451,7 +463,8 @@ only one product test at a time. Stop at the first failed gate and retain the
 run directory; do not start the 5 kg test after a failed 3 kg test without
 reviewing the failure.
 
-For 3 kg or 5 kg evidence, add the matching product topics to the recorder:
+The recorder command above already includes all matching product topics. For
+reference, the selected higher-mass topic groups are:
 
 ```bash
 # 3 kg:

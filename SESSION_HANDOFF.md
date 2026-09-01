@@ -1,5 +1,76 @@
 # AMR Session Handoff
 
+## Current authoritative state — Product102 3 kg PASS, Product103 pending — 2026-09-02
+
+This section supersedes every earlier Product102 failure/pause note for the
+current workspace. Product102 (3 kg) is now **accepted** on the corrected
+geometry and current source. The strict direct-host run is
+`.ros_logs/gate6_product102_geometry_20260902_03/`, using `ROS_DOMAIN_ID=230`
+and hardware rendering through `/dev/dri/renderD128`.
+
+The run started exactly one Product102 attempt and zero Product103 attempts.
+It passed host/rendering, runtime, graph/lifecycle/controller/action/service/
+topic, MoveIt/OMPL, bootstrap, ownership, recorder finalization, exact stage
+markers, final dispatch-slot, independent bag analysis, cleanup, shutdown
+process, post-shutdown host, and source/install hash gates. Authoritative
+verdicts are:
+
+- `evidence/run_state.txt`: `PASS`
+- `evidence/final_verdict.txt`: `product102_retry_validation=PASS`
+- `evidence/product102/product_verdict.txt`: `product_gate=PASS`
+- `evidence/product102/analysis.txt`: `GATE6_BAG_ANALYSIS=PASS product_id=102`
+- exact terminal marker: `GATE 6 3.0 KG COMPLETE 3 KG PASS`
+- `evidence/product102_attempts.txt`: `attempts=1`
+- `evidence/product103_attempts.txt`: `attempts=0`
+
+The collision mechanism was the fixed, centered product-camera body crossing
+the Product102 retained manipulator sweep (`arm_link_2` to
+`product_camera_link`). The bounded correction moved only the fixed AMR camera
+mount from `xyz="0.25 0 0.65"` to `xyz="0.25 0.20 0.65"`. Its active
+`0.08 x 0.05 x 0.05 m` collision box, mass/inertia, forward-facing optical
+frame, topic, resolution, update rate, FOV, and range remain unchanged. No
+SRDF/ACM exemption, collision-shape reduction, tolerance relaxation, slot
+change, or ownership change was used. The accepted run proved the attached
+planning-scene object and a 15-point collision-aware lower path before
+detachment and empty stow.
+
+The post-stage evidence contract was also made explicit: the successful
+planning-scene attached-object log now carries the `PASS` token required by
+the independent analyzer. The temporary strict harness's `ros2 bag info`
+storage check accepts ROS 2's aligned whitespace without weakening the
+required `sqlite3` value. The final run passed both checks.
+
+Fresh verification passed after the final source change:
+
+- `python3 -m pytest -q src/amr_description/test/test_description.py`:
+  `26 passed`
+- `colcon build --packages-select amr_description amr_manipulation
+  --symlink-install`: passed
+- `colcon test --packages-select amr_description amr_manipulation`: passed
+- `colcon test-result --verbose`: `297 tests, 0 errors, 0 failures, 5 skipped`
+- `git diff --check HEAD`: passed
+
+Product103 (5 kg) remains explicitly unattempted. Therefore the Product102
+3 kg branch is complete, but full Gate 6 and Gate 7 must remain pending until
+the user authorizes and the strict Product103 run passes. Do not rerun
+Product101 or Product102 merely for progression. No Gazebo, MoveIt, recorder,
+or Gate 6 process is intentionally left running.
+
+The copy/paste environment, factory, MoveIt, recorder, and product commands
+are maintained in `docs/SIMULATION_COMMANDS.md`. For a Gate 6 product run the
+factory command must use `factory_attachment:=true`; the selected product
+entry points are:
+
+```bash
+ros2 launch amr_manipulation gate6_3kg_test.launch.py
+# Product103 remains pending authorization:
+# ros2 launch amr_manipulation gate6_5kg_test.launch.py
+```
+
+The repository commit scope for this state is the intended source, tests,
+`SESSION_HANDOFF.md`, and `docs/SIMULATION_COMMANDS.md`. Runtime `.ros_logs/`
+evidence is excluded, and `AMR_CODEX_HANDOFF.md` remains protected.
+
 ## Current authoritative state — `_bootstrapfix_01` 1 kg regression and pause — 2026-09-01
 
 The user requested a pause for host shutdown after the first fresh current-source
@@ -32,6 +103,22 @@ post-shutdown host gates passed. Evidence is in
 `.ros_logs/gate6_1kg_bootstrapfix_20260901_01/evidence/`, with the stage log
 at `.ros_logs/gate6_1kg_bootstrapfix_20260901_01/gate6_mass_stage_45264_1788234164653.log`.
 
+For clarity, this does not erase the earlier accepted historical 1 kg
+evidence. The older runs
+`.ros_logs/gate6_1kg_retained_20260830_01/` and
+`.ros_logs/gate6_1kg_repeat2_graphfix_20260831_03/` both reached the exact
+`GATE 6 1.0 KG COMPLETE 1 KG PASS` marker; the latter also recorded
+`Gate 6 placement lower trajectory postconditions: PASS points=53`.
+Those runs are historical and cannot substitute for the fresh current-source
+run above. The current failure is the collision-validity result, not the
+recent bootstrap service correction: Product 101 passed bootstrap, bilateral
+grasp/attachment, transport, pre-place endpoint, and attached-scene proof
+before `/check_state_validity` rejected one retained-path sample for
+`arm_link_4 <-> base_link`. The exact deeper reason the older run passed and
+the fresh run did not is not yet isolated; the evidence indicates narrow
+arm/chassis clearance sensitive to the final base/IK state. No source fix or
+gate relaxation is authorized from this result alone.
+
 This invalidates the intended current-source guarantee that Product 101's
 retained path was unchanged. Do not start Product 101 pass 2, Product 102,
 Product 103, or Gate 7 until Sol/high completes a fresh read-only diagnosis,
@@ -41,10 +128,32 @@ source acceptance. The static validation immediately before this runtime
 passed: 26 focused tests, Python compilation, the `amr_manipulation` build,
 40 package tests with zero errors/failures/skips, and `git diff --check`.
 
-No staging, commit, push, history rewrite, or dependency installation was
-performed. `AMR_CODEX_HANDOFF.md` remains untouched. On resume, begin with
-`git status --short`, read this section, and keep the fail-closed motion,
-collision, exact-slot, ownership, and Gate 6 ordering rules intact.
+After the pause, checkpoint commit `8fdac92` (`checkpoint: preserve Gate 6
+implementation state`) was created without pushing or rewriting history. A
+fresh full verification of that committed tree passed the build for all 18
+packages and the package tests: 296 tests, zero errors, zero failures, and 5
+skips. `git diff HEAD` and `git diff --check HEAD` were empty/clean; only the
+untracked `.ros_logs/` evidence tree remains. No source or test file changed
+during verification, and `AMR_CODEX_HANDOFF.md` remains untouched.
+
+A bounded direct-host system smoke, without any Product stage, is recorded at
+`.ros_logs/gate6_system_smoke_20260901_04/`. Host/rendering, factory startup,
+hardware-rendered runtime, and MoveIt startup passed; runtime aggregate RTF
+was `0.999999999833287` with median `1.000019200370567`. The first corrected
+system gate failure was graph readiness: after the 30-second bounded window,
+`/amr/controller_server`, `/amr/global_costmap/global_costmap`,
+`/amr/local_costmap/local_costmap`, `/amr/mission_supervisor_node`,
+`/amr/planner_server`, and `/amr/smoother_server` were still missing. The
+factory log shows an AMCL lifecycle change-state response timeout before the
+planning nodes started. The run stopped at that gate and cleaned up; empty
+motion and all Product stages were not run. The preceding `_03` smoke stopped
+on a colorized-output matching defect in its wrapper after capturing the
+required action endpoints and active controllers; `_04` is the corrected
+result. Do not treat either smoke as Gate 6 acceptance.
+
+On resume, begin with `git status --short`, read this section, and keep the
+fail-closed motion, collision, exact-slot, ownership, and Gate 6 ordering rules
+intact.
 
 ## Current authoritative state — `_bootstrapfix_01` source validation — 2026-09-01
 
@@ -2476,3 +2585,64 @@ higher-mass acceptance remains **FAIL / unresolved**. The user-mandated replan
 ceiling is exhausted at 2/2, so stop: do not retry, tune, modify source, start
 Product 103, or start Gate 7 without new user direction.
 `AMR_CODEX_HANDOFF.md` remains untouched.
+
+## Current authoritative state — Product102 3 kg branch runtime stopped — 2026-09-01
+
+This checkpoint supersedes earlier current-source pause notes for the present
+session. The user authorized work through Product102 (3 kg), explicitly
+excluded Product103 (5 kg), and then requested the runtime to stop. Gate 6
+higher-mass acceptance remains **FAIL / unresolved**; do not start another
+runtime automatically and do not work on Product103.
+
+The fresh current-source Product101 run
+`.ros_logs/gate6_1kg_upperstancefix_20260901_04/` reached the exact
+`GATE 6 1.0 KG COMPLETE 1 KG PASS` marker, attached-scene proof, lower
+trajectory pass, cleanup, shutdown, and post-shutdown host gates. Product101
+is accepted for the current source. The current working-tree changes are the
+intended mass-stage correction and focused contract test in
+`src/amr_manipulation/src/gate6_mass_stage.cpp` and
+`src/amr_manipulation/test/test_moveit_config.py`.
+
+The Product102 correction preserves the collision model, ACM/SRDF, exact
+slot, fail-closed state-validity checks, ownership, timing, attachment, and
+analyzer gates. It uses the measured narrow collision-free Product102
+placement branch: safe release base `(0.775, 0.075, 0.095)`, a separate map
+frame navigation lead of `+0.085 m` in Y, Product102-only pre-place height
+offset `+0.050 m`, and the measured alternate placement seed. Product101 and
+Product103 branches remain unchanged by this correction.
+
+Fresh static validation passed after the correction: focused MoveIt-config
+contracts `9 passed`, Python compilation, the `amr_manipulation` build,
+`colcon test --packages-select amr_manipulation`, and
+`colcon test-result --verbose` (`297 tests, 0 errors, 0 failures, 5 skipped`).
+`git diff --check HEAD` is clean. No Product103 runtime was launched.
+
+Product102 runtime evidence and stopping point:
+
+- `_14` stopped at the sandbox host preflight because `/dev/dri` was not
+  visible; no product launched.
+- `_15` passed direct-host rendering but stopped on a stale temporary-harness
+  `gate6_product_test.py` hash; no product launched.
+- `_16` passed host, hash, runtime, graph, and initial startup checks, then
+  failed persistent lifecycle readiness because the controller configure
+  response timed out; Product102 attempts remained zero.
+- `_17` passed graph, lifecycle, MoveIt/OMPL, and readiness, then the
+  attachment-bootstrap Trigger call timed out; Product102 attempts remained
+  zero. The same bootstrap binary and gate passed in the successful earlier
+  run, so this was not evidence against the Product102 placement change.
+- `_18` used direct-host rendering successfully (`/dev/dri/renderD128` was
+  readable and writable by `pete`), passed readiness, started exactly one
+  Product102 runner and its recorder, and was stopped by the user during the
+  runner's initial Product101 retreat before the Product102 reset/attachment
+  and before mass-stage placement. Its `product_gate` is still `PENDING` and
+  no 3 kg pass marker exists. Cleanup failure count was zero, shutdown process
+  gate passed, post-shutdown host gate passed, and Product103 attempts were
+  zero. Evidence is in
+  `.ros_logs/gate6_product102_productbranch_20260901_18/`.
+
+The worktree currently contains this pre-existing/user-owned
+`SESSION_HANDOFF.md` modification, the two intended source/test modifications,
+and untracked `.ros_logs/` runtime evidence. No commit, push, dependency
+installation, system change, or 5 kg runtime was performed. On resume, begin
+with `git status --short`, read this section, and preserve the fail-closed
+motion, collision, exact-slot, ownership, and Gate 6 ordering rules.

@@ -380,7 +380,8 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "kDesiredSlotBaseRadius =" in mass_source
     assert "kMaxPlacementReleaseRadius - kMaxPlacementAlignmentPositionError" in mass_source
     assert "desired_slot_direction_radius =" in mass_source
-    assert "desired_slot_scale = kDesiredSlotBaseRadius / desired_slot_direction_radius" in mass_source
+    assert "const double desired_slot_base_radius = product102_center_slot ?" in mass_source
+    assert "desired_slot_scale = desired_slot_base_radius / desired_slot_direction_radius" in mass_source
     assert "desired_slot_base_x = desired_slot_direction_x * desired_slot_scale" in mass_source
     assert "desired_slot_base_y = desired_slot_direction_y * desired_slot_scale" in mass_source
     assert "desired placement stance radius was invalid" in mass_source
@@ -426,6 +427,7 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "const double map_aligned_product_yaw = wrap_yaw(-alignment_yaw)" in mass_source
     assert "map_aligned_product_yaw_pi = wrap_yaw" in mass_source
     assert "std::abs(map_aligned_product_yaw) <= std::abs(map_aligned_product_yaw_pi)" in mass_source
+    assert "pre_place_map_yaw = wrap_yaw(pre_place_map_yaw + kProduct102PlacementYawOffset)" in mass_source
     assert "pre_place_map_yaw" in mass_source
     alignment_yaw = mass_source.index("const double alignment_yaw =")
     map_aligned_yaw = mass_source.index(
@@ -544,23 +546,36 @@ def test_dispatch_stance_is_slot_aware_and_keeps_center_alignment_bounded():
     stance_end = source.index("const double dispatch_yaw", stance_start)
     stance = source[stance_start:stance_end]
     assert "selected_slot[1] - product.dispatch_dock[1]" in stance
-    assert "product.id" not in stance
-    upper_start = stance.index("if (selected_slot_lateral_offset > 0.0)")
+    assert "const bool product102_center_slot =" in stance
+    assert "product.id == 102 && selected_slot_lateral_offset == 0.0" in stance
+    product102_start = stance.index("if (product102_center_slot)")
+    upper_start = stance.index("} else if (selected_slot_lateral_offset > 0.0)", product102_start)
+    product102_branch = stance[product102_start:upper_start]
+    assert "desired_slot_direction_x = kDesiredProduct102SlotBaseX;" in product102_branch
+    assert "desired_slot_direction_y = kDesiredProduct102SlotBaseY;" in product102_branch
     lower_start = stance.index("} else if (selected_slot_lateral_offset < 0.0)", upper_start)
     center_start = stance.index("} else {", lower_start)
     upper_branch = stance[upper_start:lower_start]
     lower_branch = stance[lower_start:center_start]
     center_branch = stance[center_start:]
     assert "desired_slot_direction_x = kDesiredSlotBaseX;" in upper_branch
-    assert "desired_slot_direction_y = kDesiredSlotBaseY;" in upper_branch
+    assert "desired_slot_direction_y = kDesiredUpperSlotBaseY;" in upper_branch
+    assert "constexpr double kDesiredUpperSlotBaseY = -0.640000000;" in source
     assert "desired_slot_direction_x = kDesiredSlotBaseX;" in lower_branch
     assert "desired_slot_direction_y = -kDesiredSlotBaseY;" in lower_branch
     assert "desired_slot_direction_x = 1.0;" in center_branch
     assert "desired_slot_direction_y = 0.0;" in center_branch
+    assert "const double desired_slot_base_radius = product102_center_slot ?" in stance
     assert "const double desired_slot_base_x = desired_slot_direction_x * desired_slot_scale;" in stance
     assert "const double desired_slot_base_y = desired_slot_direction_y * desired_slot_scale;" in stance
     assert "const double desired_slot_base_x = kDesiredSlotBaseX * desired_slot_scale;" not in stance
     assert "const double desired_slot_base_y = kDesiredSlotBaseY * desired_slot_scale;" not in stance
+    assert "kDesiredProduct102SlotBaseX = 0.775000000" in source
+    assert "kDesiredProduct102SlotBaseY = 0.075000000" in source
+    assert "kProduct102PlacementLeadMapY = 0.085000000" in source
+    assert "kProduct102PrePlaceZOffset = 0.100000000" in source
+    assert "kProduct102PlacementYawOffset = 1.530000000" in source
+    assert "placement_alignment_target_physical" in source
 
     desired_radius = 0.785 - 0.070 - 0.005
     center_stance = (-4.10 + desired_radius, 0.0)
@@ -571,6 +586,37 @@ def test_dispatch_stance_is_slot_aware_and_keeps_center_alignment_bounded():
     assert math.isclose(center_stance[1], 0.0, abs_tol=1e-9)
     assert math.isclose(center_alignment, 0.058034, abs_tol=0.0005)
     assert center_alignment < 0.35
+
+    product102_radius = math.hypot(0.775, 0.075)
+    product102_stance = (-4.10 + 0.775, 0.075)
+    product102_alignment = math.hypot(
+        product102_stance[0] - observed_dock[0],
+        product102_stance[1] - observed_dock[1])
+    product102_lead_target = (product102_stance[0], product102_stance[1] + 0.085)
+    product102_lead_alignment = math.hypot(
+        product102_lead_target[0] - observed_dock[0],
+        product102_lead_target[1] - observed_dock[1])
+    assert product102_radius < 0.785
+    assert math.isclose(product102_radius, 0.778620575, abs_tol=1e-9)
+    assert math.isclose(product102_alignment, 0.073334, abs_tol=0.0005)
+    assert math.isclose(product102_lead_alignment, 0.158155, abs_tol=0.0005)
+    assert product102_lead_alignment < 0.35
+
+
+def test_product102_placement_branch_preserves_other_product_seeds_and_waypoints():
+    source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
+    assert "kProduct102PrePlaceZOffset = 0.100000000" in source
+    assert "const double product_pre_place_z_offset = product102_center_slot ?" in source
+    assert "std::vector<double> placement_release_seed{" in source
+    assert (
+        "-release_radial_yaw, 0.546225552, 0.335934775, 0.0, -0.882160326, 0.0"
+    ) in source
+    seed_start = source.index("std::vector<double> placement_release_seed{")
+    seed_end = source.index("auto placement_ik_state", seed_start)
+    product102_seed = source[seed_start:seed_end]
+    assert "if (product102_center_slot)" in product102_seed
+    assert "-1.693092000, 1.465170000, 2.432600000" in product102_seed
+    assert "product.id == 103" not in product102_seed
 
 
 def test_higher_mass_placement_uses_collision_aware_route_without_changing_1kg_path():

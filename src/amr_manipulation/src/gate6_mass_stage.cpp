@@ -1632,17 +1632,86 @@ int main(int argc, char ** argv) {
 
     geometry_msgs::msg::Pose grasp = pregrasp;
     grasp.position.z = 0.905;
-    std::vector<geometry_msgs::msg::Pose> waypoints{grasp};
-    moveit_msgs::msg::RobotTrajectory approach;
-    if (arm.computeCartesianPath(waypoints, 0.005, 0.0, approach, true) < 0.99)
-      throw std::runtime_error("Cartesian grasp approach was incomplete");
     MoveGroupInterface::Plan approach_plan;
-    approach_plan.trajectory_ = approach;
+    if (product.id == 102) {
+      // At the center pickup dock, the upright Cartesian IK continuation can
+      // switch wrist branches near the fixed product camera.  Retain the
+      // exact TCP grasp pose, but seed its collision-free elbow/wrist branch
+      // explicitly and let the collision-aware planner connect from the
+      // validated pre-grasp state.  The product and pedestal remain active
+      // obstacles; only the intentional-contact handle was removed above.
+      const std::vector<double> grasp_seed{
+        0.026650000, -0.770740000, 0.924890000,
+        -2.969660000, 0.156420000, 2.971710000};
+      auto grasp_ik_state = arm.getCurrentState(3.0);
+      if (!grasp_ik_state)
+        throw std::runtime_error("fresh MoveIt state was unavailable for grasp IK preflight");
+      const auto * grasp_manipulator_group =
+        grasp_ik_state->getJointModelGroup("manipulator");
+      if (!grasp_manipulator_group ||
+        grasp_manipulator_group->getVariableNames() != expected_pregrasp_joint_names ||
+        grasp_manipulator_group->getVariableCount() != grasp_seed.size())
+      {
+        throw std::runtime_error("grasp IK manipulator joint order was invalid");
+      }
+      if (!finite_pregrasp_joint_values(grasp_seed))
+        throw std::runtime_error("grasp IK seed was invalid");
+      grasp_ik_state->setJointGroupPositions(grasp_manipulator_group, grasp_seed);
+      grasp_ik_state->update();
+      if (!grasp_ik_state->setFromIK(
+          grasp_manipulator_group, grasp, "gripper_tcp", 0.5) ||
+        !grasp_ik_state->satisfiesBounds(grasp_manipulator_group))
+      {
+        throw std::runtime_error("exact seeded grasp IK preflight failed");
+      }
+      std::vector<double> grasp_ik_solution;
+      grasp_ik_state->copyJointGroupPositions(
+        grasp_manipulator_group, grasp_ik_solution);
+      if (!finite_pregrasp_joint_values(grasp_ik_solution))
+        throw std::runtime_error("grasp IK preflight returned invalid joints");
+      arm.setStartStateToCurrentState();
+      if (!arm.setJointValueTarget(grasp_ik_solution))
+        throw std::runtime_error("exact grasp joint target was rejected");
+      if (arm.plan(approach_plan) != moveit::core::MoveItErrorCode::SUCCESS)
+        throw std::runtime_error("collision-aware grasp approach planning failed");
+      const auto & approach_joint_names =
+        approach_plan.trajectory_.joint_trajectory.joint_names;
+      const auto & approach_points = approach_plan.trajectory_.joint_trajectory.points;
+      if (approach_joint_names != expected_pregrasp_joint_names || approach_points.empty())
+        throw std::runtime_error("collision-aware grasp approach trajectory was incomplete");
+      const auto & approach_endpoint = approach_points.back().positions;
+      if (approach_endpoint.size() != grasp_ik_solution.size() ||
+        !finite_pregrasp_joint_values(approach_endpoint))
+      {
+        throw std::runtime_error("collision-aware grasp approach endpoint was invalid");
+      }
+      double approach_endpoint_error = 0.0;
+      for (std::size_t index = 0; index < grasp_ik_solution.size(); ++index) {
+        approach_endpoint_error = std::max(
+          approach_endpoint_error,
+          std::abs(approach_endpoint.at(index) - grasp_ik_solution.at(index)));
+      }
+      RCLCPP_INFO(
+        node->get_logger(),
+        "Product102 retained camera-clear grasp branch: points=%zu endpoint_error=%.6f rad",
+        approach_points.size(), approach_endpoint_error);
+      if (!std::isfinite(approach_endpoint_error) || approach_endpoint_error > 0.01)
+        throw std::runtime_error("collision-aware grasp approach endpoint missed exact target");
+    } else {
+      std::vector<geometry_msgs::msg::Pose> waypoints{grasp};
+      moveit_msgs::msg::RobotTrajectory approach;
+      if (arm.computeCartesianPath(waypoints, 0.005, 0.0, approach, true) < 0.99)
+        throw std::runtime_error("Cartesian grasp approach was incomplete");
+      approach_plan.trajectory_ = approach;
+    }
     require_motion_permission();
     if (arm.execute(approach_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("Cartesian grasp approach execution failed");
     if (!node->reference_evidence_stable())
       throw std::runtime_error("dock or product moved during grasp approach");
+    if (product.id == 102 && !node->grasp_pose_within_tolerance(
+        arm.getCurrentPose("gripper_tcp")))
+      throw std::runtime_error("Product102 exact grasp pose was not proven");
     require_motion_permission();
     if (!amr_manipulation::command_gripper(node, 0.020))
       throw std::runtime_error("gripper close command failed");
@@ -1803,7 +1872,7 @@ int main(int argc, char ** argv) {
                   "planning-scene held_product attachment/link/touch-link proof failed");
         }
         RCLCPP_INFO(node->get_logger(),
-          "Gate 6 planning-scene attached object proof: held_product attached to "
+          "Gate 6 planning-scene attached object proof: PASS held_product attached to "
           "gripper_left_finger_link with exact touch links");
       };
 
@@ -1991,6 +2060,23 @@ int main(int argc, char ** argv) {
     // remains at or below the existing 0.15 m alignment bound.
     constexpr double kDesiredSlotBaseX = 0.520000000;
     constexpr double kDesiredSlotBaseY = -0.580000000;
+    // The current-source 1 kg run exposed a narrow arm_link_4/base_link
+    // clearance boundary at the upper-slot terminal pose. Keep the same
+    // radial reach while biasing only the upper-slot stance farther outward.
+    constexpr double kDesiredUpperSlotBaseY = -0.640000000;
+    // Product 102's centered slot has a narrow collision-free placement
+    // branch. Keep the measured release stance inside the existing radius
+    // envelope, and use a separate map-frame lead only for Nav2's bounded
+    // approach; the fresh measured pose remains the source of release geometry.
+    constexpr double kDesiredProduct102SlotBaseX = 0.775000000;
+    constexpr double kDesiredProduct102SlotBaseY = 0.075000000;
+    constexpr double kProduct102PlacementLeadMapY = 0.085000000;
+    // Product 102 needs a higher loaded pre-place waypoint to clear the fixed
+    // product camera on the wrist-flipped collision-free placement branch.
+    constexpr double kProduct102PrePlaceZOffset = 0.100000000;
+    // Keep the product upright and at the exact registered slot while using
+    // the measured horizontal TCP-yaw branch that clears the fixed camera.
+    constexpr double kProduct102PlacementYawOffset = 1.530000000;
     constexpr double kMaxPlacementAlignmentSegmentDisplacement = 0.15;
     constexpr double kMaxPlacementAlignmentTotalDisplacement = 0.35;
     constexpr double kMaxPlacementAlignmentPositionError = 0.07;
@@ -2016,11 +2102,16 @@ int main(int argc, char ** argv) {
       selected_slot[1] - product.dispatch_dock[1];
     if (!std::isfinite(selected_slot_lateral_offset))
       throw std::runtime_error("desired placement stance lateral offset was non-finite");
+    const bool product102_center_slot =
+      product.id == 102 && selected_slot_lateral_offset == 0.0;
     double desired_slot_direction_x;
     double desired_slot_direction_y;
-    if (selected_slot_lateral_offset > 0.0) {
+    if (product102_center_slot) {
+      desired_slot_direction_x = kDesiredProduct102SlotBaseX;
+      desired_slot_direction_y = kDesiredProduct102SlotBaseY;
+    } else if (selected_slot_lateral_offset > 0.0) {
       desired_slot_direction_x = kDesiredSlotBaseX;
-      desired_slot_direction_y = kDesiredSlotBaseY;
+      desired_slot_direction_y = kDesiredUpperSlotBaseY;
     } else if (selected_slot_lateral_offset < 0.0) {
       desired_slot_direction_x = kDesiredSlotBaseX;
       desired_slot_direction_y = -kDesiredSlotBaseY;
@@ -2030,12 +2121,14 @@ int main(int argc, char ** argv) {
     }
     const double desired_slot_direction_radius =
       std::hypot(desired_slot_direction_x, desired_slot_direction_y);
+    const double desired_slot_base_radius = product102_center_slot ?
+      desired_slot_direction_radius : kDesiredSlotBaseRadius;
     if (!std::isfinite(desired_slot_direction_radius) || desired_slot_direction_radius <= 0.0 ||
-      !std::isfinite(kDesiredSlotBaseRadius) || kDesiredSlotBaseRadius <= 0.0)
+      !std::isfinite(desired_slot_base_radius) || desired_slot_base_radius <= 0.0)
     {
       throw std::runtime_error("desired placement stance radius was invalid");
     }
-    const double desired_slot_scale = kDesiredSlotBaseRadius / desired_slot_direction_radius;
+    const double desired_slot_scale = desired_slot_base_radius / desired_slot_direction_radius;
     const double desired_slot_base_x = desired_slot_direction_x * desired_slot_scale;
     const double desired_slot_base_y = desired_slot_direction_y * desired_slot_scale;
     if (!std::isfinite(desired_slot_scale) || !std::isfinite(desired_slot_base_x) ||
@@ -2054,6 +2147,11 @@ int main(int argc, char ** argv) {
       selected_slot[0] - desired_slot_map_x,
       selected_slot[1] - desired_slot_map_y,
       dispatch_yaw};
+    const std::array<double, 3> placement_alignment_target_physical{
+      placement_alignment_physical[0],
+      placement_alignment_physical[1] +
+      (product102_center_slot ? kProduct102PlacementLeadMapY : 0.0),
+      placement_alignment_physical[2]};
     const auto yaw_from_pose = [](const geometry_msgs::msg::Pose & pose) {
         return std::atan2(
           2.0 * pose.orientation.w * pose.orientation.z,
@@ -2070,13 +2168,13 @@ int main(int argc, char ** argv) {
       dock_alignment_ground_truth.pose.position.y - dock_alignment_localized.pose.position.y;
     const double localization_bias_yaw = wrap_yaw(dock_ground_truth_yaw - dock_localized_yaw);
     const std::array<double, 3> placement_alignment{
-      placement_alignment_physical[0] - localization_bias_x,
-      placement_alignment_physical[1] - localization_bias_y,
-      wrap_yaw(placement_alignment_physical[2] - localization_bias_yaw)};
+      placement_alignment_target_physical[0] - localization_bias_x,
+      placement_alignment_target_physical[1] - localization_bias_y,
+      wrap_yaw(placement_alignment_target_physical[2] - localization_bias_yaw)};
     const double alignment_dx =
-      placement_alignment_physical[0] - dock_alignment_ground_truth.pose.position.x;
+      placement_alignment_target_physical[0] - dock_alignment_ground_truth.pose.position.x;
     const double alignment_dy =
-      placement_alignment_physical[1] - dock_alignment_ground_truth.pose.position.y;
+      placement_alignment_target_physical[1] - dock_alignment_ground_truth.pose.position.y;
     const double alignment_displacement = std::hypot(alignment_dx, alignment_dy);
     const auto alignment_segments = static_cast<std::size_t>(
       std::ceil(alignment_displacement / kMaxPlacementCommandDisplacement));
@@ -2086,6 +2184,9 @@ int main(int argc, char ** argv) {
       std::isfinite(placement_alignment_physical[0]) &&
       std::isfinite(placement_alignment_physical[1]) &&
       std::isfinite(placement_alignment_physical[2]) &&
+      std::isfinite(placement_alignment_target_physical[0]) &&
+      std::isfinite(placement_alignment_target_physical[1]) &&
+      std::isfinite(placement_alignment_target_physical[2]) &&
       std::isfinite(placement_alignment[0]) && std::isfinite(placement_alignment[1]) &&
       std::isfinite(placement_alignment[2]) &&
       std::isfinite(alignment_dx) && std::isfinite(alignment_dy) &&
@@ -2103,11 +2204,14 @@ int main(int argc, char ** argv) {
       throw std::runtime_error("loaded-stowed attachment proof failed before placement alignment");
     RCLCPP_INFO(
       node->get_logger(),
-      "Dispatch placement alignment: physical=(%.3f, %.3f, %.3f) command=(%.3f, %.3f, %.3f) "
+      "Dispatch placement alignment: stance=(%.3f, %.3f, %.3f) "
+      "navigation_target=(%.3f, %.3f, %.3f) command=(%.3f, %.3f, %.3f) "
       "segments=%zu total_ground_truth=%.4f m bias=(%.3f, %.3f, %.3f)",
       placement_alignment_physical[0], placement_alignment_physical[1],
-      placement_alignment_physical[2], placement_alignment[0], placement_alignment[1],
-      placement_alignment[2], alignment_segments, alignment_displacement,
+      placement_alignment_physical[2], placement_alignment_target_physical[0],
+      placement_alignment_target_physical[1], placement_alignment_target_physical[2],
+      placement_alignment[0], placement_alignment[1], placement_alignment[2],
+      alignment_segments, alignment_displacement,
       localization_bias_x, localization_bias_y, localization_bias_yaw);
     geometry_msgs::msg::PoseStamped previous_alignment_pose = dock_alignment_ground_truth;
     for (std::size_t segment = 1; segment <= alignment_segments; ++segment) {
@@ -2280,21 +2384,28 @@ int main(int argc, char ** argv) {
       kPrePlaceRadialClearance * release_base[0] / release_radius;
     pre_place.position.y = pre_place_base[1] +
       kPrePlaceRadialClearance * release_base[1] / release_radius;
-    pre_place.position.z = pre_place_base[2] + 0.080;
+    const double product_pre_place_z_offset = product102_center_slot ?
+      kProduct102PrePlaceZOffset : 0.0;
+    pre_place.position.z = pre_place_base[2] + 0.080 + product_pre_place_z_offset;
     const double pre_place_radial_yaw = std::atan2(
       pre_place.position.y, pre_place.position.x);
     if (!std::isfinite(pre_place_radial_yaw))
       throw std::runtime_error("pre-place radial clearance direction was invalid");
     // The held product is represented in base_footprint.  Invert the fresh
     // base/map yaw so its top-down yaw is map-axis aligned, choosing the
-    // equivalent pi branch closest to the map x axis.  Keep the radial yaw
-    // only as the deterministic reach/IK seed below.
+    // equivalent pi branch closest to the map x axis.  Product 102 adds only
+    // a horizontal yaw offset to select its measured camera-clear wrist
+    // branch; its center, height, and upright product orientation remain
+    // unchanged.  Keep the radial yaw only as the deterministic reach/IK
+    // seed below.
     const double map_aligned_product_yaw = wrap_yaw(-alignment_yaw);
     const double map_aligned_product_yaw_pi = wrap_yaw(
       map_aligned_product_yaw + std::acos(-1.0));
-    const double pre_place_map_yaw =
+    double pre_place_map_yaw =
       std::abs(map_aligned_product_yaw) <= std::abs(map_aligned_product_yaw_pi) ?
       map_aligned_product_yaw : map_aligned_product_yaw_pi;
+    if (product102_center_slot)
+      pre_place_map_yaw = wrap_yaw(pre_place_map_yaw + kProduct102PlacementYawOffset);
     if (!std::isfinite(alignment_yaw) || !std::isfinite(map_aligned_product_yaw) ||
       !std::isfinite(pre_place_map_yaw))
       throw std::runtime_error("map-aligned placement yaw was invalid");
@@ -2311,8 +2422,13 @@ int main(int argc, char ** argv) {
     // with an explicit deterministic seed, then retain a deterministic L path
     // release -> above_release -> pre_place.  Never fall back to approximate
     // IK or the stow seed.
-    const std::vector<double> placement_release_seed{
+    std::vector<double> placement_release_seed{
       -release_radial_yaw, 0.546225552, 0.335934775, 0.0, -0.882160326, 0.0};
+    if (product102_center_slot) {
+      placement_release_seed = {
+        -release_radial_yaw, 0.546225552, 0.335934775,
+        -1.693092000, 1.465170000, 2.432600000};
+    }
     auto placement_ik_state = arm.getCurrentState(3.0);
     if (!placement_ik_state)
       throw std::runtime_error("fresh MoveIt state was unavailable for placement IK preflight");
