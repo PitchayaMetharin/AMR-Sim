@@ -1,6 +1,7 @@
 build/
 install/
 log/
+.ros_logs/
 
 __pycache__/
 .pytest_cache/

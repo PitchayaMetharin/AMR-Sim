@@ -393,6 +393,8 @@ def launch_robot(context):
 def generate_launch_description():
     global _DEFERRED_FACTORY_ACTIONS
     factory = get_package_share_directory("amr_factory")
+    fastdds_profile_path = os.path.abspath(os.path.join(
+        factory, "config", "fastdds_service_profiles.xml"))
     bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
@@ -536,6 +538,10 @@ def generate_launch_description():
     ]
 
     actions = [
+        # Give Fast DDS service-response publishers a longer discovery-race
+        # budget while leaving all other QoS and lifecycle gates unchanged.
+        SetEnvironmentVariable(
+            name="FASTRTPS_DEFAULT_PROFILES_FILE", value=fastdds_profile_path),
         # Fast DDS synchronous service replies can block in the publisher and
         # intermittently time out during the multi-node lifecycle bringup.
         # Keep the transport reliable, but queue replies asynchronously for

@@ -532,6 +532,62 @@ def test_factory_launch_uses_async_fastdds_service_publication():
     assert "RMW_FASTRTPS_USE_QOS_FROM_XML" not in launch
 
 
+def test_fastdds_service_profile_is_the_only_one_second_publisher_override():
+    profile_path = ROOT / "config" / "fastdds_service_profiles.xml"
+    root = ET.parse(profile_path).getroot()
+    namespace = "http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles"
+
+    def qualified(tag):
+        return f"{{{namespace}}}{tag}"
+
+    assert root.tag == qualified("profiles")
+    assert root.attrib == {}
+    assert len(root) == 1
+    publishers = root.findall(qualified("publisher"))
+    assert len(publishers) == 1
+    publisher = publishers[0]
+    assert publisher.attrib == {"profile_name": "service"}
+    assert [child.tag for child in publisher] == [qualified("qos")]
+
+    qos = publisher.find(qualified("qos"))
+    assert [child.tag for child in qos] == [qualified("reliability")]
+    reliability = qos.find(qualified("reliability"))
+    assert [child.tag for child in reliability] == [
+        qualified("max_blocking_time")
+    ]
+    max_blocking_time = reliability.find(qualified("max_blocking_time"))
+    assert [child.tag for child in max_blocking_time] == [qualified("sec")]
+    assert max_blocking_time.findtext(qualified("sec")) == "1"
+
+
+def test_factory_launch_installs_fastdds_service_profile_before_children():
+    launch = (ROOT / "launch" / "factory_localization.launch.py").read_text()
+    path_assignment_start = launch.index(
+        "fastdds_profile_path = os.path.abspath(os.path.join("
+    )
+    path_assignment_end = launch.index(
+        'factory, "config", "fastdds_service_profiles.xml"))',
+        path_assignment_start,
+    )
+    setting = (
+        'name="FASTRTPS_DEFAULT_PROFILES_FILE", value=fastdds_profile_path'
+    )
+
+    assert 'factory = get_package_share_directory("amr_factory")' in launch
+    assert path_assignment_start < path_assignment_end
+    assert setting in launch
+    assert "FASTDDS_DEFAULT_PROFILES_FILE" not in launch
+    profile_setting_start = launch.index(setting)
+    assert path_assignment_end < profile_setting_start
+    assert profile_setting_start < launch.index(
+        "OpaqueFunction(function=launch_gazebo)"
+    )
+    assert profile_setting_start < launch.index("bridge,", profile_setting_start)
+    assert profile_setting_start < launch.index(
+        "OpaqueFunction(function=launch_robot)", profile_setting_start
+    )
+
+
 def test_factory_has_all_fixed_tag_ids_and_product_handle_geometry():
     world = (ROOT / "worlds" / "factory.sdf").read_text()
     assert 'name="gz::sim::systems::Contact"' in world
