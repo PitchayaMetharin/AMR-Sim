@@ -15,6 +15,9 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ManipulateProduct.action"
   "action/TransportProduct.action"
+  "action/ExecuteProductCycle.action"
+  "action/RunSequence.action"
+  "action/NavigateStation.action"
   "msg/BaseStatus.msg"
   "msg/FactoryStatus.msg"
   "msg/HealthStatus.msg"

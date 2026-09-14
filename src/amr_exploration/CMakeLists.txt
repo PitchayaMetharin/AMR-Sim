@@ -13,6 +13,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(frontier_algorithm_test test/test_frontier_algorithm.py)
   ament_add_pytest_test(frontier_contract_test test/test_frontier_contract.py)
+  ament_add_pytest_test(frontier_lifecycle_test test/test_frontier_lifecycle.py)
 endif()
 
 ament_package()

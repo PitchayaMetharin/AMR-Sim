@@ -2,6 +2,10 @@
 
 ## Result
 
+This is a historical Phase 10 report. Later Phase 11 work supplies the active
+Regulated Pure Pursuit controller; the retained `MPC` wording refers to the
+compatibility package/topic boundary, not the current controller plugin.
+
 Phase 10 simulation-only global planning and mission-boundary implementation
 and validation passed. It was approved and closed by the user; no local commit
 is authorized.

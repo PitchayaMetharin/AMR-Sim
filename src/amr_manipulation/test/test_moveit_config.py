@@ -60,11 +60,13 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "request_and_confirm_initial_detachment" not in mass_source
     assert 'unsafe wrist-flipped staging branch rejected' in mass_source
     assert (
-        "pregrasp.position.x = 0.85;\n"
+        "pregrasp.position.x = pickup_product_base[0];\n"
         "    pregrasp.position.y = pickup_product_lateral;\n"
         "    pregrasp.position.z = 1.00;"
     ) in mass_source
     assert 'arm.setJointValueTarget(pregrasp, "gripper_tcp")' not in mass_source
+    assert "const double tcp_x_world = std::cos(robot_yaw) * tcp.pose.position.x" in mass_source
+    assert "const double tcp_y_world = std::sin(robot_yaw) * tcp.pose.position.x" in mass_source
     assert "pregrasp_seed{" in mass_source
     assert "-0.000032311, -0.760907950, 0.661511204" in mass_source
     assert "0.000037514, 0.099207379, -0.000017083" in mass_source
@@ -91,13 +93,21 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     pregrasp_start = mass_source.index("arm.setStartStateToCurrentState();", pregrasp_copy)
     pregrasp_target = mass_source.index(
         "arm.setJointValueTarget(pregrasp_ik_solution)")
+    pregrasp_constraints = mass_source.index(
+        "moveit_msgs::msg::Constraints pregrasp_wrist_constraints", pregrasp_target)
+    pregrasp_path_constraint = mass_source.index(
+        "arm.setPathConstraints(pregrasp_wrist_constraints)", pregrasp_constraints)
     pregrasp_ompl = mass_source.index("arm.plan(pregrasp_plan)")
+    pregrasp_clear_constraints = mass_source.index(
+        "arm.clearPathConstraints()", pregrasp_ompl)
     assert pregrasp_seed < pregrasp_state < pregrasp_group
     assert pregrasp_group < pregrasp_order < pregrasp_count
     assert pregrasp_count < pregrasp_finite_seed < pregrasp_set_seed
     assert pregrasp_set_seed < pregrasp_ik < pregrasp_bounds < pregrasp_copy
     assert pregrasp_copy < pregrasp_finite_solution < pregrasp_start
-    assert pregrasp_start < pregrasp_target < pregrasp_ompl
+    assert pregrasp_start < pregrasp_target < pregrasp_constraints
+    assert pregrasp_constraints < pregrasp_path_constraint < pregrasp_ompl
+    assert pregrasp_ompl < pregrasp_clear_constraints
     assert 'unsafe wrist-flipped pre-grasp branch rejected' in mass_source
     assert "command_gripper(node, 0.020)" in mass_source
     command_start = mass_source.index("bool command_gripper")
@@ -107,17 +117,20 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert '"/gripper_controller/gripper_cmd"' in command_source
     assert '"/gripper_right_controller/gripper_cmd"' in command_source
     left_send = command_source.index(
-        "auto left_sent = left_client->async_send_goal(left_goal);")
+        "left_client->async_send_goal(left_goal, make_options(left_client, left_pending, \"left\"));")
     right_send = command_source.index(
-        "auto right_sent = right_client->async_send_goal(right_goal);")
+        "right_client->async_send_goal(right_goal, make_options(right_client, right_pending, \"right\"));")
     acceptance_wait = command_source.index(
-        "auto left_acceptance = std::async(std::launch::async", right_send)
+        "const auto acceptance_deadline = std::chrono::steady_clock::now() + 3s", right_send)
     assert left_send < right_send < acceptance_wait
     assert command_source.count("async_send_goal") == 2
-    assert "left_sent.wait_for(3s)" in command_source
-    assert "right_sent.wait_for(3s)" in command_source
-    assert "auto left_goal_handle = left_acceptance_ready ? left_sent.get() : nullptr;" in command_source
-    assert "auto right_goal_handle = right_acceptance_ready ? right_sent.get() : nullptr;" in command_source
+    assert "PendingActionGoal<Action>" in command_source
+    assert "pending->condition.notify_all()" in command_source
+    assert "pending->abandoned" in command_source
+    assert "async_cancel_goal(goal_handle)" in command_source
+    assert "std::this_thread::sleep_for(20ms)" in command_source
+    assert "std::shared_ptr<GoalHandle> left_goal_handle;" in command_source
+    assert "std::shared_ptr<GoalHandle> right_goal_handle;" in command_source
     acceptance_failure = command_source.index(
         "if (!left_acceptance_ready || !right_acceptance_ready ||")
     partial_left_cancel = command_source.index(
@@ -146,11 +159,15 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert cancel_helper < cancel_goal < cancel_wait < terminal_wait < terminal_code
     assert "response->goals_canceling" in command_source
     assert "goal_info.goal_id.uuid == goal_id" in command_source
-    result_timeout = command_source.index("result.wait_for(30s)")
+    result_deadline = command_source.index(
+        "const auto deadline = std::chrono::steady_clock::now() + 30s")
+    result_poll = command_source.index("result.wait_for(50ms)", result_deadline)
+    result_timeout = command_source.index(
+        "result.wait_for(0s) != std::future_status::ready", result_poll)
     timeout_cancel = command_source.index(
         "cancel_accepted_goal(side, client, goal_handle, result)", result_timeout)
     timeout_return = command_source.index("return false;", timeout_cancel)
-    assert result_timeout < timeout_cancel < timeout_return
+    assert result_deadline < result_poll < result_timeout < timeout_cancel < timeout_return
     result_code_check = command_source.index(
         "wrapped.code != rclcpp_action::ResultCode::SUCCEEDED")
     result_pointer_check = command_source.index("!wrapped.result")
@@ -209,6 +226,16 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "bool precise" not in mass_source
     assert "precise ?" not in mass_source
     assert "navigation_client_" in mass_source
+    assert 'geometry_msgs/msg/pose_with_covariance_stamped.hpp' in mass_source
+    assert '"/amr/amcl_pose"' in mass_source
+    navigation_start = mass_source.index("bool navigate_to(")
+    navigation_end = mass_source.index("bool bounded_reverse(", navigation_start)
+    navigation_source = mass_source[navigation_start:navigation_end]
+    assert "use_fresh_amcl_terminal_pose" in navigation_source
+    assert "wrapped.code == rclcpp_action::ResultCode::SUCCEEDED" in navigation_source
+    assert "no_navigation_feedback" in navigation_source
+    assert "using fresh AMCL terminal pose" in mass_source
+    assert "position_error > 0.07 || yaw_error > 0.15" in mass_source
     assert 'ensure_entry("held_product")' in mass_source
     assert 'ensure_entry("pickup_pedestal")' in mass_source
     negative_check = mass_source.index("Out-of-dispatch detachment rejection")
@@ -267,10 +294,15 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "goal.speed = static_cast<float>(product_.pickup_egress_speed_mps)" in egress_source
     assert "product_.pickup_egress_time_limit_s" in egress_source
     assert "product_.pickup_egress_max_distance_m" in egress_source
-    assert "result.wait_for(client_timeout)" in egress_source
+    egress_deadline = egress_source.index(
+        "const auto deadline = std::chrono::steady_clock::now() + client_timeout")
+    egress_poll = egress_source.index("result.wait_for(50ms)", egress_deadline)
+    egress_timeout = egress_source.index(
+        "result.wait_for(0s) != std::future_status::ready", egress_poll)
     assert "async_cancel_goal(goal_handle)" in egress_source
     assert "response->goals_canceling" in egress_source
     assert "terminal.code != rclcpp_action::ResultCode::CANCELED" in egress_source
+    assert egress_deadline < egress_poll < egress_timeout
     assert "bool dock_egress(std::chrono::seconds client_timeout)" in egress_source
 
     dock_bias_ground_truth = mass_source.index(
@@ -721,6 +753,7 @@ def test_pickup_geometry_uses_fresh_relative_lateral_pose():
     assert "fresh pickup product or robot pose was non-finite" in source
     assert "pickup_product_pose.pose.position.x + 0.05" in source
     assert "pickup_product_pose.pose.position.z - 0.45" in source
+    assert "pregrasp.position.x = pickup_product_base[0]" in source
     assert "const double pickup_product_lateral = pickup_product_base[1]" in source
     assert "const double pickup_pedestal_lateral = pickup_pedestal_base[1]" in source
     assert '{0.85, pickup_product_lateral, 0.925}' in source

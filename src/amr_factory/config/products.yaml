@@ -8,9 +8,9 @@ tag_to_grasp:
   translation_xyz: [0.0, -0.10, 0.156]
   rotation_xyzw: [0.5, -0.5, 0.5, 0.5]
 products:
-  product_a: {tag_id: 101, mass: 1.0, pickup_station: pickup_a}
-  product_b: {tag_id: 102, mass: 3.0, pickup_station: pickup_b}
-  product_c: {tag_id: 103, mass: 5.0, pickup_station: pickup_c}
+  product_a: {tag_id: 101, mass: 1.0, pickup_station: pickup_a, autonomous_enabled: true, dispatch_slot: dispatch_1}
+  product_b: {tag_id: 102, mass: 3.0, pickup_station: pickup_b, autonomous_enabled: true, dispatch_slot: dispatch_2}
+  product_c: {tag_id: 103, mass: 5.0, pickup_station: pickup_c, autonomous_enabled: false, dispatch_slot: dispatch_3}
 dispatch_slots:
   - {id: dispatch_1, x: -4.10, y: 0.50, z: 0.075}
   - {id: dispatch_2, x: -4.10, y: 0.00, z: 0.075}

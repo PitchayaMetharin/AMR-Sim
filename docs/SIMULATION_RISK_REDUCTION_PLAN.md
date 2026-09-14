@@ -2,6 +2,10 @@
 
 ## Purpose
 
+> Historical Phase 0 planning record. Current navigation uses Nav2 Regulated
+> Pure Pursuit (RPP); the legacy `MPC` package/topic names are compatibility
+> interfaces, not the active controller implementation.
+
 This plan defines what can be tested in the current simulation-only project,
 what evidence each test can provide, and what conclusions remain prohibited.
 It does not create a robot model or begin a later phase.
@@ -63,7 +67,7 @@ be claimed during Phase 0:
 - acceleration, braking, jerk, traction, and wheel-slip behavior;
 - differential-drive odometry and wheel-separation calibration;
 - IMU and dual-LiDAR timing, transforms, noise, and occlusion;
-- Nav2, SLAM, EKF, MPC, watchdog, and mission recovery performance;
+- Nav2, SLAM, EKF, RPP, watchdog, and mission recovery performance;
 - 50 kg versus higher-load comparative dynamics.
 
 ## Staged Test Strategy
@@ -129,7 +133,7 @@ Later phases shall add:
 - odometry and EKF accuracy tests;
 - LiDAR/IMU noise, delay, dropout, and transform-fault injection;
 - blocked-path, canceled-goal, localization-loss, and communication-loss tests;
-- Nav2 and MPC constraint, recovery, and mission-success testing;
+- Nav2 and RPP constraint, recovery, and mission-success testing;
 - command freshness, plant-watchdog, and stopped-state tests.
 
 ## Idealized Stopping-Distance Bounds

@@ -247,6 +247,166 @@ def test_degraded_stats_fail_the_aggregate_gate():
     assert summary["aggregate_sim_real"] < 0.90
 
 
+def test_runtime_profiles_keep_default_floor_and_select_phase15_floor():
+    assert PREFLIGHT.get_runtime_profile("default") == PREFLIGHT.RuntimeProfile(
+        0.90, 0.90
+    )
+    assert PREFLIGHT.get_runtime_profile("phase15_mapping") == (
+        PREFLIGHT.RuntimeProfile(0.80, 0.80)
+    )
+    assert PREFLIGHT.MIN_MEDIAN_RTF == 0.90
+    assert PREFLIGHT.MIN_AGGREGATE_RTF == 0.90
+
+
+def test_phase15_profile_accepts_exact_inclusive_rtf_floors():
+    assert PREFLIGHT.rtf_gate_errors({
+        "median": 0.800,
+        "aggregate_sim_real": 0.800,
+    }, "phase15_mapping") == []
+
+
+@pytest.mark.parametrize(
+    ("median", "aggregate", "expected_error"),
+    [
+        (0.799, 0.800, "median RTF"),
+        (0.800, 0.799, "aggregate RTF"),
+    ],
+)
+def test_phase15_profile_rejects_either_metric_below_floor(
+        median, aggregate, expected_error):
+    errors = PREFLIGHT.rtf_gate_errors({
+        "median": median,
+        "aggregate_sim_real": aggregate,
+    }, "phase15_mapping")
+    assert len(errors) == 1
+    assert expected_error in errors[0]
+
+
+def test_default_profile_keeps_shared_point_nine_floor_isolated_from_phase15():
+    summary = {"median": 0.850, "aggregate_sim_real": 0.850}
+    assert PREFLIGHT.rtf_gate_errors(summary, "phase15_mapping") == []
+    errors = PREFLIGHT.rtf_gate_errors(summary, "default")
+    assert len(errors) == 2
+    assert all("0.90" in error for error in errors)
+
+
+def test_phase15_profile_rejects_known_subpoint_eight_aggregate_evidence():
+    errors = PREFLIGHT.rtf_gate_errors({
+        "median": 0.9354,
+        "aggregate_sim_real": 0.7914305,
+    }, "phase15_mapping")
+    assert len(errors) == 1
+    assert "aggregate RTF" in errors[0]
+    assert "0.80" in errors[0]
+
+
+def _patch_runtime_environment(
+        monkeypatch, devices, processes, gpu_devices, forced=None):
+    monkeypatch.setattr(
+        PREFLIGHT, "accessible_render_devices", lambda: list(devices))
+    monkeypatch.setattr(
+        PREFLIGHT, "forced_software_environment", lambda: dict(forced or {}))
+    monkeypatch.setattr(
+        PREFLIGHT, "matching_processes", lambda: list(processes))
+    monkeypatch.setattr(
+        PREFLIGHT, "process_render_devices", lambda _pid: list(gpu_devices))
+
+
+def test_runtime_preflight_reports_selected_phase15_profile(monkeypatch, tmp_path):
+    _patch_runtime_environment(
+        monkeypatch,
+        ["/dev/dri/renderD128"],
+        [(42, "gz sim -r factory.sdf")],
+        ["/dev/dri/renderD128"],
+    )
+    monkeypatch.setattr(
+        PREFLIGHT,
+        "capture_stats",
+        lambda: SimpleNamespace(
+            stdout=stats_text([1.0] * 10), stderr="", returncode=0
+        ),
+    )
+
+    assert PREFLIGHT.runtime_preflight(
+        tmp_path, profile="phase15_mapping"
+    ) == 0
+    report = (tmp_path / "runtime_preflight.txt").read_text(encoding="utf-8")
+    assert "profile=phase15_mapping" in report
+    assert "median_rtf_floor=0.80" in report
+    assert "aggregate_rtf_floor=0.80" in report
+    assert "verdict=PASS" in report
+
+
+@pytest.mark.parametrize(
+    ("devices", "processes", "gpu_devices", "forced", "expected"),
+    [
+        (
+            [],
+            [(42, "gz sim -r factory.sdf")],
+            ["/dev/dri/renderD128"],
+            {},
+            "no readable/writable /dev/dri/renderD* device",
+        ),
+        (
+            ["/dev/dri/renderD128"],
+            [],
+            [],
+            {},
+            "no Gazebo process found",
+        ),
+        (
+            ["/dev/dri/renderD128"],
+            [(42, "gz sim -r factory.sdf")],
+            [],
+            {},
+            "no Gazebo process has an open /dev/dri device",
+        ),
+        (
+            ["/dev/dri/renderD128"],
+            [(42, "gz sim -r factory.sdf")],
+            ["/dev/dri/renderD128"],
+            {"LIBGL_ALWAYS_SOFTWARE": "1"},
+            "environment forces software OpenGL",
+        ),
+    ],
+)
+def test_runtime_preflight_preserves_hardware_render_and_process_gates(
+        monkeypatch, tmp_path, devices, processes, gpu_devices, forced, expected):
+    _patch_runtime_environment(
+        monkeypatch, devices, processes, gpu_devices, forced)
+
+    def stats_must_not_run():
+        pytest.fail("stats capture must not run after a preflight gate fails")
+
+    monkeypatch.setattr(PREFLIGHT, "capture_stats", stats_must_not_run)
+    assert PREFLIGHT.runtime_preflight(tmp_path) == 1
+    report = (tmp_path / "runtime_preflight.txt").read_text(encoding="utf-8")
+    assert expected in report
+    assert "verdict=FAIL" in report
+
+
+def test_runtime_preflight_fails_closed_on_stats_process_exit(monkeypatch, tmp_path):
+    _patch_runtime_environment(
+        monkeypatch,
+        ["/dev/dri/renderD128"],
+        [(42, "gz sim -r factory.sdf")],
+        ["/dev/dri/renderD128"],
+    )
+    monkeypatch.setattr(
+        PREFLIGHT,
+        "capture_stats",
+        lambda: SimpleNamespace(
+            stdout=stats_text([1.0] * 10), stderr="stats failed", returncode=7
+        ),
+    )
+
+    assert PREFLIGHT.runtime_preflight(tmp_path) == 1
+    report = (tmp_path / "runtime_preflight.txt").read_text(encoding="utf-8")
+    assert "gz_topic_exit_code=7" in report
+    assert "error=gz topic exited with code 7" in report
+    assert "verdict=FAIL" in report
+
+
 def test_stats_with_too_few_valid_samples_fail_closed():
     with pytest.raises(RuntimeError, match="valid /stats samples"):
         PREFLIGHT.summarize_stats(stats_text([1.0] * 9))
@@ -320,6 +480,28 @@ def test_main_routes_graph_mode_to_graph_preflight(monkeypatch, tmp_path):
         "graph", "--evidence-dir", str(tmp_path)
     ]) == 17
     assert called == [tmp_path]
+
+
+def test_main_routes_runtime_profile_and_defaults_to_shared_policy(
+        monkeypatch, tmp_path):
+    called = []
+
+    def runtime_preflight(evidence_dir, profile):
+        called.append((evidence_dir, profile))
+        return 31
+
+    monkeypatch.setattr(PREFLIGHT, "runtime_preflight", runtime_preflight)
+    assert PREFLIGHT.main([
+        "runtime", "--evidence-dir", str(tmp_path)
+    ]) == 31
+    assert PREFLIGHT.main([
+        "runtime", "--evidence-dir", str(tmp_path),
+        "--profile", "phase15_mapping",
+    ]) == 31
+    assert called == [
+        (tmp_path, "default"),
+        (tmp_path, "phase15_mapping"),
+    ]
 
 
 def test_lifecycle_observer_recovers_from_one_lost_response_and_stabilizes():

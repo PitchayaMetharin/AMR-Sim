@@ -1,10 +1,33 @@
 # Phase 14 Gate 6 runtime debug report
 
 This short record maps the evidence-backed D205 correction chain and the
-current Product 102 boundary. It does not claim higher-mass, hardware, or
-Gate 7 acceptance.
+completed Product 101/102 runtime acceptance. It does not claim higher-mass
+than Product 102, hardware, or Gate 7 acceptance.
 
-## Current Product 102 boundary — `_13` retained placement — 2026-09-01
+## Current Phase 14 runtime closeout — 2026-09-08
+
+Product 101 (1 kg) and Product 102 (3 kg) passed the approved autonomous
+factory-cycle scope on the direct host. `_11` passed the normal Product 101
+cycle; `_13` passed the normal Product 102 cycle and independent analyzer;
+`_14` passed navigation cancellation and retained-product manipulation
+cancellation; and `_16` passed graceful stop with the active Product 101
+delivery completing and the queued Product 102 delivery remaining unstarted.
+All mandatory host, runtime, graph, lifecycle, MoveIt, registry, bootstrap,
+status, ownership, attachment, detachment, empty-stow, and fail-closed gates
+passed for the accepted paths.
+
+The retained compact evidence is under
+`.ros_logs/amr_autonomous_factory_20260908_{11,13,14,16}/evidence/`.
+The raw full-topic bags and superseded exploratory bags were intentionally
+pruned; the targeted `_16` bag and run-level text evidence remain. The
+nominal runs did not naturally produce a late action-response callback; the
+accepted-goal late-response branch remains covered by the registered source
+contract tests. Product 103 and Gate 7 remain out of scope.
+
+All later dated sections are retained historical diagnosis records and do not
+supersede this current closeout.
+
+## Historical Product 102 boundary — `_13` retained placement — 2026-09-01
 
 The latest direct-host Product 102-only runtime is
 `.ros_logs/gate6_product102_retry_20260901_13/`; Product 102 is the current
@@ -36,7 +59,7 @@ Luna/max implementation packet has been dispatched; if authority is granted,
 Sol/high must freeze the packet first and Luna/max must implement only it,
 without planning or replanning independently.
 
-## Current Product 102 boundary — `_12` pickup-frame geometry — 2026-09-01
+## Historical Product 102 boundary — `_12` pickup-frame geometry — 2026-09-01
 
 The latest direct-host Product 102-only runtime is
 `.ros_logs/gate6_product102_retry_20260901_12/`; Product 102 is the current

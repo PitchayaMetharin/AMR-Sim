@@ -1,19 +1,61 @@
-# Phase 14 — Factory Mobile Manipulation Implementation Plan
+# Phase 14 — Factory Mobile Manipulation Implementation Plan and Closeout
 
 ## Authority and scope
 
-This is the decision-complete implementation handoff for a future approved
-Phase 14. It does not itself authorize implementation, dependency installation,
-a commit, or a push. Before editing, read `AGENTS.md`, `SESSION_HANDOFF.md`, and
-`PROJECT_STATUS.md`, then run `git status --short` and preserve every existing
-worktree change. Never modify, stage, discard, normalize, or commit
-`AMR_CODEX_HANDOFF.md`.
+This document preserves the decision-complete Phase 14 implementation handoff
+and the current closeout/operator boundary above. The implementation is now
+present for the accepted Product 101/102 simulation scope; the dated plan and
+diagnostic sections below remain historical engineering authority and do not
+supersede the current status. This document does not itself authorize new
+implementation, dependency installation, a commit, or a push. Before editing,
+read `AGENTS.md`, `SESSION_HANDOFF.md`, and `PROJECT_STATUS.md`, then run
+`git status --short` and preserve every existing worktree change. Never modify,
+stage, discard, normalize, or commit `AMR_CODEX_HANDOFF.md` without explicit
+user direction.
 
 The result remains a one-laptop ROS 2 Humble/Gazebo Harmonic simulation. The
 AMR's intended maximum payload is 300 kg, but the repository currently validates
 only its lower simulation baseline; Phase 14 must not claim that a physical AMR,
 mount, or manipulator is safe or rated for 300 kg. The KUKA arm may manipulate
 products of at most 5.0 kg in this simulation.
+
+## Current Phase 14 runtime closeout — 2026-09-08
+
+The approved autonomous factory-cycle scope is complete for Product 101 (1 kg)
+and Product 102 (3 kg). Fresh direct-host runs passed the documented host,
+runtime, graph, lifecycle, MoveIt, registry, bootstrap, status, ownership, and
+fail-closed gates. `_11` passed the normal Product 101 cycle; `_13` passed the
+normal Product 102 cycle and independent analyzer; `_14` passed navigation and
+retained-product cancellation behavior; and `_16` passed graceful stop after
+the active Product 101 delivery while leaving the queued Product 102 delivery
+unstarted.
+
+The retained compact evidence is under
+`.ros_logs/amr_autonomous_factory_20260908_{11,13,14,16}/evidence/`:
+run-level gate outputs, analyzer/CLI/status windows, the cancellation and
+graceful-stop summaries, and the targeted `_16` bag. Full-topic raw bags were
+pruned after the evidence was recorded; `.ros_logs` is capped below 1 GB.
+Product 103/5 kg, Gate 7, physical hardware, and functional-safety claims
+remain outside this phase.
+
+All later dated sections in this implementation plan are retained historical
+diagnosis and acceptance planning; they do not supersede this closeout.
+
+## Current operator boundary
+
+The canonical autonomous entry point is
+`src/amr_factory/launch/factory_autonomous.launch.py`. Use
+`control_mode:=autonomous` and pass `factory_attachment:=true` explicitly for
+the accepted native-attachment path. Product 101 (1 kg) and Product 102 (3 kg)
+are the only autonomous-enabled registry products. Product 103 (5 kg) remains
+disabled, and Gate 7, physical hardware, and functional-safety claims remain
+out of scope.
+
+`factory_demo.launch.py` is a legacy/optional integration launch. It is not the
+canonical autonomous acceptance entry point and must not be used to claim a
+current Product 101/102 acceptance result. Use `factory_cli.py` for the
+station-selectable send, finite/continuous loop, graceful stop, cancellation,
+home, and status boundaries documented in `SIMULATION_COMMANDS.md`.
 
 ### Approved Humble/Harmonic compatibility revision — 2026-08-13
 
@@ -451,6 +493,8 @@ Navigate to dispatch approach and dock poses
 
 Default to `MANUAL`. Accept a mode change only while the queue is empty, no goal
 is active, the arm has fresh `STOWED_EMPTY` status, and no product is attached.
+The current autonomous registry enables only Product 101 at `pickup_a` and
+Product 102 at `pickup_b`; Product 103 remains disabled.
 
 - Manual mode accepts one transport goal and rejects concurrent goals.
 - Autonomous mode accepts at most three transport goals, executes them FIFO,
@@ -474,7 +518,7 @@ factory_cli enqueue pickup_a dispatch
 factory_cli status
 ```
 
-## Factory runtime
+## Historical factory runtime plan
 
 Add a separate factory launch that starts the factory Gazebo world, composite
 robot, existing base/sensor/control stack, static map server, AMCL, Nav2,
@@ -500,7 +544,7 @@ non-conflicting released packages from this list, omit `ros-humble-kuka-gazebo`
 and the Fortress `ros-humble-gz-ros2-control` binary, and use the already
 installed Harmonic `ros_gzharmonic` equivalents for ROS-Gazebo integration.
 
-## Ordered implementation gates
+## Historical ordered implementation gates
 
 Do not combine the phase into one unverified edit, and do not proceed past a
 failed gate.
@@ -523,7 +567,7 @@ failed gate.
 7. **Orchestration:** Validate manual transport and autonomous A/B/C FIFO
    transport, cancellation, fault retention, and terminal commands.
 
-## Required negative tests
+## Historical required negative tests
 
 Cover unknown or role-invalid stations, duplicate products, queue overflow,
 mode change while busy, unavailable Nav2/MoveIt dependencies, navigation failure
@@ -534,7 +578,7 @@ commands while the arm is moving/deployed/faulted, cancellation during both
 navigation and manipulation, and preservation of a held product after a
 post-pick failure.
 
-## Completion evidence
+## Historical completion evidence
 
 Run focused tests after every gate, then finish with:
 
@@ -544,14 +588,16 @@ colcon build --symlink-install
 source install/setup.bash
 colcon test
 colcon test-result --verbose
-ros2 launch amr_factory factory_demo.launch.py headless:=true
+ros2 launch amr_factory factory_autonomous.launch.py \
+  headless:=true control_mode:=autonomous factory_attachment:=true
 ```
 
-The headless runtime must demonstrate manual 1 kg transport and autonomous
-1/3/5 kg FIFO transport, fresh AMCL localization, correct tag verification,
-confirmed attachment/detachment, zero base motion whenever the arm is not
-stowed, retained products during transport, and placement only in dispatch
-slots. Confirm that no additional base-velocity publisher exists.
+The former 1/3/5 kg FIFO requirement is historical. The current accepted
+runtime boundary is autonomous Product 101/102 operation with fresh AMCL
+localization, registry-derived station/product mapping, confirmed
+attachment/detachment, zero base motion whenever the arm is not stowed,
+retained-product fault behavior, and placement only in dispatch slots. Product
+103/5 kg is disabled and must not be started.
 
 At phase completion, update the relevant project status, session handoff,
 architecture, parameter register, beginner guide, changelog, TODO, and Phase 14
@@ -603,7 +649,7 @@ existing frames, camera transform, watchdog, DiffDrive, sensor topics,
 controllers, and fail-closed ownership remain unchanged. Gate 6/Gate 7 runtime
 acceptance is still pending fresh evidence.
 
-## Current implementation correction — 2026-08-24
+## Historical implementation correction — 2026-08-24
 
 The active description supersedes the earlier primitive-only wording above:
 derived CAD meshes are used for chassis, wheel, caster, and LiDAR visuals, with
@@ -632,7 +678,7 @@ navigation dependencies are unavailable. Runtime orchestration acceptance,
 including manual and autonomous transport, remains unclaimed until Gate 6
 passes repeatably.
 
-## Current runtime status — D205 product 101 — 2026-08-24
+## Historical runtime status — D205 product 101 — 2026-08-24
 
 D205 completed one authorized headless 1 kg product-101 Gate 6 run with median
 RTF approximately `0.999818`, aggregate RTF approximately `0.994510`, zero
@@ -915,3 +961,462 @@ or that use `factory_attachment:=false` for native product acceptance.
 
 Phase 15 SLAM, Gate 7 runtime, GUI acceptance, hardware claims, dependency
 installation, commit, and push remain outside this Gate 6 plan.
+
+## Autonomous 1 kg / 3 kg factory cycle — approved 2026-09-04
+
+This section records the approved implementation handoff for station-selectable
+autonomous factory operation. Source implementation is authorized for the
+scoped `amr_interfaces`, `amr_factory`, `amr_manipulation`, and required
+`amr_bringup` ownership/test files only. Runtime/Gazebo/MoveIt/product
+execution remains a separate, explicitly authorized validation activity; this
+implementation pass must not run it. Product 103 remains disabled for
+autonomous operation. `AMR_CODEX_HANDOFF.md` is protected and must not be
+modified.
+
+### Intended behavior
+
+- Execute one complete cycle from any valid localized, collision-free AMR pose:
+  navigate to the selected pickup station, pick the station's registered
+  product, navigate to dispatch, place it in the registered slot, empty-stow,
+  and schedule the next job only after fresh detached/empty-stow proof.
+- Support one-shot `pickup_a`/`pickup_b` selection, finite ordered sequences,
+  and a continuous sequence such as `pickup_a, pickup_b, pickup_a, pickup_b`.
+- Support graceful stop (finish the active delivery, then optionally return
+  home), immediate cooperative cancel (clear pending work and do not add home
+  movement), and idle `go home`. Home is allowed only from a fresh safe
+  empty-stowed state.
+- Product/station/dispatch mappings come from the YAML registries. Products 101
+  (1 kg) and 102 (3 kg) are autonomous-enabled; product 103 (5 kg) is not.
+
+### Public contracts
+
+- Add `ExecuteProductCycle.action` at
+  `/amr/manipulation/execute_product_cycle` with pickup and destination station
+  IDs, typed terminal outcomes, delivered/product/message result fields, and
+  preparing/executing/canceling feedback including attachment state.
+- Add `RunSequence.action` at `/amr/factory/run_sequence` with ordered pickup
+  IDs, finite/continuous cycle count, optional final station, cycle/job result
+  counts, and per-cycle phase/product/attachment feedback.
+- Add `NavigateStation.action` at `/amr/factory/navigate_station`; v1 accepts
+  only a registry station with the `home` role.
+- Add `/amr/factory/stop_sequence`, `/amr/factory/cancel_sequence`, and the
+  private `/amr/manipulation/internal/cancel_cycle_motion` Trigger service.
+- Append sequence state, counters, final station, graceful-stop request, and
+  fault-latched fields to `FactoryStatus`; retain one canonical manipulation
+  status publisher at `/amr/manipulation/status`.
+
+### Implementation and safety rules
+
+- The autonomous manipulation cycle adapter owns the canonical manipulation
+  status and the new cycle action. It runs the generalized Gate 6 product
+  preparation/mass-stage child with internal status remapping; legacy C++ and
+  autonomous supervisors must not run concurrently.
+- Generalize Gate 6 preparation for products 101/102, arbitrary valid starting
+  poses, selected-only product reset, registered other-dock retreat, and
+  configurable internal status without changing accepted motion geometry,
+  thresholds, slots, or safety gates.
+- Cancellation must propagate cooperatively through preparation, Nav2,
+  MoveIt, gripper, and mass-stage work. If detached/empty-stowed state cannot
+  be proven after cancellation or failure, latch `FAULT`, preserve the held
+  product, and block base motion; never retry or advance automatically.
+- The factory supervisor uses the cycle action for one-shot transport and
+  sequences, enforces one active command owner and one cycle at a time, rejects
+  unsupported/disabled stations or concurrent requests, and updates terminal
+  outcomes on every path.
+- Add the autonomous launch and exact CLI controls for `send`, `loop`, `stop`,
+  `cancel`, `go home`, and `status`, while excluding standalone Gate 6 runners
+  and the legacy manipulation supervisor from autonomous launch.
+
+### Validation boundary
+
+Validate interfaces and source contracts first, then build/test the affected
+packages and workspace. Do not claim factory runtime acceptance from source
+tests. Stop patching after two failed implementation attempts for one root
+cause, return evidence for Astra/medium re-diagnosis (high only if needed), and preserve this record and
+the protected handoff file.
+
+### Token-conscious execution revision — approved 2026-09-07
+
+`SESSION_HANDOFF.md` retains authority over the paused partial implementation.
+Use Astra/medium first for analysis, planning, and diagnosis; escalate to
+Astra/high only when evidence or design remains unresolved at medium. The
+initial complete-diff review and focused source validation below are already
+complete; do not repeat them merely because the model assignment changed.
+Convert supported diagnoses into bounded packets with exact
+allowed changes, causal evidence, invariants, behavioral tests, expected
+results, and stop conditions. Resolve state transitions, cancellation ownership
+and terminal proof, status freshness, and next-job/home permission explicitly.
+
+After the user approves a concrete packet, Luna/max implements it and runs its
+focused checks. Astra/medium independently reviews every packet by default;
+escalate review to Astra/high only when medium cannot resolve a material
+contradiction, high-risk state transition, or contract decision. Astra
+implementation is reserved for fixes whose diagnosis shows they cannot safely
+be separated from difficult cross-component reasoning.
+Keep one writer and an independent reviewer, and return contradictory evidence
+or failed implementation to diagnosis before further source changes.
+
+Pass concise packets rather than full conversation histories, reuse findings
+until invalidated, and reserve broader builds/tests for integration milestones.
+No default parallel agents or Astra/max runs. Select assigned models explicitly;
+written roles do not switch the active model. Model changes do not reset the
+existing attempt limits. Runtime acceptance still requires separate approval.
+
+### Read-only autonomous review — 2026-09-07
+
+**Verdict: FAIL for implementation acceptance; source/build evidence is partial.**
+Reviewed the complete changed interface, registry, CLI, factory supervisor,
+cycle adapter, Gate 6 runner/mass-stage, and build/install surface against HEAD
+`abf3dbc67a9fa8fa123003e1d0185f61344b0232` and the approved September 4 behavior.
+Traced the relevant existing launch, ownership, bootstrap, mission, and Humble
+library contracts. No production source or repository tests were changed.
+
+Raw evidence is in `/tmp/amr-autonomous-review-20260907-ZSfLdb/` (temporary
+storage; retain it before host cleanup). `offline_review.py` executes real
+adapter methods and compiles the unmodified C++ `sequence_loop` against scripted
+dependency seams. `boundary_probes.py` checks installed Humble APIs and the pure
+action state machine. Neither initializes ROS, creates ROS nodes, runs launch,
+or starts Gazebo/MoveIt. These are deterministic source reproductions, not
+timing measurements or runtime acceptance.
+
+| ID | Finding and mechanism | Evidence / confidence |
+| --- | --- | --- |
+| A1 | Adapter cannot start normally: its line 56 redeclares `use_sim_time`, which Humble's Node TimeSource already declares. Its three `[]` mapping defaults infer BYTE_ARRAY, rejecting intended string/integer array overrides. | `boundary_probes.log` B1/B2; installed Node/TimeSource; HIGH, SOURCE |
+| A2 | Adapter terminal calls pass a result to Python `succeed/abort/canceled`, which accept only `self`. Three logger calls also use unsupported positional formatting arguments, so error reporting can raise another TypeError. | `offline_review_v2.log` R1; adapter lines 105, 252, 503–622; HIGH, SOURCE |
+| A3 | Once idle empty-stow is established, `_publish_status` no longer gates base permission on current joint/bootstrap proof. Expired proof still produces fresh status with `base_motion_allowed=true`. `_joint_stowed_locked` also accepts mismatched name/position arrays through `zip`. | R2/R4; adapter lines 273–297, 361–397; HIGH, SOURCE |
+| A4 | `_internal_status_callback` can overwrite state, permission, and held-product evidence after `_set_fault` latches a fault. A later empty-stow child sample permits base motion even while `_fault_latched` remains true. | R3, with a faulted-state negative control; adapter lines 305–359, 470–477; HIGH, SOURCE |
+| A5 | `sequence_loop` permits final home when a job failed but no attachment fault was latched; failed empty-stow proof with `held_product_=false` also reaches home. `navigate_home` itself does not recheck empty-stow proof before sending. | R5/R6; factory lines 776–800, 840, 934–951; HIGH, SOURCE |
+| A6 | Factory cancellation handling tests `call.canceled` before the typed failure result. An unconfirmed cancellation reported as INTERLOCK_FAILED becomes ordinary CANCELED without a fault latch. The Trigger service only sets flags; the final `goal->canceled` can be called without the public goal entering CANCELING. | R7 and B3; factory lines 164–185, 635–640, 716–723, 770–773, 887; HIGH, SOURCE |
+| A7 | Required autonomous launch, factory autonomous contract tests, cycle-adapter tests, and new action/service ownership entries are absent. The existing demo starts the legacy manipulation server, while the modified factory now calls ExecuteProductCycle. | B4; factory_demo.launch.py and interface_ownership.yaml inspection; HIGH, ORCHESTRATION / TEST COVERAGE |
+| A8 | Existing gripper contract asserts literal `result.wait_for(30s)`; source now uses a 30-second steady-clock deadline and 50 ms polling. The old text assertion fails without testing the cancellation behavior. | `pytest.log`: test_moveit_config.py:149; HIGH, TEST/EVIDENCE HARNESS |
+
+Additional source-traced risks remain outside the first implementation packet:
+
+- Pending goal acceptance is not retained for late cancellation in factory
+  `call_execute_cycle`/`navigate_home` or runner `_navigate`. Cancellation during
+  acceptance can release the caller while the downstream request remains live.
+  Existing `amr_mission` goal-response callbacks show a local pattern for
+  retaining and canceling late accepted handles. Timing incidence is unmeasured.
+- The preparation node destroys its cancel service before launching the mass
+  stage, leaving a handoff gap. The adapter accepts any changed internal boot
+  identity and has no explicit runner-to-stage ownership handshake. A fresh
+  proof wait can also outlast the stopped child's 200 ms status freshness window.
+- Mass-stage attachment/detachment helpers have no cancellation checks around
+  their requests, and several planning/contact waits are not interruptible.
+  A MoveIt stop hook and a process exit alone do not prove every downstream
+  command reached a terminal state. SIGINT cleanup is not that proof.
+- Python registry loading uses `yaml.safe_load` without duplicate-key rejection;
+  consumers independently parse registry data. CLI station choices remain
+  hard-coded, and one-shot admission does not check `autonomous_enabled` for
+  Product 101/102. Preserve fixed hardware values while reconciling validation.
+- Factory feedback does not subscribe to cycle feedback; only boundary feedback
+  is sent. Status and action outcome consistency needs behavioral coverage.
+- The original three-goal FIFO text and the newer rejection of concurrent
+  commands must be reconciled explicitly in compatibility tests. Do not silently
+  restore parallel admission or remove a public interface.
+
+These are source-review findings, not a claim that every possible defect was
+enumerated. Future packets require a reproducible mechanism and explicit
+decisions; no broad "finish everything" packet is ready.
+
+Fresh commands and results (run from the workspace with Humble sourced):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider \
+  src/amr_factory/test src/amr_manipulation/test src/amr_bringup/test
+# Exit 1: 96 passed, 1 failed (A8).
+source install/setup.bash
+export GZ_VERSION=harmonic
+colcon build --packages-select amr_interfaces amr_factory amr_manipulation \
+  --symlink-install --executor sequential --parallel-workers 2
+# Exit 0: all three packages built; existing-overlay warning recorded.
+ctest --test-dir build/amr_manipulation -L gtest --output-on-failure
+# Exit 0: both existing gtest suites passed.
+PYTHONDONTWRITEBYTECODE=1 python3 /tmp/amr-autonomous-review-20260907-ZSfLdb/offline_review.py
+# Exit 0: seven undesired behaviors/API violations reproduced, healthy controls passed.
+PYTHONDONTWRITEBYTECODE=1 python3 /tmp/amr-autonomous-review-20260907-ZSfLdb/boundary_probes.py
+# Exit 0: constructor/type/state-machine incompatibilities and missing artifacts confirmed.
+git diff --check
+# Exit 0 at review time.
+```
+
+The five changed/new Python files passed AST parsing; the three package
+manifests parsed successfully. `syntax_manifest.log`, `build.log`,
+`ctest_gtest.log`, and `source_sha256.log` preserve results and source identities.
+The first offline harness run reproduced R1–R4 but omitted one C++ stub member
+(`detail_`); adding that member to the temporary harness enabled R5–R7.
+`offline_review.log` preserves that harness failure. No product patch or new
+implementation attempt occurred. The findings survive the passing build and
+old tests because those checks do not exercise the new adapter/state machine.
+Full workspace tests and runtime were not advanced after the focused failure.
+
+### Packet A1 — Humble adapter API compatibility — approved; review passed
+
+**Owner:** Luna/max implementation, Sol/high independent review. This is a
+bounded compatibility correction for A1/A2 only, not safety/integration
+acceptance. Confidence HIGH. The user approved proceeding. An initial Luna/max
+usage-limit pause consumed no implementation attempt. After resumption, Luna
+completed attempt 1: guarded clock declaration, typed mapping parameters,
+compatible terminal/logging calls, and the registered offline test suite.
+Luna reports pre-change 8 failed/1 passed and post-change 16 passed, with the
+package build, registered CTest, and diff check passing. Sol/high independently
+reviewed the exact dirty-source delta and issued PASS; the pre-packet replay was
+red as expected. Pre-packet source snapshots: `/tmp/amr-a1-pre-XtoZw5/`.
+The historical broader implementation cap remains recorded.
+
+**Allowed files:**
+
+- `src/amr_manipulation/scripts/cycle_manipulation_supervisor.py`
+- `src/amr_manipulation/test/test_cycle_adapter.py` (new)
+- `src/amr_manipulation/CMakeLists.txt` (register this test only)
+
+**Exact changes:**
+
+1. Guard `use_sim_time` declaration with `has_parameter`, preserving an existing
+   launch override. Do not force or overwrite the selected clock setting.
+2. Declare `product_station_map` and `dispatch_station_ids` using
+   `rclpy.parameter.Parameter.Type.STRING_ARRAY`; declare
+   `autonomous_product_ids` using `INTEGER_ARRAY`. Read these three with
+   `get_parameter_or(name).value` so absent overrides yield the existing
+   MappingError/unavailable path rather than ParameterUninitializedException.
+   Keep the existing nonempty mapping requirements and Product 103 exclusion.
+3. Call Python `goal_handle.succeed()`, `abort()`, and `canceled()` with no
+   result argument. Return the existing typed result from `_execute_callback`.
+   Preserve result values, messages, branch ordering, and ownership cleanup.
+4. Format the three logger messages before calling `error`, using one message
+   argument. Preserve their diagnostic content.
+5. Add a registered offline pytest suite that exercises these behaviors using
+   installed Humble method signatures and parameter validation. Mock only ROS
+   graph/process infrastructure; do not mock away the incompatible signatures
+   or descriptor checks. No ROS initialization, processes, or simulation.
+
+**Behavioral tests and prediction:** Existing true/false clock overrides survive;
+valid string/integer mappings pass declaration and parsing; omitted mappings
+remain unavailable and malformed/wrong-type/103 mappings are rejected. Exercise
+success, abort, and cancellation with signature-faithful goal handles and
+assert the returned typed result. Exercise the three logging failure paths.
+These tests must expose the current API defects before changes and pass after
+the correction. The known A8 test remains a separately recorded failure;
+do not change it under this packet or report the complete suite as passing.
+
+**Validation:** From the workspace, source `/opt/ros/humble/setup.bash` and
+`install/setup.bash`; set `GZ_VERSION=harmonic`. Run:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider \
+  src/amr_manipulation/test/test_cycle_adapter.py
+colcon build --packages-select amr_manipulation --symlink-install
+ctest --test-dir build/amr_manipulation -R '^cycle_adapter_test$' --output-on-failure
+git diff --check
+```
+
+Register the test as `cycle_adapter_test` inside the existing BUILD_TESTING
+block. Independently inspect the packet diff against the pre-packet dirty
+source, not only HEAD. Preserve the entire existing worktree and protected
+handoff. Do not change status/fault logic, timers, geometry, launch behavior,
+other tests, public interfaces, or any runtime state. Stop on a contradiction,
+unexpected failure, or need to touch another file; return evidence for diagnosis.
+
+After A1 review, prepare separate packets for A3/A4 status authority, A5/A6
+factory terminal decisions, cancellation ownership across child boundaries,
+and launch/registry/ownership/test integration. Start diagnosis and review with
+Astra/medium, escalating to high only if medium cannot resolve a material
+contradiction or contract decision. Do not activate these later packets based
+on A1 approval.
+
+### Packet A3/A4 — status authority and fault retention — implemented; review passed
+
+**Owner:** Luna/max implementation, Astra/high independent review. This packet
+is a bounded safety correction for the adapter only. Diagnosis was Astra/medium,
+confidence HIGH, SOURCE. The user approved it. Luna completed implementation
+attempt 1, then a bounded correction attempt 2 after Astra/high found a terminal
+window gap. Astra/high re-review now passes the corrected delta.
+
+**Allowed files:**
+
+- `src/amr_manipulation/scripts/cycle_manipulation_supervisor.py`
+- `src/amr_manipulation/test/test_cycle_adapter.py`
+
+**Evidence and mechanism:** The targeted replay against the post-A1 source
+still reproduces R2/R3/R4 from the read-only review. `_joint_stowed_locked`
+truncates mismatched arrays with `zip` and accepts duplicate names. Idle
+`_publish_status` only checks independent bootstrap/joint proof during the
+initial STARTING transition, so expired proof can continue publishing
+`base_motion_allowed=true`. `_internal_status_callback` accepts unowned or late
+child samples and can overwrite a latched fault. `_set_idle_from_proof`
+unconditionally clears latch and retention evidence. Additional deterministic
+probes recorded `DUPLICATE_PROOF_ACCEPTED True`,
+`UNOWNED_IDLE_CHILD_BASE_ALLOWED True`, and `IDLE_HELPER_CLEARS_LATCH True`.
+
+**Exact changes:**
+
+1. Reject unequal joint-name/position lengths and duplicate names before
+   building the joint map. Preserve the six required joints, finite checks,
+   0.01-rad tolerance, 0.2-second freshness threshold, and acceptance of extra
+   unique joints.
+2. Factor a side-effect-free locked independent-proof predicate and use it for
+   `_fresh_independent_empty_stow`, startup transition, and every idle status
+   publication. Idle permission additionally requires no reserved goal, no
+   child, `STOWED_EMPTY`, and no attachment. Expired proof denies permission;
+   fresh proof can restore it. A fault latch always publishes FAULT, invalid,
+   and motion denied. Preserve active-cycle child freshness/state checks.
+3. Add a narrowly scoped child-status authority flag. Accept child samples only
+   for an active goal while authority is open and no fault is latched. Close it
+   atomically in fault, successful idle transition, and final cleanup. This is
+   not a runner/stage identity handshake.
+4. Make `_set_idle_from_proof` return a boolean. A latched fault never clears;
+   current independent proof and no canonical/child attachment are required.
+   Failed checks latch FAULT with retained evidence. Update all three terminal
+   callers to honor refusal and return `RETAINED_PRODUCT_FAULT` with
+   `delivered=false`; success aborts rather than succeeds when idle proof is
+   refused.
+
+**Invariants and non-goals:** Preserve status constants, freshness thresholds,
+hardware geometry, public interfaces, Product 103 exclusion, child-success and
+cooperative-cancel proof requirements, and A1 behavior. Do not change bootstrap
+request lifetime, timers, child handoff authentication, cancellation handshake,
+downstream terminal proof, factory logic, registries, launch, or runtime behavior.
+
+**Prediction and tests:** Fresh idle proof permits motion; expiry, unstowed,
+mismatched, duplicate, missing, or nonfinite joint evidence denies it, while a
+fresh valid pair restores it. Unowned or late samples cannot grant motion or
+overwrite FAULT/attachment/product/detail. A late sample cannot reacquire
+authority after a successful terminal transition. Terminal idle refusal cannot
+produce safe SUCCESS/CANCELED. An active owned fresh `STOWED_LOADED` sample
+remains a positive control; stale/inconsistent samples deny motion.
+
+Extend the existing offline fixture with mocked monotonic time and run. The
+initial implementation red baseline had 15 failures/20 passes; the corrected
+suite has 36 passes. The correction's focused regression was red before the
+one-condition source change and green after it. Snapshots and logs are under
+`/tmp/amr-a3a4-pre-ThWSze/` and `/tmp/amr-a3a4-attempt1-5yoFti/`.
+
+```bash
+source install/setup.bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider \
+  src/amr_manipulation/test/test_cycle_adapter.py
+git diff --check
+```
+
+Demonstrate the new regression failures on a pre-packet snapshot before the
+fix, then green post-fix. Astra/high independently verified the complete
+corrected delta, including the real helper-to-cleanup terminal window, and
+`git diff --check` passed. Stop on contradictory state-model evidence, any need
+to touch another path, or the 95%-used five-hour allowance. Runtime remains a
+separate gate.
+
+### Packet A5/A6 — factory terminal and cancellation semantics — attempt 2 acceptance withheld
+
+**Diagnosis:** Astra/medium, HIGH confidence, SOURCE. Reused R5/R6/R7 and
+current factory tracing. Attempt 1 implemented the approved bounded scope but
+was not accepted after review.
+`sequence_loop` can home after failed jobs or missing empty-stow proof when no
+product is marked held. `call_execute_cycle` can return `INTERLOCK_FAILED` while
+callers prioritize a cancellation flag. The Trigger service does not establish
+the public action’s `CANCELING` state, and Humble transitions that state only
+after the cancel callback returns. `navigate_home` lacks a final interlock and
+fresh-proof check immediately before dispatch.
+
+**Allowed files:** `src/amr_factory/src/factory_supervisor_node.cpp`, new
+`src/amr_factory/test/test_factory_autonomous_contract.py`, and the one CMake
+registration for that test.
+
+**Proposed bounded changes:** Preserve typed failures before generic cancellation;
+require fresh safe empty-stow proof for ordinary safe cancellation/home; prohibit
+home after failed jobs; recheck fault/cancel/stopping/readiness immediately before
+home send; make fault latches monotonic; and call `canceled()` only when
+`goal->is_canceling()`, otherwise abort with a typed CANCELED result. Critical
+interlock/retention failures always abort with their failure outcome.
+
+**Required offline evidence:** R5/R6/R7 regressions, proof expiry before home,
+ordinary versus Trigger cancellation, actual CANCELING versus EXECUTING action
+states, and fault-latch preservation. Attempt 1 had 4/5 red before
+implementation and 5/5 focused tests after. Astra/medium found three misses:
+missing-proof sequence failure does not always latch factory fault; standalone
+home interlock/cancel-confirmation failure does not latch fault; and the final
+home check unlocks before `async_send_goal`. Correction attempt 2 was paused at
+94% five-hour usage before correction edits/tests, then resumed on 2026-09-08.
+The three named misses were corrected and focused-tested; the independent
+review below still withholds packet acceptance. Snapshots/logs are under
+`/tmp/amr-a5a6-pre-vTNTrK/` and `/tmp/amr-a5a6-attempt1-W8d2tO/`.
+Preserve station geometry, timing, ownership, held-product evidence, and all
+non-goals from the handoff. No runtime, launch, registry, downstream
+cancellation handshake, or late-goal ownership changes.
+
+### A5/A6 independent review and escalation — 2026-09-08
+
+**Verdict:** Astra/medium confirms Luna followed the three exact correction
+instructions, but complete A5/A6 specification acceptance FAILS. The factory
+source has an uncovered early cancellation path; the lock probe has an invalid
+oracle. No third autonomous implementation attempt is authorized by this record.
+
+**Prediction versus result:** Attempt 2 should establish monotonic fault latches
+for missing delivery proof and standalone home failure, and hold the final home
+check through dispatch. Source review confirms these three changes. The broader
+requirement that ordinary cancellation requires fresh empty-stow proof remains
+violated by `sequence_loop`'s initial/between-job cancel exit. Diagnosis supported;
+implementation and evidence incomplete. No causal hypothesis was falsified by
+this review, and the attempt count is not reset.
+
+**Confirmed source mechanism (HIGH, SOURCE):** Admission checks readiness, then
+starts a separate sequence worker. Status can change or exceed the existing
+200 ms freshness window before worker execution or between jobs. Trigger/action
+cancel sets `sequence_cancel_requested_`; the branch at source line 764 sets
+`canceled=true` and exits without the proof check used after a cycle. Terminal
+selection at line 842 prioritizes that flag, returning CANCELED without a new
+fault latch. A pre-existing latch is retained but does not change the result.
+This proves a terminal-contract failure; it does not prove physical motion or
+measure the scheduling window's runtime incidence.
+
+**Confirmed harness defect (HIGH confidence, TEST/EVIDENCE HARNESS):** Test line
+366 calls `try_lock()` on the same nonrecursive mutex already held by that
+thread. This is undefined behavior. The passing probe cannot prove the final
+check/dispatch lock scope, although the current source visibly holds that lock.
+
+**Fresh evidence:** Factory pytest 70 passed; registered autonomous CTest 1/1
+passed; sourced Humble/overlay `colcon build --packages-select amr_factory
+--symlink-install --executor sequential --parallel-workers 2` passed; diff check
+passed. Independent production-body extraction with a replacement harness main
+gave 2 safe controls passing and 6 unsafe/prior-latch cases failing. Both
+EXECUTING and CANCELING handles were covered; all cases sent zero home goals.
+The prior-latch cases are injected invariant checks. Runnable command:
+`PYTHONDONTWRITEBYTECODE=1 python3 /tmp/amr-a5a6-review-20260908-8zz7VJ/early_cancel_probe.py`
+(expected current exit 1). Source hashes and result details are saved beside it.
+
+**Proposed next packet — user decision required:**
+
+- Objective: close the remaining early-cancel terminal seam and replace the
+  invalid lock oracle. Candidate write scope is only
+  `src/amr_factory/src/factory_supervisor_node.cpp` and
+  `src/amr_factory/test/test_factory_autonomous_contract.py`; no CMake change.
+- Snapshot the cancel decision under the mutex, then perform the existing
+  bounded proof wait outside that mutex. Fresh proof with no factory fault may
+  produce ordinary CANCELED; failed proof or a factory fault must latch/retain
+  fault, produce INTERLOCK_FAILED, and abort. Recheck fault under the mutex at
+  terminal selection. Preserve held-product evidence and dispatch no next job
+  or home. Reuse existing proof timing; do not add arbitrary waits or alter thresholds.
+- Replace the same-thread mutex `try_lock()` oracle with defined deterministic
+  lock-ownership instrumentation in the offline seam. Demonstrate that it fails
+  on the saved pre-correction unlock-before-send source and passes on current
+  source; avoid scheduling sleeps and same-thread nonrecursive lock attempts.
+- Behavioral checks: early cancel before the first job and between jobs;
+  missing/expired proof, fresh safe proof, and prior fault; EXECUTING typed-cancel
+  abort versus CANCELING canceled; unsafe paths always INTERLOCK_FAILED abort;
+  no added child/home dispatch; unchanged job counters and attachment evidence.
+- Validate red-before/green-after focused autonomous pytest, full factory
+  pytest, focused factory build, registered autonomous CTest, complete diff,
+  and `git diff --check`, followed by separate Astra/medium review. Escalate to
+  Astra/high only for a material unresolved transition/contract contradiction.
+- Preserve public interfaces, station/hardware geometry, safety gates, ownership,
+  timing values, Product 103 exclusion, and unrelated dirty work. Runtime,
+  launch/registry integration, downstream cancellation, and late goal ownership
+  remain outside this packet.
+- Stop if source contradicts this diagnosis, another file is needed, an invariant
+  changes, focused validation fails, or the usage guard is reached. A failed
+  implementation returns to diagnosis. The user must explicitly resolve the
+  exhausted attempt limit before this proposal becomes implementation authority.
+
+**Current worktree:** All source/config/test changes and untracked files listed
+in `SESSION_HANDOFF.md` predate this review and are preserved. This review only
+updates that handoff and this plan; temporary probes are outside the worktree.
+No runtime, commit, push, installation, system change, or external change occurred.

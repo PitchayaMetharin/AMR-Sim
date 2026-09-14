@@ -3,7 +3,7 @@
 """Fail-closed renderer, graph, lifecycle, and runtime evidence checks."""
 
 import argparse
-from collections import Counter
+from collections import Counter, namedtuple
 import grp
 import os
 from pathlib import Path
@@ -17,6 +17,12 @@ import time
 MIN_SAMPLES = 10
 MIN_MEDIAN_RTF = 0.90
 MIN_AGGREGATE_RTF = 0.90
+DEFAULT_RUNTIME_PROFILE = "default"
+RuntimeProfile = namedtuple("RuntimeProfile", ("median_floor", "aggregate_floor"))
+RUNTIME_PROFILES = {
+    DEFAULT_RUNTIME_PROFILE: RuntimeProfile(MIN_MEDIAN_RTF, MIN_AGGREGATE_RTF),
+    "phase15_mapping": RuntimeProfile(0.80, 0.80),
+}
 STATS_CAPTURE_SECONDS = 12.0
 PROCESS_MARKERS = (
     "gz sim",
@@ -313,7 +319,32 @@ def capture_stats():
         raise RuntimeError("gz topic /stats capture exceeded its bounded timeout") from error
 
 
-def runtime_preflight(evidence_dir):
+def get_runtime_profile(profile=DEFAULT_RUNTIME_PROFILE):
+    try:
+        return RUNTIME_PROFILES[profile]
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"unknown runtime preflight profile: {profile!r}") from error
+
+
+def rtf_gate_errors(summary, profile=DEFAULT_RUNTIME_PROFILE):
+    policy = get_runtime_profile(profile)
+    errors = []
+    if summary["median"] < policy.median_floor:
+        errors.append(
+            f"median RTF {summary['median']:.6f} is below "
+            f"{policy.median_floor:.2f}"
+        )
+    if summary["aggregate_sim_real"] < policy.aggregate_floor:
+        errors.append(
+            "aggregate RTF "
+            f"{summary['aggregate_sim_real']:.6f} is below "
+            f"{policy.aggregate_floor:.2f}"
+        )
+    return errors
+
+
+def runtime_preflight(evidence_dir, profile=DEFAULT_RUNTIME_PROFILE):
+    policy = get_runtime_profile(profile)
     devices = accessible_render_devices()
     forced = forced_software_environment()
     processes = matching_processes()
@@ -335,6 +366,9 @@ def runtime_preflight(evidence_dir):
 
     lines = [
         "mode=runtime",
+        f"profile={profile}",
+        f"median_rtf_floor={policy.median_floor:.2f}",
+        f"aggregate_rtf_floor={policy.aggregate_floor:.2f}",
         f"render_devices={','.join(devices) or '<none>'}",
         "forced_software=" + (
             ",".join(f"{key}={value}" for key, value in forced.items())
@@ -367,15 +401,7 @@ def runtime_preflight(evidence_dir):
         errors.append(str(error))
     else:
         lines.extend(format_summary(summary))
-        if summary["median"] < MIN_MEDIAN_RTF:
-            errors.append(
-                f"median RTF {summary['median']:.6f} is below {MIN_MEDIAN_RTF:.2f}"
-            )
-        if summary["aggregate_sim_real"] < MIN_AGGREGATE_RTF:
-            errors.append(
-                "aggregate RTF "
-                f"{summary['aggregate_sim_real']:.6f} is below {MIN_AGGREGATE_RTF:.2f}"
-            )
+        errors.extend(rtf_gate_errors(summary, profile))
     lines.extend([f"stats_raw={stats_path}", f"stats_stderr={stderr_path}"])
     lines.append("gz_topic_exit_code=" + str(result.returncode))
     if errors or result.returncode != 0:
@@ -1019,11 +1045,17 @@ def main(argv=None):
     for mode in ("host", "runtime", "graph", "lifecycle", "moveit"):
         command = subparsers.add_parser(mode)
         command.add_argument("--evidence-dir", type=Path, required=True)
+        if mode == "runtime":
+            command.add_argument(
+                "--profile",
+                choices=tuple(RUNTIME_PROFILES),
+                default=DEFAULT_RUNTIME_PROFILE,
+            )
     arguments = parser.parse_args(argv)
     if arguments.mode == "host":
         return host_preflight(arguments.evidence_dir)
     if arguments.mode == "runtime":
-        return runtime_preflight(arguments.evidence_dir)
+        return runtime_preflight(arguments.evidence_dir, arguments.profile)
     if arguments.mode == "graph":
         return graph_preflight(arguments.evidence_dir)
     if arguments.mode == "lifecycle":

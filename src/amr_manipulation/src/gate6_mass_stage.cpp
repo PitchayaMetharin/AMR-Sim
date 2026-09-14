@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdint>
 #include <future>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -20,6 +22,7 @@
 #include "builtin_interfaces/msg/duration.hpp"
 #include "control_msgs/action/gripper_command.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "moveit/move_group_interface/move_group_interface.h"
 #include "moveit/planning_scene_interface/planning_scene_interface.h"
 #include "moveit/robot_state/conversions.h"
@@ -27,6 +30,8 @@
 #include "moveit/robot_trajectory/robot_trajectory.h"
 #include "moveit_msgs/msg/attached_collision_object.hpp"
 #include "moveit_msgs/msg/collision_object.hpp"
+#include "moveit_msgs/msg/constraints.hpp"
+#include "moveit_msgs/msg/joint_constraint.hpp"
 #include "moveit_msgs/msg/planning_scene.hpp"
 #include "moveit_msgs/msg/planning_scene_components.hpp"
 #include "moveit_msgs/srv/get_planning_scene.hpp"
@@ -65,6 +70,18 @@ struct ProductSpec {
   std::array<double, 3> dispatch_dock;
   std::array<std::array<double, 3>, 3> dispatch_slots;
   int selected_slot_index;
+  std::string status_topic;
+  std::string cancel_service;
+};
+
+template<typename ActionT>
+struct PendingActionGoal {
+  using GoalHandle = rclcpp_action::ClientGoalHandle<ActionT>;
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool response_ready{false};
+  bool abandoned{false};
+  typename GoalHandle::SharedPtr handle;
 };
 
 class MassStageNode final : public rclcpp::Node {
@@ -76,7 +93,21 @@ class MassStageNode final : public rclcpp::Node {
     if (boot_id_ == 0U) boot_id_ = 1U;
 
     status_pub_ = create_publisher<amr_interfaces::msg::ManipulatorStatus>(
-      "/amr/manipulation/status", amr_interfaces::qos::authority());
+      product_.status_topic, amr_interfaces::qos::authority());
+    cancel_service_ = create_service<std_srvs::srv::Trigger>(
+      product_.cancel_service,
+      [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        cancel_requested_.store(true);
+        std::function<void()> hook;
+        {
+          std::lock_guard<std::mutex> lock(cancellation_mutex_);
+          hook = cancellation_hook_;
+        }
+        if (hook) hook();
+        response->success = true;
+        response->message = "Gate 6 mass-stage cancellation accepted";
+      });
     attach_pub_ = create_publisher<std_msgs::msg::Empty>(
       attachment_topic(product_.id, "attach"), amr_interfaces::qos::state());
     for (std::size_t index = 0; index < kProductIds.size(); ++index) {
@@ -122,6 +153,15 @@ class MassStageNode final : public rclcpp::Node {
         robot_pose_received_ = std::chrono::steady_clock::now();
         have_robot_pose_ = true;
       });
+    amcl_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "/amr/amcl_pose",
+      rclcpp::QoS(rclcpp::KeepLast(10)).reliable().transient_local(),
+      [this](const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message) {
+        std::lock_guard<std::mutex> lock(evidence_mutex_);
+        amcl_pose_ = *message;
+        amcl_pose_received_ = std::chrono::steady_clock::now();
+        have_amcl_pose_ = true;
+      });
     joint_states_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/amr/base/joint_states", amr_interfaces::qos::sensor(),
       [this](const sensor_msgs::msg::JointState::SharedPtr message) {
@@ -162,11 +202,27 @@ class MassStageNode final : public rclcpp::Node {
     detail_ = detail;
   }
 
+  bool cancellation_requested() const { return cancel_requested_.load(); }
+
+  void throw_if_canceled() const
+  {
+    if (cancellation_requested()) {
+      throw std::runtime_error("Gate 6 mass stage canceled cooperatively");
+    }
+  }
+
+  void set_cancellation_hook(std::function<void()> hook)
+  {
+    std::lock_guard<std::mutex> lock(cancellation_mutex_);
+    cancellation_hook_ = std::move(hook);
+  }
+
   bool wait_for_motion_permission(std::chrono::seconds timeout, bool attached = false) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     const auto wait_until_stationary = [this, deadline](SteadyTime & stationary_since,
       const SteadyTime announced) {
         while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+          if (cancellation_requested()) return false;
           const auto now = std::chrono::steady_clock::now();
           bool acceptable = false;
           {
@@ -291,8 +347,18 @@ class MassStageNode final : public rclcpp::Node {
     }
     // Gate 6 pickup dock poses have zero yaw.  In the fixed top-grasp
     // transform, the product center is 80 mm below the TCP.
-    const double expected_x = robot_pose_.pose.position.x + tcp.pose.position.x;
-    const double expected_y = robot_pose_.pose.position.y + tcp.pose.position.y;
+    const double robot_yaw = std::atan2(
+      2.0 * robot_pose_.pose.orientation.w * robot_pose_.pose.orientation.z,
+      1.0 - 2.0 * robot_pose_.pose.orientation.z * robot_pose_.pose.orientation.z);
+    // MoveIt reports the TCP in the planar base frame.  Rotate its XY offset
+    // into the world frame before comparing it with the world-frame product
+    // pose; a valid dock yaw must not appear as a lateral grasp error.
+    const double tcp_x_world = std::cos(robot_yaw) * tcp.pose.position.x -
+      std::sin(robot_yaw) * tcp.pose.position.y;
+    const double tcp_y_world = std::sin(robot_yaw) * tcp.pose.position.x +
+      std::cos(robot_yaw) * tcp.pose.position.y;
+    const double expected_x = robot_pose_.pose.position.x + tcp_x_world;
+    const double expected_y = robot_pose_.pose.position.y + tcp_y_world;
     const double expected_z =
       robot_pose_.pose.position.z + tcp.pose.position.z - 0.080;
     const double dx = product_pose_.pose.position.x - expected_x;
@@ -493,6 +559,56 @@ class MassStageNode final : public rclcpp::Node {
     return true;
   }
 
+  bool use_fresh_amcl_terminal_pose(const std::array<double, 3> & target) {
+    geometry_msgs::msg::PoseWithCovarianceStamped amcl_pose;
+    {
+      std::lock_guard<std::mutex> lock(evidence_mutex_);
+      const auto now = std::chrono::steady_clock::now();
+      if (!have_amcl_pose_ || amcl_pose_.header.frame_id != "map" ||
+        now - amcl_pose_received_ > 6s ||
+        !std::isfinite(amcl_pose_.pose.pose.position.x) ||
+        !std::isfinite(amcl_pose_.pose.pose.position.y) ||
+        !std::isfinite(amcl_pose_.pose.pose.orientation.x) ||
+        !std::isfinite(amcl_pose_.pose.pose.orientation.y) ||
+        !std::isfinite(amcl_pose_.pose.pose.orientation.z) ||
+        !std::isfinite(amcl_pose_.pose.pose.orientation.w))
+      {
+        return false;
+      }
+      amcl_pose = amcl_pose_;
+    }
+    const auto & pose = amcl_pose.pose.pose;
+    const double yaw = std::atan2(
+      2.0 * pose.orientation.w * pose.orientation.z,
+      1.0 - 2.0 * pose.orientation.z * pose.orientation.z);
+    const double position_error = std::hypot(
+      pose.position.x - target[0], pose.position.y - target[1]);
+    const double yaw_error = std::abs(std::remainder(
+      yaw - target[2], 2.0 * std::acos(-1.0)));
+    if (!std::isfinite(yaw) || !std::isfinite(position_error) ||
+      !std::isfinite(yaw_error) || position_error > 0.07 || yaw_error > 0.15)
+    {
+      return false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(evidence_mutex_);
+      navigation_feedback_received_ = true;
+      navigation_feedback_invalid_ = false;
+      navigation_time_backward_ = false;
+      navigation_feedback_received_wall_ = std::chrono::steady_clock::now();
+      navigation_time_ns_ = 0;
+      navigation_distance_remaining_ = 0.0;
+      navigation_feedback_pose_.header = amcl_pose.header;
+      navigation_feedback_pose_.pose = amcl_pose.pose.pose;
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "Navigation succeeded without feedback; using fresh AMCL terminal pose "
+      "within existing tolerance: position=%.3f m yaw=%.3f rad",
+      position_error, yaw_error);
+    return true;
+  }
+
   bool latest_navigation_feedback_pose(geometry_msgs::msg::PoseStamped & pose) const {
     std::lock_guard<std::mutex> lock(evidence_mutex_);
     if (!navigation_feedback_received_ || navigation_feedback_invalid_ ||
@@ -658,6 +774,7 @@ class MassStageNode final : public rclcpp::Node {
   bool navigate_to(const std::array<double, 3> & target, std::chrono::seconds timeout)
   {
     using Action = nav2_msgs::action::NavigateToPose;
+    if (cancellation_requested()) return false;
     if (!navigation_client_->wait_for_action_server(5s)) return false;
     reset_navigation_feedback();
     {
@@ -678,16 +795,72 @@ class MassStageNode final : public rclcpp::Node {
         const std::shared_ptr<const Action::Feedback> feedback) {
         if (feedback) record_navigation_feedback(*feedback);
       };
+    const auto pending = std::make_shared<PendingActionGoal<Action>>();
+    options.goal_response_callback = [this, pending](
+      rclcpp_action::ClientGoalHandle<Action>::SharedPtr goal_handle) {
+        bool cancel_late = false;
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          pending->handle = goal_handle;
+          pending->response_ready = true;
+          cancel_late = pending->abandoned;
+        }
+        pending->condition.notify_all();
+        if (goal_handle && cancel_late) {
+          try {
+            (void)navigation_client_->async_cancel_goal(goal_handle);
+          } catch (const rclcpp_action::exceptions::UnknownGoalHandleError &) {
+            RCLCPP_WARN(get_logger(), "late navigation goal was already terminal during cancellation");
+          }
+        }
+      };
     const auto monitoring_started = std::chrono::steady_clock::now();
-    auto sent = navigation_client_->async_send_goal(goal, options);
-    if (sent.wait_for(5s) != std::future_status::ready) return false;
-    auto goal_handle = sent.get();
-    if (!goal_handle) return false;
+    navigation_client_->async_send_goal(goal, options);
+    bool canceled_before_acceptance = false;
+    const auto acceptance_deadline = std::chrono::steady_clock::now() + 5s;
+    while (rclcpp::ok()) {
+      std::unique_lock<std::mutex> pending_lock(pending->mutex);
+      if (pending->response_ready) break;
+      pending_lock.unlock();
+      if (cancellation_requested()) {
+        canceled_before_acceptance = true;
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        pending->abandoned = true;
+      }
+      pending_lock.lock();
+      if (pending->response_ready) break;
+      if (std::chrono::steady_clock::now() >= acceptance_deadline) {
+        pending->abandoned = true;
+        break;
+      }
+      pending->condition.wait_for(pending_lock, 50ms);
+    }
+    typename rclcpp_action::ClientGoalHandle<Action>::SharedPtr goal_handle;
+    bool response_ready = false;
+    {
+      std::lock_guard<std::mutex> lock(pending->mutex);
+      response_ready = pending->response_ready;
+      if (response_ready) goal_handle = pending->handle;
+      else pending->abandoned = true;
+    }
+    if (!response_ready || !goal_handle) {
+      cancel_requested_.store(true);
+      return false;
+    }
     auto result = navigation_client_->async_get_result(goal_handle);
+    if (canceled_before_acceptance) {
+      (void)cancel_navigation_goal(navigation_client_, goal_handle, result);
+      return false;
+    }
     const auto simulation_limit_ns =
       std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
     while (rclcpp::ok()) {
       if (result.wait_for(50ms) == std::future_status::ready) break;
+      if (cancellation_requested()) {
+        RCLCPP_WARN(get_logger(), "Canceling active navigation goal on cycle request");
+        (void)cancel_navigation_goal(navigation_client_, goal_handle, result);
+        return false;
+      }
       bool cancel = false;
       const char * reason = "";
       {
@@ -720,6 +893,19 @@ class MassStageNode final : public rclcpp::Node {
     }
     if (!rclcpp::ok() || result.wait_for(0s) != std::future_status::ready) return false;
     const auto wrapped = result.get();
+    bool no_navigation_feedback = false;
+    {
+      std::lock_guard<std::mutex> lock(evidence_mutex_);
+      no_navigation_feedback = !navigation_feedback_received_;
+    }
+    if (wrapped.code == rclcpp_action::ResultCode::SUCCEEDED && wrapped.result &&
+      no_navigation_feedback)
+    {
+      // Nav2 may complete an already-within-tolerance goal before emitting
+      // feedback.  Keep the terminal proof localized and fail closed unless
+      // a fresh AMCL pose independently satisfies the existing gate.
+      (void)use_fresh_amcl_terminal_pose(target);
+    }
     log_navigation_terminal(target, wrapped.code);
     bool have_feedback = false;
     bool feedback_invalid = false;
@@ -735,6 +921,7 @@ class MassStageNode final : public rclcpp::Node {
   bool bounded_reverse(
     double distance, const char * label, std::chrono::seconds client_timeout)
   {
+    if (cancellation_requested()) return false;
     using Action = nav2_msgs::action::BackUp;
     if (!label || !std::isfinite(distance) || distance <= 0.0 ||
       !std::isfinite(product_.pickup_egress_max_distance_m) ||
@@ -760,55 +947,89 @@ class MassStageNode final : public rclcpp::Node {
     goal.time_allowance.sec = whole_seconds;
     goal.time_allowance.nanosec = static_cast<uint32_t>(
       (product_.pickup_egress_time_limit_s - static_cast<double>(whole_seconds)) * 1e9);
-    auto accepted = egress_client_->async_send_goal(goal);
-    if (accepted.wait_for(3s) != std::future_status::ready) {
-      RCLCPP_ERROR(get_logger(), "%s goal acceptance timed out after 3 seconds", label);
+    rclcpp_action::Client<Action>::SendGoalOptions options;
+    const auto pending = std::make_shared<PendingActionGoal<Action>>();
+    options.goal_response_callback = [this, pending, label](
+      rclcpp_action::ClientGoalHandle<Action>::SharedPtr goal_handle) {
+        bool cancel_late = false;
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          pending->handle = goal_handle;
+          pending->response_ready = true;
+          cancel_late = pending->abandoned;
+        }
+        pending->condition.notify_all();
+        if (goal_handle && cancel_late) {
+          try {
+            (void)egress_client_->async_cancel_goal(goal_handle);
+          } catch (const rclcpp_action::exceptions::UnknownGoalHandleError &) {
+            RCLCPP_WARN(get_logger(), "%s late reverse goal was already terminal during cancellation", label);
+          }
+        }
+      };
+    egress_client_->async_send_goal(goal, options);
+    bool canceled_before_acceptance = false;
+    const auto acceptance_deadline = std::chrono::steady_clock::now() + 3s;
+    while (rclcpp::ok()) {
+      std::unique_lock<std::mutex> pending_lock(pending->mutex);
+      if (pending->response_ready) break;
+      pending_lock.unlock();
+      if (cancellation_requested()) {
+        canceled_before_acceptance = true;
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        pending->abandoned = true;
+      }
+      pending_lock.lock();
+      if (pending->response_ready) break;
+      if (std::chrono::steady_clock::now() >= acceptance_deadline) {
+        pending->abandoned = true;
+        break;
+      }
+      pending->condition.wait_for(pending_lock, 50ms);
+    }
+    rclcpp_action::ClientGoalHandle<Action>::SharedPtr goal_handle;
+    bool response_ready = false;
+    {
+      std::lock_guard<std::mutex> lock(pending->mutex);
+      response_ready = pending->response_ready;
+      if (response_ready) goal_handle = pending->handle;
+      else pending->abandoned = true;
+    }
+    if (!response_ready || !goal_handle) {
+      cancel_requested_.store(true);
+      RCLCPP_ERROR(get_logger(), "%s goal acceptance did not produce an owned handle", label);
       return false;
     }
-    auto goal_handle = accepted.get();
+    if (canceled_before_acceptance) {
+      auto result = egress_client_->async_get_result(goal_handle);
+      (void)cancel_egress_goal(goal_handle, result, label);
+      return false;
+    }
     if (!goal_handle) {
       RCLCPP_ERROR(get_logger(), "%s goal was rejected", label);
       return false;
     }
-    // Retain the accepted handle for the full wall-clock wait.  A result that
-    // takes longer than the client contract is canceled explicitly and must
-    // reach a verified CANCELED terminal state before the stage can fail.
+    // Retain the accepted handle for the full wall-clock wait.  Poll in
+    // bounded slices so a cycle cancellation is acted on immediately; every
+    // cancellation must be acknowledged and reach terminal CANCELED.
     auto result = egress_client_->async_get_result(goal_handle);
-    if (result.wait_for(client_timeout) != std::future_status::ready) {
+    const auto deadline = std::chrono::steady_clock::now() + client_timeout;
+    while (rclcpp::ok() && result.wait_for(50ms) != std::future_status::ready) {
+      if (cancellation_requested()) {
+        RCLCPP_WARN(get_logger(), "%s cancellation requested", label);
+        if (!cancel_egress_goal(goal_handle, result, label)) {
+          RCLCPP_ERROR(get_logger(), "%s cooperative cancellation was not proven", label);
+        }
+        return false;
+      }
+      if (std::chrono::steady_clock::now() >= deadline) break;
+    }
+    if (result.wait_for(0s) != std::future_status::ready) {
       RCLCPP_ERROR(
         get_logger(), "%s result exceeded %lld seconds; canceling accepted goal",
         label,
         static_cast<long long>(client_timeout.count()));
-      auto cancel = egress_client_->async_cancel_goal(goal_handle);
-      if (cancel.wait_for(3s) != std::future_status::ready) {
-        RCLCPP_ERROR(get_logger(), "%s cancellation response timed out", label);
-        return false;
-      }
-      const auto response = cancel.get();
-      if (!response) {
-        RCLCPP_ERROR(get_logger(), "%s cancellation returned a null response", label);
-        return false;
-      }
-      const auto & goal_id = goal_handle->get_goal_id();
-      const bool listed = std::any_of(
-        response->goals_canceling.begin(), response->goals_canceling.end(),
-        [&goal_id](const auto & goal_info) { return goal_info.goal_id.uuid == goal_id; });
-      if (!listed) {
-        RCLCPP_ERROR(get_logger(), "%s cancellation did not list the accepted goal", label);
-        return false;
-      }
-      if (result.wait_for(3s) != std::future_status::ready) {
-        RCLCPP_ERROR(
-          get_logger(), "%s did not reach a terminal result after cancellation", label);
-        return false;
-      }
-      const auto terminal = result.get();
-      if (terminal.code != rclcpp_action::ResultCode::CANCELED) {
-        RCLCPP_ERROR(
-          get_logger(), "%s terminal result after cancellation was code %d, expected CANCELED",
-          label,
-          static_cast<int>(terminal.code));
-      }
+      (void)cancel_egress_goal(goal_handle, result, label);
       return false;
     }
     const auto wrapped = result.get();
@@ -826,6 +1047,48 @@ class MassStageNode final : public rclcpp::Node {
       static_cast<double>(wrapped.result->total_elapsed_time.sec) +
       static_cast<double>(wrapped.result->total_elapsed_time.nanosec) * 1e-9);
     return true;
+  }
+
+  bool cancel_egress_goal(
+    const rclcpp_action::ClientGoalHandle<nav2_msgs::action::BackUp>::SharedPtr & goal_handle,
+    std::shared_future<rclcpp_action::ClientGoalHandle<nav2_msgs::action::BackUp>::WrappedResult> & result,
+    const char * label)
+  {
+    try {
+      auto cancel = egress_client_->async_cancel_goal(goal_handle);
+      if (cancel.wait_for(3s) != std::future_status::ready) {
+        RCLCPP_ERROR(get_logger(), "%s cancellation response timed out", label);
+        return false;
+      }
+      const auto response = cancel.get();
+      if (!response) {
+        RCLCPP_ERROR(get_logger(), "%s cancellation returned a null response", label);
+        return false;
+      }
+      const auto & goal_id = goal_handle->get_goal_id();
+      const bool listed = std::any_of(
+        response->goals_canceling.begin(), response->goals_canceling.end(),
+        [&goal_id](const auto & goal_info) { return goal_info.goal_id.uuid == goal_id; });
+      if (!listed) {
+        RCLCPP_ERROR(get_logger(), "%s cancellation did not acknowledge the accepted goal", label);
+        return false;
+      }
+      if (result.wait_for(3s) != std::future_status::ready) {
+        RCLCPP_ERROR(get_logger(), "%s did not reach a terminal result after cancellation", label);
+        return false;
+      }
+      const auto terminal = result.get();
+      if (terminal.code != rclcpp_action::ResultCode::CANCELED) {
+        RCLCPP_ERROR(
+          get_logger(), "%s terminal result after cancellation was code %d, expected CANCELED",
+          label, static_cast<int>(terminal.code));
+        return false;
+      }
+      return true;
+    } catch (const rclcpp_action::exceptions::UnknownGoalHandleError &) {
+      RCLCPP_ERROR(get_logger(), "%s cancellation found an unknown goal handle", label);
+      return false;
+    }
   }
 
   bool dock_egress(std::chrono::seconds client_timeout) {
@@ -978,7 +1241,10 @@ class MassStageNode final : public rclcpp::Node {
   std::array<SteadyTime, 3> attachment_state_received_{};
   bool have_base_{false}, have_odometry_{false};
   bool have_product_pose_{false}, have_robot_pose_{false}, have_joint_states_{false};
+  bool have_amcl_pose_{false};
   bool have_reference_{false};
+  geometry_msgs::msg::PoseWithCovarianceStamped amcl_pose_;
+  SteadyTime amcl_pose_received_{};
   std::array<std::string, 3> attachment_states_{};
   bool navigation_feedback_received_{false};
   bool navigation_feedback_invalid_{false};
@@ -1003,12 +1269,17 @@ class MassStageNode final : public rclcpp::Node {
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr product_pose_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr robot_pose_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr amcl_pose_sub_;
   rclcpp::Subscription<ros_gz_interfaces::msg::Contacts>::SharedPtr left_contact_sub_;
   rclcpp::Subscription<ros_gz_interfaces::msg::Contacts>::SharedPtr right_contact_sub_;
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr navigation_client_;
   rclcpp_action::Client<nav2_msgs::action::BackUp>::SharedPtr egress_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr bootstrap_client_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_service_;
   rclcpp::TimerBase::SharedPtr status_timer_;
+  std::atomic_bool cancel_requested_{false};
+  mutable std::mutex cancellation_mutex_;
+  std::function<void()> cancellation_hook_;
 };
 
 moveit_msgs::msg::CollisionObject box(const std::string & id,
@@ -1030,7 +1301,7 @@ moveit_msgs::msg::CollisionObject box(const std::string & id,
   return object;
 }
 
-bool command_gripper(const std::shared_ptr<rclcpp::Node> & node, double position) {
+bool command_gripper(const std::shared_ptr<MassStageNode> & node, double position) {
   using Action = control_msgs::action::GripperCommand;
   const auto started = std::chrono::steady_clock::now();
   auto left_client = rclcpp_action::create_client<Action>(
@@ -1121,16 +1392,85 @@ bool command_gripper(const std::shared_ptr<rclcpp::Node> & node, double position
   left_goal.command.position = position;
   left_goal.command.max_effort = 60.0;
   Action::Goal right_goal = left_goal;
-  auto left_sent = left_client->async_send_goal(left_goal);
-  auto right_sent = right_client->async_send_goal(right_goal);
-  auto left_acceptance = std::async(std::launch::async, [&left_sent]() {
-      return left_sent.wait_for(3s) == std::future_status::ready;
-    });
-  auto right_acceptance = std::async(std::launch::async, [&right_sent]() {
-      return right_sent.wait_for(3s) == std::future_status::ready;
-    });
-  const bool left_acceptance_ready = left_acceptance.get();
-  const bool right_acceptance_ready = right_acceptance.get();
+  using GoalHandle = rclcpp_action::ClientGoalHandle<Action>;
+  const auto left_pending = std::make_shared<PendingActionGoal<Action>>();
+  const auto right_pending = std::make_shared<PendingActionGoal<Action>>();
+  const auto make_options = [node](
+    const auto & client, const auto & pending, const char * side) {
+      rclcpp_action::Client<Action>::SendGoalOptions options;
+      options.goal_response_callback = [node, client, pending, side](
+        typename GoalHandle::SharedPtr goal_handle) {
+          bool cancel_late = false;
+          {
+            std::lock_guard<std::mutex> lock(pending->mutex);
+            pending->handle = goal_handle;
+            pending->response_ready = true;
+            cancel_late = pending->abandoned;
+          }
+          pending->condition.notify_all();
+          if (goal_handle && cancel_late) {
+            try {
+              (void)client->async_cancel_goal(goal_handle);
+            } catch (const rclcpp_action::exceptions::UnknownGoalHandleError &) {
+              RCLCPP_WARN(
+                node->get_logger(), "%s late gripper goal was already terminal during cancellation", side);
+            }
+          }
+        };
+      return options;
+    };
+  left_client->async_send_goal(left_goal, make_options(left_client, left_pending, "left"));
+  right_client->async_send_goal(right_goal, make_options(right_client, right_pending, "right"));
+  const auto acceptance_deadline = std::chrono::steady_clock::now() + 3s;
+  bool canceled_during_acceptance = false;
+  while (rclcpp::ok() && std::chrono::steady_clock::now() < acceptance_deadline) {
+    bool left_ready = false;
+    bool right_ready = false;
+    {
+      std::lock_guard<std::mutex> left_lock(left_pending->mutex);
+      left_ready = left_pending->response_ready;
+    }
+    {
+      std::lock_guard<std::mutex> right_lock(right_pending->mutex);
+      right_ready = right_pending->response_ready;
+    }
+    if (left_ready && right_ready) break;
+    if (node->cancellation_requested()) {
+      canceled_during_acceptance = true;
+      std::lock_guard<std::mutex> left_lock(left_pending->mutex);
+      if (!left_pending->response_ready) left_pending->abandoned = true;
+      std::lock_guard<std::mutex> right_lock(right_pending->mutex);
+      if (!right_pending->response_ready) right_pending->abandoned = true;
+    }
+    std::this_thread::sleep_for(20ms);
+  }
+  std::shared_ptr<GoalHandle> left_goal_handle;
+  std::shared_ptr<GoalHandle> right_goal_handle;
+  bool left_acceptance_ready = false;
+  bool right_acceptance_ready = false;
+  {
+    std::lock_guard<std::mutex> lock(left_pending->mutex);
+    left_acceptance_ready = left_pending->response_ready;
+    left_goal_handle = left_pending->handle;
+    if (!left_acceptance_ready) left_pending->abandoned = true;
+  }
+  {
+    std::lock_guard<std::mutex> lock(right_pending->mutex);
+    right_acceptance_ready = right_pending->response_ready;
+    right_goal_handle = right_pending->handle;
+    if (!right_acceptance_ready) right_pending->abandoned = true;
+  }
+  if (canceled_during_acceptance) {
+    if (left_goal_handle) {
+      auto left_result = left_client->async_get_result(left_goal_handle);
+      (void)cancel_accepted_goal("left", left_client, left_goal_handle, left_result);
+    }
+    if (right_goal_handle) {
+      auto right_result = right_client->async_get_result(right_goal_handle);
+      (void)cancel_accepted_goal("right", right_client, right_goal_handle, right_result);
+    }
+    return false;
+  }
   if (!left_acceptance_ready) {
     RCLCPP_ERROR(
       node->get_logger(), "Left gripper goal acceptance timed out after 3 seconds");
@@ -1139,8 +1479,6 @@ bool command_gripper(const std::shared_ptr<rclcpp::Node> & node, double position
     RCLCPP_ERROR(
       node->get_logger(), "Right gripper goal acceptance timed out after 3 seconds");
   }
-  auto left_goal_handle = left_acceptance_ready ? left_sent.get() : nullptr;
-  auto right_goal_handle = right_acceptance_ready ? right_sent.get() : nullptr;
   if (!left_goal_handle) {
     RCLCPP_ERROR(node->get_logger(), "Left gripper goal was rejected");
   }
@@ -1168,7 +1506,17 @@ bool command_gripper(const std::shared_ptr<rclcpp::Node> & node, double position
   auto right_result = right_client->async_get_result(right_goal_handle);
   const auto wait_for_result = [node, position, started, cancel_accepted_goal](
     const char * side, const auto & client, const auto & goal_handle, auto result) {
-      if (result.wait_for(30s) != std::future_status::ready) {
+      const auto deadline = std::chrono::steady_clock::now() + 30s;
+      while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+        if (node->cancellation_requested()) {
+          RCLCPP_WARN(
+            node->get_logger(), "%s gripper goal cancellation requested by cycle service", side);
+          (void)cancel_accepted_goal(side, client, goal_handle, result);
+          return false;
+        }
+        if (result.wait_for(50ms) == std::future_status::ready) break;
+      }
+      if (result.wait_for(0s) != std::future_status::ready) {
         RCLCPP_ERROR(
           node->get_logger(),
           "%s gripper result timed out after 30 seconds; canceling accepted goal", side);
@@ -1339,8 +1687,11 @@ int main(int argc, char ** argv) {
     {to_pose("dispatch_slot_1_position"), to_pose("dispatch_slot_2_position"),
       to_pose("dispatch_slot_3_position")},
     static_cast<int>(selected_slot_index),
+    require_string("status_topic"),
+    require_string("cancel_service"),
   };
   if (require_string("selected_dispatch_slot_id").empty() ||
+    product.status_topic.empty() || product.cancel_service.empty() ||
     !std::isfinite(product.mass_kg) || product.mass_kg < 0.0 ||
     !std::isfinite(product.pickup_egress_speed_mps) ||
     !std::isfinite(product.pickup_egress_time_limit_s) ||
@@ -1358,12 +1709,16 @@ int main(int argc, char ** argv) {
   std::thread spin_thread([&executor]() { executor.spin(); });
 
   bool passed = false;
+  bool canceled = false;
   bool product_attached = false;
   try {
     amr_manipulation::AttachmentGate attachment_gate;
     const auto require_motion_permission = [&node, &product_attached]() {
-        if (!node->wait_for_motion_permission(8s, product_attached))
+        node->throw_if_canceled();
+        if (!node->wait_for_motion_permission(8s, product_attached)) {
+          if (node->cancellation_requested()) node->throw_if_canceled();
           throw std::runtime_error("fresh READY and stationary evidence timed out");
+        }
       };
     if (!node->verify_attachment_bootstrap(5s))
       throw std::runtime_error("attachment bootstrap was not READY before motion");
@@ -1408,8 +1763,10 @@ int main(int argc, char ** argv) {
     if (!finite_base_coordinates(pickup_product_base) ||
       !finite_base_coordinates(pickup_pedestal_base))
       throw std::runtime_error("pickup base-frame geometry was non-finite");
-    // Keep the accepted arm branch's nominal x/z geometry while compensating
-    // the pickup scene and target for the fresh base-frame lateral offset.
+    // The registered dock is a tolerance gate, not an exact base-frame product
+    // position. Use the fresh product center for the arm target so an allowed
+    // dock terminal error does not become a persistent attachment offset that
+    // later fails the dispatch slot gate.
     const double pickup_product_lateral = pickup_product_base[1];
     const double pickup_pedestal_lateral = pickup_pedestal_base[1];
 
@@ -1504,7 +1861,14 @@ int main(int argc, char ** argv) {
     if (!scene.applyCollisionObjects(obstacles))
       throw std::runtime_error("planning-scene pickup geometry was rejected");
 
-    MoveGroupInterface arm(node, "manipulator");
+    auto arm_owner = std::make_shared<MoveGroupInterface>(node, "manipulator");
+    auto & arm = *arm_owner;
+    const std::weak_ptr<MoveGroupInterface> arm_weak = arm_owner;
+    node->set_cancellation_hook([arm_weak]() {
+      // MoveIt stop is cooperative and interrupts an active trajectory while
+      // leaving the node alive long enough to publish the terminal status.
+      if (const auto arm = arm_weak.lock()) arm->stop();
+    });
     arm.setPlannerId("RRTConnectkConfigDefault");
     arm.setPlanningTime(5.0); arm.setNumPlanningAttempts(3);
     arm.setMaxVelocityScalingFactor(0.2); arm.setMaxAccelerationScalingFactor(0.2);
@@ -1550,11 +1914,12 @@ int main(int argc, char ** argv) {
     require_motion_permission();
     if (arm.execute(staging_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("over-chassis staging execution failed");
+    node->throw_if_canceled();
     if (!node->reference_evidence_stable())
       throw std::runtime_error("dock or product moved during over-chassis staging");
 
     geometry_msgs::msg::Pose pregrasp = staging;
-    pregrasp.position.x = 0.85;
+    pregrasp.position.x = pickup_product_base[0];
     pregrasp.position.y = pickup_product_lateral;
     pregrasp.position.z = 1.00;
     const std::vector<double> pregrasp_seed{
@@ -1598,7 +1963,24 @@ int main(int argc, char ** argv) {
     if (!arm.setJointValueTarget(pregrasp_ik_solution))
       throw std::runtime_error("exact pre-grasp joint target was rejected");
     MoveGroupInterface::Plan pregrasp_plan;
-    if (arm.plan(pregrasp_plan) != moveit::core::MoveItErrorCode::SUCCESS)
+    // Keep OMPL on the validated upright wrist branch.  The same bound is
+    // checked on every returned trajectory point below; these path
+    // constraints only prevent the planner from selecting a different,
+    // collision-free but unsafe wrist branch.
+    moveit_msgs::msg::Constraints pregrasp_wrist_constraints;
+    for (const auto & joint_name : {"arm_joint_4", "arm_joint_6"}) {
+      moveit_msgs::msg::JointConstraint joint_constraint;
+      joint_constraint.joint_name = joint_name;
+      joint_constraint.position = 0.0;
+      joint_constraint.tolerance_above = 0.5;
+      joint_constraint.tolerance_below = 0.5;
+      joint_constraint.weight = 1.0;
+      pregrasp_wrist_constraints.joint_constraints.push_back(joint_constraint);
+    }
+    arm.setPathConstraints(pregrasp_wrist_constraints);
+    const auto pregrasp_plan_result = arm.plan(pregrasp_plan);
+    arm.clearPathConstraints();
+    if (pregrasp_plan_result != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("collision-free pre-grasp plan failed");
     const auto & pregrasp_joint_names = pregrasp_plan.trajectory_.joint_trajectory.joint_names;
     const auto & pregrasp_points = pregrasp_plan.trajectory_.joint_trajectory.points;
@@ -1620,6 +2002,7 @@ int main(int argc, char ** argv) {
     require_motion_permission();
     if (arm.execute(pregrasp_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("pre-grasp execution failed");
+    node->throw_if_canceled();
     if (!node->reference_evidence_stable())
       throw std::runtime_error("dock or product moved during pre-grasp motion");
 
@@ -1707,6 +2090,7 @@ int main(int argc, char ** argv) {
     require_motion_permission();
     if (arm.execute(approach_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("Cartesian grasp approach execution failed");
+    node->throw_if_canceled();
     if (!node->reference_evidence_stable())
       throw std::runtime_error("dock or product moved during grasp approach");
     if (product.id == 102 && !node->grasp_pose_within_tolerance(
@@ -1775,6 +2159,7 @@ int main(int argc, char ** argv) {
       require_motion_permission();
       if (arm.execute(retreat_plan) != moveit::core::MoveItErrorCode::SUCCESS)
         throw std::runtime_error("continuous Cartesian retreat execution failed");
+      node->throw_if_canceled();
     } catch (...) {
       if (!set_pickup_support_collision(false))
         RCLCPP_ERROR(node->get_logger(), "Failed to restore pickup support collision checking");
@@ -1893,6 +2278,7 @@ int main(int argc, char ** argv) {
     require_motion_permission();
     if (arm.execute(stow_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("loaded stow execution failed");
+    node->throw_if_canceled();
     if (!node->reference_evidence_stable(false))
       throw std::runtime_error("dock moved during loaded stow");
     const auto current = arm.getCurrentJointValues();
@@ -2533,6 +2919,7 @@ int main(int argc, char ** argv) {
     require_motion_permission();
     if (arm.execute(pre_place_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("pre-place execution failed");
+    node->throw_if_canceled();
 
     // The OMPL pre-place plan and the retained IK continuation must meet at
     // the same measured joint state.  A loose endpoint would make the
@@ -2770,6 +3157,7 @@ int main(int argc, char ** argv) {
       throw std::runtime_error("placement lower current start exceeded 0.01 rad tolerance");
     if (arm.execute(lower_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("Cartesian placement lower execution failed");
+    node->throw_if_canceled();
     if (node->selected_slot_position_error() > 0.030)
       throw std::runtime_error("selected dispatch slot center exceeded 30 mm");
     const auto detach_decision = attachment_gate.evaluate_detach(
@@ -2815,6 +3203,7 @@ int main(int argc, char ** argv) {
       require_motion_permission();
       if (arm.execute(retreat_plan) != moveit::core::MoveItErrorCode::SUCCESS)
         throw std::runtime_error("Cartesian placement retreat execution failed");
+      node->throw_if_canceled();
     } catch (...) {
       if (!set_held_product_finger_collision(false))
         RCLCPP_ERROR(node->get_logger(),
@@ -2840,6 +3229,7 @@ int main(int argc, char ** argv) {
     require_motion_permission();
     if (arm.execute(empty_stow_plan) != moveit::core::MoveItErrorCode::SUCCESS)
       throw std::runtime_error("empty stow execution failed");
+    node->throw_if_canceled();
     const auto empty_current = arm.getCurrentJointValues();
     if (empty_current.size() != stow.size())
       throw std::runtime_error("empty stow joint state is incomplete");
@@ -2853,14 +3243,24 @@ int main(int argc, char ** argv) {
     RCLCPP_INFO(
       node->get_logger(), "GATE 6 %.1f KG COMPLETE %.0f KG PASS",
       product.mass_kg, product.mass_kg);
+    node->set_cancellation_hook({});
     passed = true;
   } catch (const std::exception & error) {
-    node->set_status(amr_interfaces::msg::ManipulatorStatus::FAULT,
-      false, product_attached, error.what());
-    RCLCPP_ERROR(node->get_logger(), "GATE 6 %.1f KG: FAIL: %s", product.mass_kg, error.what());
+    canceled = node->cancellation_requested();
+    node->set_status(
+      amr_interfaces::msg::ManipulatorStatus::FAULT,
+      false, product_attached,
+      canceled ? "Gate 6 mass stage canceled; safety state requires fresh recovery proof" :
+      error.what());
+    node->set_cancellation_hook({});
+    if (canceled) {
+      RCLCPP_WARN(node->get_logger(), "GATE 6 %.1f KG: CANCELED: %s", product.mass_kg, error.what());
+    } else {
+      RCLCPP_ERROR(node->get_logger(), "GATE 6 %.1f KG: FAIL: %s", product.mass_kg, error.what());
+    }
   }
   std::this_thread::sleep_for(500ms);
   rclcpp::shutdown();
   spin_thread.join();
-  return passed ? 0 : 1;
+  return canceled ? 130 : (passed ? 0 : 1);
 }

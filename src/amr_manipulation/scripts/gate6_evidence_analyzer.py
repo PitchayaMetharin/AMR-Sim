@@ -2,11 +2,11 @@
 """Analyze one recorded Gate 6 bag without inferring a terminal pass.
 
 The analyzer is intentionally independent of the stage process.  It derives
-the selected product and slot from the factory registry, identifies the mass
-stage by its ``source_boot_id``, and checks only samples inside that stage's
-recorded interval.  A pass is written as one stable machine-readable line;
-diagnostics for a failed bag go to stderr and the output file contains the
-corresponding FAIL line.
+the selected product and slot from the factory registry, identifies one
+product-specific mass-stage interval from its ``source_boot_id`` and explicit
+terminal status, and checks only samples inside that interval.  A pass is
+written as one stable machine-readable line; diagnostics for a failed bag go
+to stderr and the output file contains the corresponding FAIL line.
 """
 
 from __future__ import annotations
@@ -195,14 +195,16 @@ def _interval_samples(samples: Sequence[Tuple[float, object]], start: float, end
 
 
 def select_stage_status_stream(
-        status_samples: Sequence[Tuple[float, object]]) -> Optional[Tuple[int, List[Tuple[float, object]]]]:
-    """Select the mass-stage status stream, or fail closed when it is unclear.
+        status_samples: Sequence[Tuple[float, object]], product_id: int
+) -> Optional[Tuple[int, List[Tuple[float, object]]]]:
+    """Select exactly one product-specific mass-stage interval.
 
-    Product 101 is launched directly and may be the only nonzero status
-    source captured in its bag.  Product 102/103 preparation publishes its
-    own status source before launching the mass stage, so a bag with multiple
-    sources must identify exactly one stream carrying the mass-stage startup
-    marker.  A missing or duplicated marker is ambiguous evidence.
+    The shared outer supervisor can reuse one ``source_boot_id`` across
+    multiple product cycles.  Each candidate therefore starts at an explicit
+    mass-stage marker and ends at the first valid empty-stowed status after
+    that marker.  Only a candidate containing the requested retained-loaded
+    status is eligible; missing boundaries or multiple eligible candidates
+    fail closed.
     """
     streams: Dict[int, List[Tuple[float, object]]] = defaultdict(list)
     for sample in status_samples:
@@ -219,17 +221,62 @@ def select_stage_status_stream(
         return None
     if len(streams) == 1:
         stage_boot_id, stage_statuses = next(iter(streams.items()))
-        return stage_boot_id, sorted(stage_statuses, key=lambda item: item[0])
+    else:
+        marker_streams = [
+            (boot_id, statuses) for boot_id, statuses in streams.items()
+            if any(getattr(message, "detail", None) == STAGE_START_MARKER
+                   for _, message in statuses)
+        ]
+        if len(marker_streams) != 1:
+            return None
+        stage_boot_id, stage_statuses = marker_streams[0]
 
-    marker_streams = [
-        (boot_id, statuses) for boot_id, statuses in streams.items()
-        if any(getattr(message, "detail", None) == STAGE_START_MARKER
-               for _, message in statuses)
-    ]
-    if len(marker_streams) != 1:
+    ordered_statuses = sorted(stage_statuses, key=lambda item: item[0])
+
+    def is_empty_stowed(message) -> bool:
+        try:
+            return (bool(message.valid) and int(message.state) == 1 and
+                    not bool(message.product_attached))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    def is_loaded_product(message) -> bool:
+        try:
+            return (int(message.state) == 2 and bool(message.product_attached) and
+                    message.product_id == str(product_id))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    marker_indices = []
+    index = 0
+    while index < len(ordered_statuses):
+        if getattr(ordered_statuses[index][1], "detail", None) != STAGE_START_MARKER:
+            index += 1
+            continue
+        marker_indices.append(index)
+        index += 1
+        while (index < len(ordered_statuses) and
+               getattr(ordered_statuses[index][1], "detail", None) == STAGE_START_MARKER):
+            index += 1
+    if not marker_indices:
         return None
-    stage_boot_id, stage_statuses = marker_streams[0]
-    return stage_boot_id, sorted(stage_statuses, key=lambda item: item[0])
+
+    candidates = []
+    for marker_index in marker_indices:
+        terminal_index = next(
+            (index for index in range(marker_index + 1, len(ordered_statuses))
+             if is_empty_stowed(ordered_statuses[index][1])),
+            None,
+        )
+        if terminal_index is None:
+            return None
+        candidate = ordered_statuses[marker_index:terminal_index + 1]
+        if any(is_loaded_product(message) for _, message in candidate):
+            candidates.append(candidate)
+
+    if len(candidates) != 1:
+        return None
+    return stage_boot_id, candidates[0]
 
 
 def command_trace_matches(
@@ -287,7 +334,7 @@ def analyze(bag: Path, product_id: int) -> List[str]:
     robot_pose_samples = []
     contacts = {"left": [], "right": []}
     commands = {CONTROL_TOPIC: [], SIMULATION_TOPIC: []}
-    normal_nav_active = False
+    normal_nav_status_samples = []
     rosout_markers = []
     decode_failures = []
     selected_topics = {
@@ -332,9 +379,7 @@ def analyze(bag: Path, product_id: int) -> List[str]:
             except (AttributeError, TypeError, ValueError):
                 decode_failures.append(f"{topic}: malformed command")
         elif topic == NORMAL_NAV_STATUS_TOPIC:
-            normal_nav_active = normal_nav_active or any(
-                int(item.status) in {2, 3, 4, 5, 6} for item in message.status_list
-            )
+            normal_nav_status_samples.append((timestamp, message))
         elif topic == "/rosout":
             rosout_markers.append(str(getattr(message, "msg", "")))
 
@@ -349,7 +394,7 @@ def analyze(bag: Path, product_id: int) -> List[str]:
     if missing:
         failures.append("missing required topics: " + ", ".join(sorted(set(missing))))
 
-    selected_stage = select_stage_status_stream(status_samples)
+    selected_stage = select_stage_status_stream(status_samples, product_id)
     if selected_stage is None:
         failures.append("mass-stage source_boot_id evidence is missing or ambiguous")
         stage_boot_id = 0
@@ -369,6 +414,11 @@ def analyze(bag: Path, product_id: int) -> List[str]:
         if any(not bool(message.valid) and int(message.state) != 5 for _, message in scoped_statuses):
             failures.append("mass-stage status became invalid before terminal state")
 
+    normal_nav_active = any(
+        stage_start <= timestamp <= stage_end and any(
+            int(item.status) in {2, 3, 4, 5, 6} for item in message.status_list
+        ) for timestamp, message in normal_nav_status_samples
+    )
     if not any(data.startswith("READY") and timestamp <= stage_start
                for timestamp, data in bootstrap_samples):
         failures.append("READY attachment bootstrap status was not recorded before the stage")
@@ -427,8 +477,14 @@ def analyze(bag: Path, product_id: int) -> List[str]:
         if not math.isfinite(slot_error) or slot_error > 0.030:
             failures.append(f"final slot error exceeded 0.030 m: {slot_error:.6f}")
 
-    control = sorted(commands[CONTROL_TOPIC])
-    simulation = sorted(commands[SIMULATION_TOPIC])
+    control = sorted(
+        row for row in commands[CONTROL_TOPIC]
+        if stage_start <= row[0] <= stage_end
+    )
+    simulation = sorted(
+        row for row in commands[SIMULATION_TOPIC]
+        if stage_start <= row[0] <= stage_end
+    )
     simulation_nonzero = [row for row in simulation if abs(row[1]) > 1e-12 or abs(row[2]) > 1e-12]
     if not control or not simulation_nonzero:
         failures.append("base command evidence was empty")
@@ -437,7 +493,10 @@ def analyze(bag: Path, product_id: int) -> List[str]:
 
     # Check both command authority and measured base pose while the stage says
     # base motion is forbidden.  Nav/status samples are all bag-time ordered.
-    robot_samples = sorted(robot_pose_samples)
+    robot_samples = sorted(
+        (timestamp, pose) for timestamp, pose in robot_pose_samples
+        if stage_start <= timestamp <= stage_end
+    )
     previous_pose = None
     previous_forbidden = False
     for timestamp, pose in robot_samples:

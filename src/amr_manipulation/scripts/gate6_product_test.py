@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Prepare one product from the current AMR pose, then run its Gate 6 stage.
 
-This runner is intentionally limited to products 102 and 103.  The accepted
-product-101 path remains the existing gate6_mass_stage launch.  The runner
-does not reset the AMR; it only resets the selected product while the factory
-world is paused, navigates to that product's dock, performs at most one
+This runner keeps the legacy 102/103 evidence mode while also supporting the
+autonomous 101/102 cycle mode.  It does not reset the AMR; it only resets the
+selected product while the factory world is paused, navigates to that product's dock, performs at most one
 bounded relocalization when physical and localized poses disagree, and
 then starts the existing mass-stage executable. A relocalized retry first
 retreats to the registered approach pose before making one fresh exact dock
@@ -20,6 +19,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -48,6 +48,7 @@ from amr_interfaces.msg import BaseStatus, ManipulatorStatus
 
 PRODUCT_IDS = (101, 102, 103)
 RESET_PRODUCT_IDS = (102, 103)
+AUTONOMOUS_PRODUCT_IDS = (101, 102)
 STOW = {
     "arm_joint_1": 0.0,
     "arm_joint_2": -1.5708,
@@ -80,6 +81,10 @@ class PreparationError(RuntimeError):
     """A fail-closed preparation failure."""
 
 
+class PreparationCanceled(PreparationError):
+    """A cooperative cancellation received before the mass stage started."""
+
+
 class NavigationAbortedError(PreparationError):
     """A terminal navigation failure with fresh localized pose evidence."""
 
@@ -94,6 +99,7 @@ class NavigationAbortedError(PreparationError):
 class ProductMetadata:
     product_id: int
     model: str
+    station_name: str
     mass_kg: float
     reset_pose: Tuple[float, float, float, float]
     approach: Tuple[float, float, float]
@@ -156,6 +162,7 @@ def load_product_metadata() -> Dict[int, ProductMetadata]:
         metadata[product_id] = ProductMetadata(
             product_id=product_id,
             model=str(model),
+            station_name=str(station_name),
             mass_kg=mass_kg,
             reset_pose=_sdf_product_pose(sdf_path, str(model)),
             approach=_pose3(station["approach"], f"{station_name}.approach"),
@@ -261,11 +268,30 @@ class ProductPreparation(Node):
         if not self.has_parameter("use_sim_time"):
             self.declare_parameter("use_sim_time", True)
         self.declare_parameter("product_id", 102)
+        self.declare_parameter("autonomous_mode", False)
+        self.declare_parameter("pickup_station_id", "")
+        self.declare_parameter("status_topic", "/amr/manipulation/status")
+        self.declare_parameter(
+            "cancel_service", "/amr/manipulation/internal/cancel_cycle_motion")
         self.product_id = int(self.get_parameter("product_id").value)
-        if self.product_id not in RESET_PRODUCT_IDS:
-            raise PreparationError("the persistent-position runner accepts only product IDs 102 and 103")
+        self.autonomous_mode = bool(self.get_parameter("autonomous_mode").value)
+        allowed_products = AUTONOMOUS_PRODUCT_IDS if self.autonomous_mode else RESET_PRODUCT_IDS
+        if self.product_id not in allowed_products:
+            raise PreparationError(
+                "autonomous product preparation accepts only 101 and 102" if
+                self.autonomous_mode else
+                "the persistent-position runner accepts only product IDs 102 and 103")
         self.metadata = load_product_metadata()
         self.selected = self.metadata[self.product_id]
+        requested_station = str(self.get_parameter("pickup_station_id").value).strip()
+        if requested_station and requested_station != self.selected.station_name:
+            raise PreparationError(
+                f"product {self.product_id} is not registered at pickup station {requested_station}")
+        self.cancel_service_name = str(self.get_parameter("cancel_service").value)
+        self.status_topic = str(self.get_parameter("status_topic").value)
+        if not self.status_topic or not self.cancel_service_name:
+            raise PreparationError("status and cancellation service names must be non-empty")
+        self._cancel_requested = False
 
         sensor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -332,7 +358,9 @@ class ProductPreparation(Node):
             )
 
         self._status_publisher = self.create_publisher(
-            ManipulatorStatus, "/amr/manipulation/status", authority_qos)
+            ManipulatorStatus, self.status_topic, authority_qos)
+        self._cancel_service = self.create_service(
+            Trigger, self.cancel_service_name, self._cancel_service_callback)
         self._control_client = self.create_client(
             ControlWorld, "/world/factory_world/control")
         self._set_pose_client = self.create_client(
@@ -353,6 +381,12 @@ class ProductPreparation(Node):
         self._detail = "Gate 6 product preparation is starting"
         self._status_publishing_enabled = False
         self._status_timer = self.create_timer(0.05, self._publish_status)
+
+    def _cancel_service_callback(self, _request: Trigger.Request, response: Trigger.Response):
+        self._cancel_requested = True
+        response.success = True
+        response.message = "Gate 6 preparation cancellation accepted"
+        return response
 
     def _base_status_callback(self, message: BaseStatus) -> None:
         self._base_status = message
@@ -407,12 +441,17 @@ class ProductPreparation(Node):
         self._status_publishing_enabled = True
         self._publish_status()
 
-    def _spin_until(self, predicate: Callable[[], bool], timeout: float, label: str) -> None:
+    def _spin_until(
+        self, predicate: Callable[[], bool], timeout: float, label: str,
+        check_cancel: bool = True,
+    ) -> None:
         deadline = time.monotonic() + timeout
         executor = SingleThreadedExecutor(context=self.context)
         executor.add_node(self)
         try:
             while rclpy.ok() and time.monotonic() < deadline:
+                if check_cancel:
+                    self._check_canceled()
                 if predicate():
                     return
                 # Keep one callback generator alive and use a constant slice.
@@ -423,6 +462,10 @@ class ProductPreparation(Node):
             executor.remove_node(self)
             executor.shutdown(timeout_sec=0.0)
         raise PreparationError(f"{label} timed out")
+
+    def _check_canceled(self) -> None:
+        if self._cancel_requested:
+            raise PreparationCanceled("Gate 6 cycle canceled cooperatively")
 
     def _fresh(self, timestamp: float, max_age: float = 0.2) -> bool:
         return timestamp > 0.0 and time.monotonic() - timestamp <= max_age
@@ -493,6 +536,7 @@ class ProductPreparation(Node):
         )
 
     def _check_preconditions(self) -> None:
+        self._check_canceled()
         self._wait_for_inputs()
         self._wait_stationary()
         active_nodes = {name for name, _ in self.get_node_names_and_namespaces()}
@@ -509,32 +553,57 @@ class ProductPreparation(Node):
             ):
                 raise PreparationError("reset refused: active manipulator status is not empty and stowed")
         assert self._robot_pose is not None
-        robot = _pose_tuple(self._robot_pose)
-        if not _pose_error(self._robot_pose, self.selected.dock)[0] <= DOCK_POSITION_TOLERANCE_M:
-            if _xy_distance(robot, self.selected.reset_pose[:3]) < 0.80:
-                raise PreparationError(
-                    "reset refused: AMR is too close to the product reset pose; move it away first")
+        _finite_values(_pose_tuple(self._robot_pose), "current robot pose")
 
-    def _wait_future(self, future: object, timeout: float, label: str):
-        self._spin_until(lambda: bool(getattr(future, "done")()), timeout, label)
+    def _clear_reset_exclusion_if_needed(self) -> None:
+        """Move only after bootstrap proof and an explicit safe-motion status."""
+        self._check_canceled()
+        assert self._robot_pose is not None
+        robot = _pose_tuple(self._robot_pose)
+        if _pose_error(self._robot_pose, self.selected.dock)[0] <= DOCK_POSITION_TOLERANCE_M:
+            return
+        if _xy_distance(robot, self.selected.reset_pose[:3]) >= 0.80:
+            return
+        self.get_logger().warning(
+            "AMR is inside selected-product reset exclusion; moving to "
+            "registered clearance before reset")
+        self._navigate(self.selected.approach, precise=False)
+        self._wait_stationary()
+        self._spin_until(
+            lambda: self._robot_pose is not None and self._fresh(self._robot_pose_at),
+            2.0, "fresh physical reset-clearance pose")
+        assert self._robot_pose is not None
+        if _xy_distance(_pose_tuple(self._robot_pose), self.selected.reset_pose[:3]) < 0.80:
+            raise PreparationError(
+                "registered clearance did not leave the product reset exclusion")
+
+    def _wait_future(
+        self, future: object, timeout: float, label: str, check_cancel: bool = True,
+    ):
+        self._spin_until(
+            lambda: bool(getattr(future, "done")()), timeout, label, check_cancel)
         result = getattr(future, "result")()
         if result is None:
             raise PreparationError(f"{label} returned no response")
         return result
 
     def _set_world_paused(self, paused: bool) -> None:
+        if paused:
+            self._check_canceled()
         if not self._control_client.wait_for_service(timeout_sec=3.0):
             raise PreparationError("Gazebo world control service is unavailable")
         request = ControlWorld.Request()
         request.world_control.pause = paused
         response = self._wait_future(
             self._control_client.call_async(request), 3.0,
-            "Gazebo world pause" if paused else "Gazebo world unpause")
+            "Gazebo world pause" if paused else "Gazebo world unpause",
+            check_cancel=paused)
         if not response.success:
             raise PreparationError(
                 "Gazebo world pause failed" if paused else "Gazebo world unpause failed")
 
     def _set_selected_product_pose(self) -> None:
+        self._check_canceled()
         if not self._set_pose_client.wait_for_service(timeout_sec=3.0):
             raise PreparationError("Gazebo set-pose service is unavailable")
         request = SetEntityPose.Request()
@@ -617,6 +686,7 @@ class ProductPreparation(Node):
         self._spin_until(stable, 5.0, f"stable reset pose for product {self.product_id}")
 
     def _reset_selected_product(self) -> None:
+        self._check_canceled()
         assert self._robot_pose is not None
         before_robot = _pose_tuple(self._robot_pose)
         before_other_products = {
@@ -671,9 +741,95 @@ class ProductPreparation(Node):
         assert self._robot_pose is not None
         return _dock_travel_target(_pose_tuple(self._robot_pose), self.selected.dock)
 
+    def _cancel_accepted_navigation_goal(self, goal_handle: object, label: str) -> None:
+        """Cancel an accepted prep navigation goal and prove terminal CANCELED."""
+        cancel_future = goal_handle.cancel_goal_async()  # type: ignore[attr-defined]
+        response = self._wait_future(
+            cancel_future, 3.0, f"cancel {label} goal", check_cancel=False)
+        goals_canceling = getattr(response, "goals_canceling", None)
+        if goals_canceling is None:
+            raise PreparationError(f"cancel {label} returned no acknowledgement")
+        goal_id = getattr(goal_handle, "goal_id", None)
+        if goal_id is not None and not any(
+                getattr(item, "goal_info", item).goal_id == goal_id
+                for item in goals_canceling):
+            raise PreparationError(f"cancel {label} did not acknowledge the accepted goal")
+        terminal = self._wait_future(
+            goal_handle.get_result_async(), 3.0,  # type: ignore[attr-defined]
+            f"terminal canceled {label} goal", check_cancel=False)
+        if getattr(terminal, "status", None) != GoalStatus.STATUS_CANCELED:
+            raise PreparationError(f"{label} goal did not reach terminal CANCELED")
+
+    def _wait_navigation_goal_acceptance(self, future: object, endpoint: str):
+        """Retain ownership through cancellation while a navigation goal is accepted."""
+        deadline = time.monotonic() + 5.0
+        acceptance_expired = threading.Event()
+
+        def cancel_late_accepted_goal(completed_future: object) -> None:
+            if not acceptance_expired.is_set():
+                return
+            try:
+                goal_handle = getattr(completed_future, "result")()
+            except Exception as error:  # the caller already failed closed
+                self.get_logger().error(
+                    f"late {endpoint} goal response failed after acceptance timeout: {error}")
+                return
+            if goal_handle is None or not getattr(goal_handle, "accepted", False):
+                return
+            try:
+                goal_handle.cancel_goal_async()  # type: ignore[attr-defined]
+            except Exception as error:  # cancellation ownership remains failed closed
+                self.get_logger().error(
+                    f"late {endpoint} goal cancellation request failed: {error}")
+
+        getattr(future, "add_done_callback")(cancel_late_accepted_goal)
+        goal_handle = None
+        future_error = None
+        executor = SingleThreadedExecutor(context=self.context)
+        executor.add_node(self)
+        try:
+            while rclpy.ok() and time.monotonic() < deadline:
+                if getattr(future, "done")():
+                    try:
+                        goal_handle = getattr(future, "result")()
+                    except Exception as error:  # action response failure is fail-closed
+                        future_error = error
+                    break
+                executor.spin_once(timeout_sec=0.05)
+        finally:
+            executor.remove_node(self)
+            executor.shutdown(timeout_sec=0.0)
+
+        if future_error is not None:
+            acceptance_expired.set()
+            raise PreparationError(
+                f"{endpoint} goal acceptance failed: {future_error}") from future_error
+        if goal_handle is None:
+            acceptance_expired.set()
+            if self._cancel_requested:
+                raise PreparationCanceled(
+                    f"cancellation arrived while waiting for {endpoint} goal acceptance")
+            raise PreparationError(f"{endpoint} goal acceptance timed out")
+        if not getattr(goal_handle, "accepted", False):
+            if self._cancel_requested:
+                raise PreparationCanceled(
+                    f"cancellation arrived while {endpoint} goal was rejected")
+            raise PreparationError(f"navigation goal to {endpoint} was rejected")
+        if self._cancel_requested:
+            try:
+                self._cancel_accepted_navigation_goal(goal_handle, endpoint)
+            except PreparationError as error:
+                raise PreparationCanceled(
+                    f"cancellation arrived during {endpoint} goal acceptance; "
+                    f"accepted goal cancellation was not proven: {error}") from error
+            raise PreparationCanceled(
+                f"cancellation arrived during {endpoint} goal acceptance")
+        return goal_handle
+
     def _navigate(
         self, target: Tuple[float, float, float], precise: bool, retreat: bool = False
     ) -> Tuple[float, float, float]:
+        self._check_canceled()
         if retreat and not precise:
             raise PreparationError("retreat navigation requires the precise controller")
         if retreat:
@@ -709,20 +865,23 @@ class ProductPreparation(Node):
             latest_localized_at = time.monotonic()
 
         future = client.send_goal_async(goal, feedback_callback=feedback_callback)
-        goal_handle = self._wait_future(future, 5.0, f"{endpoint} goal acceptance")
-        if not goal_handle.accepted:
-            raise PreparationError(f"navigation goal to {endpoint} was rejected")
+        goal_handle = self._wait_navigation_goal_acceptance(future, endpoint)
         try:
             result = self._wait_future(
                 goal_handle.get_result_async(), 180.0,
                 f"navigation result from {endpoint}")
-        except PreparationError:
-            cancel_future = goal_handle.cancel_goal_async()
+        except PreparationCanceled as error:
             try:
-                self._wait_future(cancel_future, 3.0, f"cancel {endpoint} goal")
-            except PreparationError:
-                self.get_logger().error(f"failed to cancel timed-out {endpoint} goal")
+                self._cancel_accepted_navigation_goal(goal_handle, endpoint)
+            except PreparationError as cancel_error:
+                raise PreparationCanceled(
+                    f"{error}; accepted {endpoint} goal cancellation was not proven: "
+                    f"{cancel_error}") from cancel_error
             raise
+        except PreparationError:
+            self._cancel_accepted_navigation_goal(goal_handle, endpoint)
+            raise
+        self._check_canceled()
         if result.status != GoalStatus.STATUS_SUCCEEDED:
             detail = (
                 f"navigation endpoint {endpoint} to "
@@ -856,18 +1015,20 @@ class ProductPreparation(Node):
             math.cos(robot_yaw) * dx + math.sin(robot_yaw) * dy,
             -math.sin(robot_yaw) * dx + math.cos(robot_yaw) * dy,
         )
-        expected_dx = self.selected.reset_pose[0] - self.selected.dock[0]
-        expected_dy = self.selected.reset_pose[1] - self.selected.dock[1]
+        # Compare in one frame.  The registered dock heading is only a
+        # tolerance gate; using it for this expected vector would turn an
+        # allowed terminal heading error into a false product lateral error.
+        expected_dx = self.selected.reset_pose[0] - robot_x
+        expected_dy = self.selected.reset_pose[1] - robot_y
         expected_relative = (
-            math.cos(self.selected.dock[2]) * expected_dx +
-            math.sin(self.selected.dock[2]) * expected_dy,
-            -math.sin(self.selected.dock[2]) * expected_dx +
-            math.cos(self.selected.dock[2]) * expected_dy,
+            math.cos(robot_yaw) * expected_dx + math.sin(robot_yaw) * expected_dy,
+            -math.sin(robot_yaw) * expected_dx + math.cos(robot_yaw) * expected_dy,
         )
         if math.hypot(relative[0] - expected_relative[0], relative[1] - expected_relative[1]) > PRODUCT_RELATIVE_TOLERANCE_M:
             raise PreparationError("selected product is not in the expected pickup geometry")
 
     def prepare(self) -> None:
+        self._check_canceled()
         # Evaluate existing manipulation authority before this node publishes
         # its own preparation status, so an active/deployed supervisor cannot
         # be hidden by the runner's status message.
@@ -876,6 +1037,13 @@ class ProductPreparation(Node):
         # reset, gripper, or arm command; this runner never republishes blind
         # detach requests and remains limited to products 102 and 103.
         self._verify_attachment_bootstrap()
+        # Clearance is the only preparation motion permitted before the paused
+        # reset.  Publish the safe empty-stow authority for that registered leg,
+        # then re-block motion before any world pause/reset service call.
+        self._set_status(
+            ManipulatorStatus.STOWED_EMPTY, True, False,
+            "Attachment bootstrap verified; registered reset clearance permitted")
+        self._clear_reset_exclusion_if_needed()
         self._set_status(
             ManipulatorStatus.STARTING, False, False,
             f"Preparing product {self.product_id} from the current AMR pose")
@@ -981,6 +1149,7 @@ class ProductPreparation(Node):
                         lambda: self._robot_pose is not None and self._fresh(self._robot_pose_at),
                         2.0, "fresh physical dock pose after recovery abort")
         self._verify_dock_and_product_geometry()
+        self._check_canceled()
         self._set_status(
             ManipulatorStatus.STOWED_EMPTY, True, False,
             f"Product {self.product_id} prepared at pickup dock")
@@ -988,6 +1157,14 @@ class ProductPreparation(Node):
     def fail_closed(self, detail: str) -> None:
         self.get_logger().error(detail)
         self._set_status(ManipulatorStatus.FAULT, False, False, detail)
+        end = time.monotonic() + 0.3
+        while rclpy.ok() and time.monotonic() < end:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+    def cancel_closed(self, detail: str) -> None:
+        """Publish a terminal cancellation without pretending the product is safe."""
+        self.get_logger().warning(detail)
+        self._set_status(ManipulatorStatus.FAULT, False, self._product_attached, detail)
         end = time.monotonic() + 0.3
         while rclpy.ok() and time.monotonic() < end:
             rclpy.spin_once(self, timeout_sec=0.05)
@@ -1015,7 +1192,12 @@ def main() -> int:
         rclpy.init()
         node = ProductPreparation()
         node.prepare()
+        node._check_canceled()
         product_id = node.product_id
+        status_topic = node.status_topic
+        cancel_service = node.cancel_service_name
+        autonomous_mode = node.autonomous_mode
+        pickup_station_id = node.selected.station_name
         node.get_logger().info(
             f"GATE6 PRODUCT PREP PASS product_id={product_id}; starting existing mass stage")
         node.destroy_node()
@@ -1026,10 +1208,20 @@ def main() -> int:
             [
                 "ros2", "launch", "amr_manipulation", "gate6_mass_stage.launch.py",
                 f"product_id:={product_id}",
+                f"status_topic:={status_topic}",
+                f"cancel_service:={cancel_service}",
+                f"autonomous_mode:={'true' if autonomous_mode else 'false'}",
+                f"pickup_station_id:={pickup_station_id}",
             ],
             start_new_session=True,
         )
         return child.wait()
+    except PreparationCanceled as error:
+        if node is not None and rclpy.ok():
+            node.cancel_closed(str(error))
+        else:
+            print(f"GATE6 PRODUCT PREP CANCELED: {error}", flush=True)
+        return 130
     except PreparationError as error:
         if node is not None and rclpy.ok():
             node.fail_closed(str(error))

@@ -1,18 +1,112 @@
 # TODO
 
+## Current Phase 15 closeout state — 2026-09-13
+
+- [x] Accept P0-P8, the factory CLI packet, and the cycle-adapter packet at the
+  source/offline boundary; focused tests/builds and independent Sol/high
+  reviews passed.
+- [x] Complete the combined scoped pytest rerun after the Gate 6 analyzer
+  correction: 653 passed across `src/amr_exploration/test`,
+  `src/amr_factory/test`, and `src/amr_manipulation/test`; `git diff --check`
+  passed.
+- [x] Complete the factory CLI packet: default transport/enqueue timeout is
+  240 s; 24 focused tests, the `amr_factory` build, and Sol/high review passed.
+- [x] Complete the cycle-adapter packet: 47 focused tests, the
+  `amr_manipulation` build, an isolated Humble probe with exit 0, and Sol/high
+  review passed.
+- [x] Complete fresh direct runtime `phase15_commission_20260912_02` for the
+  approved Product 101 (1 kg) and Product 102 (3 kg) direct terminal/post-status
+  and Gate 6 analyzer proof.
+- [x] Record the mapping diagnostic and acceptance-run outcomes: the diagnostic
+  stopped on a real RegulatedPurePursuit collision/footprint obstacle condition;
+  the acceptance run passed host, rendering, RTF, and staged mapping graph
+  gates before fail-closed `CANCELLING`/`FAULT` on future-dated composed TF.
+- [ ] Resolve the upstream SLAM timestamp source that makes `map->odom`
+  approximately 0.87-0.89 s future versus `/clock`; explorer fail-closed
+  behavior is correct and no safe repository-side source/config/threshold/retry
+  change is justified.
+- [ ] Establish per-edge TF publisher-ownership evidence without bypassing the
+  fail-closed gate.
+- [ ] Complete autonomous mapping runtime acceptance with a passing runtime
+  report and candidate artifact save/validation.
+- [ ] Complete human map-quality acceptance.
+- [ ] Establish promotion eligibility through the required bound proofs.
+- [ ] Make any canonical-map replacement decision only as a separate,
+  explicitly authorized operation; canonical maps remain unchanged.
+- [ ] Complete hardware and functional-safety acceptance.
+
+Phase 15 is not accepted or complete. Product 103 and Gate 7 remain excluded;
+the protected handoff files were not touched.
+
+## Historical Phase 15 checkpoint — 2026-09-10 (superseded)
+
+- [x] Implement the latest frontier-feasibility packet in the approved
+  exploration files; scoped pytest reported 124 passed, the `amr_exploration`
+  build passed, its registered suites passed 3/3 with 66 tests, and
+  `git diff --check` passed.
+- [ ] Complete the independent Sol/high review and source/build follow-up for
+  that packet; `ament_flake8` still reports nine findings.
+- [ ] Establish TF edge-publisher ownership evidence without bypassing the
+  fail-closed gate.
+- [ ] Resolve the ordered Phase 15 remediation packets for cancellation,
+  dispatch freshness, incomplete stopping, world-identity blacklist state,
+  serialized artifacts, terminal acceptance, bundle-bound review, and bounded
+  input validation.
+- [ ] Obtain separate runtime authorization and complete autonomous runtime,
+  map-quality review, promotion, and any canonical-map replacement decision.
+
+Phase 15 runtime proof has not been run after the latest frontier packet.
+Product 101/102 Phase 14 runtime acceptance is a separate completed boundary;
+Product 103, Gate 7, hardware, and functional-safety claims remain outside
+scope.
+
+## Historical Phase 15 source/offline closeout — 2026-09-09 (superseded)
+
+- [x] Complete Slices 1 and 2 and the final Packet C correction at the
+  source/offline acceptance boundary.
+- [x] Record Luna/max implementation and independent Sol/high review and
+  acceptance.
+- [x] Pass focused Packet C pytest (52), `amr_factory` colcon tests (9/9),
+  and `colcon test-result` (457 tests, 0 errors, 0 failures, 5 skipped).
+- [x] Pass Python compilation, `ament_flake8`, the `amr_factory` build, and
+  `git diff --check`.
+
+Deliberately separate and not claimed by this closeout: direct-host, Gazebo,
+or hardware runtime; human production acceptance; map-quality review or
+promotion; and canonical-map replacement. Live TF ownership remains
+fail-closed until the edge publisher identity is honestly observable, and
+separate runtime authorization is required.
+
 ## Completed simulation scope
 
 - [x] Parameterized Gazebo AMR model, sensors, localisation, perception, SLAM,
-  Nav2 planning, MPPI path following, command arbitration, and base adapter.
+  Nav2 planning, RPP path following, command arbitration, and base adapter.
 - [x] Independent Gazebo native command watchdog.
 - [x] Observation-only base health reporting.
 - [x] Removed the former simulated-permission subsystem, interfaces, gate, and tools.
-- [x] Built fourteen packages and passed 101 automated tests.
+- [x] Built the current 17-package workspace; current phase-specific test
+  evidence is recorded in the closeout sections above.
 
 ## Final scope
 
 - [x] Exclude automatic recovery, hardware, procurement, fieldbus, and
   industrial deployment.
+
+## Phase 14 runtime closeout — 2026-09-08
+
+- [x] Complete fresh source validation: 151 focused pytest tests, the
+  three-package Humble build, and 100% colcon test pass.
+- [x] Complete normal autonomous native-attachment cycles for Product 101
+  (run `_11`) and Product 102 (run `_13`), including independent analyzer
+  evidence for both accepted paths.
+- [x] Exercise navigation cancellation and retained-product manipulation
+  cancellation in `_14`; preserve fail-closed empty-stow and retained-fault
+  outcomes with no next-job or home motion.
+- [x] Exercise graceful stop in `_16`; finish the active Product 101 delivery
+  without starting the queued Product 102 delivery.
+- [x] Reduce `.ros_logs` to the four closeout evidence folders and the
+  targeted `_16` bag; verify total usage remains below 1 GB.
+- [x] Keep Product 103/5 kg and Gate 7 disabled and outside this phase.
 
 ## Phase 14 current continuation
 
@@ -150,12 +244,13 @@
   `arm_link_2 <-> product_camera_link` collision with a corrected offline
   MoveIt/FCL probe; classify it as a source geometry/path contract defect,
   not infrastructure or analyzer behavior.
-- [ ] Obtain explicit phase authority for one compliant Product 102 center-slot
+- [x] Obtain explicit phase authority for one compliant Product 102 center-slot
   placement correction that preserves collision checking, release/slot
   acceptance, retained-path validity, and fail-closed behavior. Do not rerun
   `_13` unchanged.
-- [ ] Freeze one bounded Sol/high analyst packet, then have Luna/max implement
+- [x] Freeze one bounded Sol/high analyst packet, then have Luna/max implement
   only that packet. Luna must not plan or replan independently and must stop
   on any scope or hypothesis mismatch.
-- [ ] Run one fresh clean-host Product 102-only validation after focused
-  verification. Product 103 and Gate 7 remain blocked.
+- [x] Run one fresh clean-host Product 102-only validation after focused
+  verification; `_13` passed the corrected Product 102 path. Product 103 and
+  Gate 7 remain blocked.

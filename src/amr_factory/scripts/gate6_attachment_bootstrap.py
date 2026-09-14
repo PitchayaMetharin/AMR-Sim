@@ -654,9 +654,9 @@ class AttachmentBootstrap(Node):
     def run(self) -> None:
         self._products = _load_products(Path(get_package_share_directory("amr_factory")))
         self._register_subscriptions()
-        if not self._control_client.wait_for_service(timeout_sec=3.0):
+        if not self._control_client.wait_for_service(timeout_sec=self._startup_timeout):
             raise BootstrapError("Gazebo world-control service is unavailable")
-        if not self._set_pose_client.wait_for_service(timeout_sec=3.0):
+        if not self._set_pose_client.wait_for_service(timeout_sec=self._startup_timeout):
             raise BootstrapError("Gazebo set-pose service is unavailable")
         # Native attachment launch starts the already-warm server before this
         # node.  Pause it before insertion so the robot is created in a

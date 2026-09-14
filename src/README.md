@@ -5,6 +5,13 @@ simulated adapters, a parameterized
 robot description, a Gazebo plant, and local wheel/IMU state estimation. It
 makes no external-control, physical-actuator, or functional-safety claim.
 
+The current workspace contains 17 ROS 2 packages. Phase 14 autonomous runtime
+acceptance is complete for Product 101 (1 kg) and Product 102 (3 kg). Phase 15
+mapping is accepted only at the source/offline boundary; runtime mapping,
+human map-quality approval, promotion, and canonical-map replacement remain
+unverified. Product 103 (5 kg), Gate 7, hardware, and functional-safety claims
+are outside scope.
+
 ## Package and executable ownership
 
 | Package | Phase | Planned executables/components | Public boundary | Lifecycle | Forbidden responsibility |
@@ -23,10 +30,14 @@ makes no external-control, physical-actuator, or functional-safety claim.
 | `amr_mpc_controller` | 11 | Nav2 Regulated Pure Pursuit controller configuration | Local path/state in; velocity request out | Nav2 controller lifecycle | Bypassing arbitration/gate |
 | `amr_control` | 11 | `command_arbitration_node` | Motion source in; constrained stamped command out | Managed, separate process | Base transport authority |
 | `amr_health` | 13 | `health_supervisor_node` | Base diagnostics and freshness evidence | Managed, separate process | Motion or recovery authority |
+| `amr_exploration` | 15 | `frontier_explorer.py` | Frontier start/stop services; mission-goal requests | Separate process | Direct velocity or map promotion |
+| `amr_factory` | 14/15 | Factory supervisor, CLI, mapping and acceptance tools | Factory actions/status and run-specific mapping artifacts | Separate processes/launch-managed | Direct base velocity or canonical-map replacement |
+| `amr_manipulation` | 14 | Cycle adapter, Gate 6 runner, MoveIt launch | Cycle action, manipulation status, attachment proof | Separate processes/launch-managed | Base command ownership or independent status authority |
 
-Packages through Phase 11, the Phase 13 health package, and the Phase 14
-factory/manipulation source boundaries are implemented. Gate 6/Gate 7 runtime
-acceptance remains separately gated; automatic recovery is excluded from scope.
+Packages through Phase 15 are present in the current source tree. The accepted
+runtime boundaries are Product 101/102 factory cycles and the existing
+simulation stack. Phase 15 live mapping and promotion remain separately gated;
+automatic recovery, Product 103, Gate 7, and hardware are excluded from scope.
 
 ## Build and test
 
@@ -74,3 +85,20 @@ rviz2 -d install/amr_simulation/share/amr_simulation/rviz/sensors.rviz \
 The LiDAR and point-cloud publishers use Best Effort QoS. If their RViz
 displays are blank, set each corresponding display's Reliability Policy to
 Best Effort. The SLAM map remains available on `/map`.
+
+## Autonomous factory cycle
+
+For the accepted Product 101/102 autonomous boundary, use the registry-derived
+factory launch with explicit native attachment enabled:
+
+```bash
+ros2 launch amr_factory factory_autonomous.launch.py \
+  control_mode:=autonomous factory_attachment:=true
+```
+
+Start MoveIt separately, then use `ros2 run amr_factory factory_cli.py` for
+station selection, sequences, stop/cancel, home, and status. Product 103,
+Gate 7, physical hardware, and functional-safety acceptance are outside scope.
+`factory_demo.launch.py` remains legacy/optional. Phase 15 mapping uses the
+separate `factory_mapping.launch.py` entry point and has not received runtime
+or canonical-map acceptance.

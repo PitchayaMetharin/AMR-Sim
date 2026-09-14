@@ -14,3 +14,13 @@ string product_id
 bool product_attached
 uint8 last_outcome
 string detail
+
+# Sequence state is appended for wire compatibility with the existing fields.
+bool sequence_active
+uint32 current_cycle
+uint32 sequence_index
+uint32 completed_jobs
+uint32 completed_cycles
+string final_station_id
+bool graceful_stop_requested
+bool fault_latched

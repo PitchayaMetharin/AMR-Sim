@@ -58,9 +58,33 @@ def test_canonical_interfaces_have_one_named_authority():
         "type": "amr_interfaces/action/TransportProduct",
         "server": "amr_factory/factory_supervisor_node",
     }
+    assert contract["actions"]["/amr/manipulation/execute_product_cycle"] == {
+        "type": "amr_interfaces/action/ExecuteProductCycle",
+        "server": "amr_manipulation/cycle_manipulation_supervisor.py",
+    }
+    assert contract["actions"]["/amr/factory/run_sequence"] == {
+        "type": "amr_interfaces/action/RunSequence",
+        "server": "amr_factory/factory_supervisor_node",
+    }
+    assert contract["actions"]["/amr/factory/navigate_station"] == {
+        "type": "amr_interfaces/action/NavigateStation",
+        "server": "amr_factory/factory_supervisor_node",
+    }
     assert contract["services"]["/amr/factory/set_operation_mode"] == {
         "type": "amr_interfaces/srv/SetOperationMode",
         "server": "amr_factory/factory_supervisor_node",
+    }
+    for service_name in (
+        "/amr/factory/stop_sequence",
+        "/amr/factory/cancel_sequence",
+    ):
+        assert contract["services"][service_name] == {
+            "type": "std_srvs/srv/Trigger",
+            "server": "amr_factory/factory_supervisor_node",
+        }
+    assert contract["services"]["/amr/manipulation/internal/cancel_cycle_motion"] == {
+        "type": "std_srvs/srv/Trigger",
+        "server": "amr_manipulation/cycle_manipulation_supervisor.py",
     }
     assert topics["/amr/control/cmd_vel"] == {
         "type": "geometry_msgs/msg/TwistStamped",
@@ -78,10 +102,23 @@ def test_canonical_interfaces_have_one_named_authority():
         "type": "amr_interfaces/msg/FactoryStatus",
         "publisher": "amr_factory/factory_supervisor_node",
     }
+    assert topics["/amr/factory/tf_ownership"] == {
+        "type": "std_msgs/msg/String",
+        "publisher": "amr_factory/factory_tf_ownership_observer",
+    }
     assert topics["/amr/manipulation/status"] == {
         "type": "amr_interfaces/msg/ManipulatorStatus",
         "publisher": "amr_manipulation/manipulation_supervisor_node",
     }
+    assert topics["/amr/exploration/status"] == {
+        "type": "diagnostic_msgs/msg/DiagnosticArray",
+        "publisher": "amr_exploration/frontier_explorer",
+    }
+    for service_name in ("/amr/exploration/start", "/amr/exploration/stop"):
+        assert contract["services"][service_name] == {
+            "type": "std_srvs/srv/Trigger",
+            "server": "amr_exploration/frontier_explorer",
+        }
     assert topics["/amr/sensors/front_lidar/scan"]["publisher"] != topics[
         "/amr/sensors/rear_lidar/scan"
     ]["publisher"]

@@ -1,0 +1,26 @@
+# Execute one complete station-to-dispatch manipulation cycle.
+string pickup_station_id
+string destination_station_id
+---
+uint8 SUCCESS=0
+uint8 INVALID_REQUEST=1
+uint8 DEPENDENCY_UNAVAILABLE=2
+uint8 PREPARATION_FAILED=3
+uint8 EXECUTION_FAILED=4
+uint8 CANCELED=5
+uint8 INTERLOCK_FAILED=6
+uint8 RETAINED_PRODUCT_FAULT=7
+
+bool delivered
+uint8 outcome
+string product_id
+string message
+---
+uint8 PREPARING=1
+uint8 EXECUTING=2
+uint8 CANCELING=3
+
+uint8 phase
+string phase_name
+string product_id
+bool product_attached

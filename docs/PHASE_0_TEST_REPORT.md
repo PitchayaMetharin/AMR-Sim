@@ -2,6 +2,10 @@
 
 ## Scope
 
+> Historical Phase 0 snapshot dated 2026-07-24. Its package inventory and
+> performance statements describe the pre-Phase-15 baseline and do not
+> supersede the current 17-package workspace or current phase closeouts.
+
 This report records tests that can reduce future integration risk before a
 project robot model or ROS 2 workspace exists. It does not validate AMR
 dynamics, navigation, sensors, payload stability, or physical safety.

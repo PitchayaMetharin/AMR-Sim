@@ -11,6 +11,8 @@ import pytest
 from ament_index_python.packages import get_package_prefix
 
 ROOT = Path(__file__).resolve().parents[1]
+LIDAR_SELF_VISIBILITY_FLAG = 0x01
+LIDAR_VISIBILITY_MASK = 0xFFFFFFFE
 
 
 def stl_vertices(path):
@@ -117,7 +119,7 @@ def test_cad_visual_materials_are_explicit_nonblack_and_use_legacy_colors():
                    0.752941176470588, 1.0)
     legacy_bluegray = (0.792156862745098, 0.819607843137255,
                        0.933333333333333, 1.0)
-    for visual in robot.findall(".//visual"):
+    for visual in robot.findall("./link/visual"):
         material = visual.find("./material")
         assert material is not None
         assert not material.attrib.get("name", "").startswith("Gazebo/")
@@ -502,6 +504,22 @@ def expand_composite(loaded=False):
     ))
 
 
+def expand_composite_sdf(loaded=False):
+    urdf = subprocess.check_output(
+        [
+            "xacro",
+            str(ROOT / "urdf" / "phase14_mobile_manipulator.urdf.xacro"),
+            f"controller_config:={ROOT / 'config' / 'phase14_mobile_manipulator_controllers.yaml'}",
+            f"loaded_product:={'true' if loaded else 'false'}",
+        ]
+    )
+    with tempfile.NamedTemporaryFile(suffix=".urdf") as source:
+        source.write(urdf)
+        source.flush()
+        sdf = subprocess.check_output(["gz", "sdf", "-p", source.name])
+    return ET.fromstring(sdf)
+
+
 def expand_factory_composite():
     return ET.fromstring(subprocess.check_output(
         [
@@ -585,6 +603,92 @@ def test_phase14_composite_has_unique_names_fixed_mount_and_mass_budget():
         math.pi / 3.0)
     assert float(camera.find("camera/clip/near").text) == 0.1
     assert float(camera.find("camera/clip/far").text) == 5.0
+
+
+def test_phase14_lidars_exclude_all_composite_visuals_preserving_contract():
+    expected_joint_origins = {
+        "front": {"xyz": "0.30805 -0.153 0.47468", "rpy": "0 0 0"},
+        "rear": {"xyz": "-0.308 0.153 0.47468", "rpy": "0 0 -3.1416"},
+    }
+    expected_sdf_poses = {
+        "front": (0.30805, -0.153, 0.52248, 0.0, 0.0, 0.0),
+        # gz sdf serializes the unchanged -3.1416 URDF yaw as 3.14159.
+        "rear": (-0.308, 0.153, 0.52248, 0.0, 0.0, 3.14159),
+    }
+    expected_visual_links = {
+        "base_link", "front_lidar_link", "rear_lidar_link", "arm_base_link",
+        "gripper_base_link", "gripper_left_finger_link",
+        "gripper_right_finger_link", "product_camera_link",
+    }
+    expected_visual_links.update(f"arm_link_{index}" for index in range(1, 7))
+
+    for loaded in (False, True):
+        robot = expand_composite(loaded=loaded)
+        sdf = expand_composite_sdf(loaded=loaded)
+        model = sdf.find("./model")
+        assert model is not None
+
+        visual_links = {
+            link.attrib["name"] for link in robot.findall("./link")
+            if link.find("./visual") is not None
+        }
+        assert expected_visual_links <= visual_links
+        if loaded:
+            assert "stowed_product_link" in visual_links
+
+        urdf_visuals = robot.findall("./link/visual")
+        sdf_visuals = model.findall(".//visual")
+        assert len(sdf_visuals) == len(urdf_visuals)
+        flag_texts = [visual.findtext("visibility_flags")
+                      for visual in sdf_visuals]
+        assert all(flag_text is not None for flag_text in flag_texts)
+        flags = [int(flag_text, 0) for flag_text in flag_texts]
+        assert all(flag == LIDAR_SELF_VISIBILITY_FLAG for flag in flags)
+
+        for prefix in ("front", "rear"):
+            joint = robot.find(f"./joint[@name='{prefix}_lidar_joint']")
+            assert joint.find("origin").attrib == expected_joint_origins[prefix]
+            sensor = robot.find(
+                f"./gazebo[@reference='{prefix}_lidar_link']"
+                f"/sensor[@name='{prefix}_lidar']")
+            assert sensor.attrib["type"] == "gpu_lidar"
+            assert sensor.findtext("topic") == (
+                f"/amr/simulation/sensors/{prefix}_lidar/scan")
+            assert sensor.findtext("gz_frame_id") == f"{prefix}_lidar_link"
+            assert int(sensor.findtext("lidar/scan/horizontal/samples")) == 720
+            assert int(sensor.findtext("lidar/scan/vertical/samples")) == 4
+            assert float(sensor.findtext("lidar/range/min")) == pytest.approx(0.2)
+            assert float(sensor.findtext("lidar/range/max")) == pytest.approx(20.0)
+
+            sdf_sensor = model.find(f".//sensor[@name='{prefix}_lidar']")
+            assert sdf_sensor is not None
+            visibility_mask = int(
+                sdf_sensor.findtext("lidar/visibility_mask"), 0)
+            assert visibility_mask == LIDAR_VISIBILITY_MASK
+            assert all(
+                visibility_mask & flag == 0
+                for flag in flags
+            )
+            assert sdf_sensor.findtext("topic") == sensor.findtext("topic")
+            assert sdf_sensor.findtext("gz_frame_id") == sensor.findtext(
+                "gz_frame_id")
+            assert tuple(map(float, sdf_sensor.findtext("pose").split())) == pytest.approx(
+                expected_sdf_poses[prefix], abs=1e-12)
+            assert float(sdf_sensor.findtext("update_rate")) == 10.0
+            assert int(sdf_sensor.findtext("lidar/scan/horizontal/samples")) == 720
+            assert int(sdf_sensor.findtext("lidar/scan/vertical/samples")) == 4
+            assert float(sdf_sensor.findtext(
+                "lidar/scan/horizontal/min_angle")) == pytest.approx(-2.4)
+            assert float(sdf_sensor.findtext(
+                "lidar/scan/horizontal/max_angle")) == pytest.approx(2.4)
+            assert float(sdf_sensor.findtext(
+                "lidar/scan/vertical/min_angle")) == pytest.approx(0.0)
+            assert float(sdf_sensor.findtext(
+                "lidar/scan/vertical/max_angle")) == pytest.approx(0.065)
+            assert float(sdf_sensor.findtext("lidar/range/min")) == pytest.approx(0.2)
+            assert float(sdf_sensor.findtext("lidar/range/max")) == pytest.approx(20.0)
+            assert float(sdf_sensor.findtext(
+                "lidar/range/resolution")) == pytest.approx(0.01)
 
 
 def test_phase14_loaded_product_respects_mass_geometry_and_wrist_budget():

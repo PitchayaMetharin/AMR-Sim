@@ -53,6 +53,7 @@ ament_target_dependencies(gate6_mass_stage
   ros_gz_interfaces
   shape_msgs
   std_msgs
+  std_srvs
   trajectory_msgs)
 target_link_libraries(gate6_mass_stage manipulation_validation)
 
@@ -75,6 +76,9 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
   RENAME gate6_product_test)
 install(PROGRAMS
+  scripts/cycle_manipulation_supervisor.py
+  DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS
   scripts/gate6_evidence_analyzer.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME gate6_evidence_analyzer)
@@ -94,6 +98,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(product_test_contract_test test/test_product_test_contract.py)
   ament_add_pytest_test(gate6_completion_contract_test
     test/test_gate6_completion_contract.py)
+  ament_add_pytest_test(cycle_adapter_test test/test_cycle_adapter.py)
 endif()
 
 ament_package()

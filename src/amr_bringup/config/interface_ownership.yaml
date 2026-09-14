@@ -25,6 +25,10 @@
       "type": "amr_interfaces/msg/FactoryStatus",
       "publisher": "amr_factory/factory_supervisor_node"
     },
+    "/amr/factory/tf_ownership": {
+      "type": "std_msgs/msg/String",
+      "publisher": "amr_factory/factory_tf_ownership_observer"
+    },
     "/amr/sensors/front_lidar/scan": {
       "type": "sensor_msgs/msg/LaserScan",
       "publisher": "amr_sensor_adapters/front_lidar_adapter_node"
@@ -85,6 +89,10 @@
       "type": "nav_msgs/msg/Odometry",
       "publisher": "robot_localization/ekf_filter_node"
     },
+    "/amr/exploration/status": {
+      "type": "diagnostic_msgs/msg/DiagnosticArray",
+      "publisher": "amr_exploration/frontier_explorer"
+    },
     "/tf:odom->base_footprint": {
       "type": "tf2_msgs/msg/TFMessage",
       "publisher": "robot_localization/ekf_filter_node"
@@ -118,12 +126,44 @@
     "/amr/factory/transport_product": {
       "type": "amr_interfaces/action/TransportProduct",
       "server": "amr_factory/factory_supervisor_node"
+    },
+    "/amr/manipulation/execute_product_cycle": {
+      "type": "amr_interfaces/action/ExecuteProductCycle",
+      "server": "amr_manipulation/cycle_manipulation_supervisor.py"
+    },
+    "/amr/factory/run_sequence": {
+      "type": "amr_interfaces/action/RunSequence",
+      "server": "amr_factory/factory_supervisor_node"
+    },
+    "/amr/factory/navigate_station": {
+      "type": "amr_interfaces/action/NavigateStation",
+      "server": "amr_factory/factory_supervisor_node"
     }
   },
   "services": {
     "/amr/factory/set_operation_mode": {
       "type": "amr_interfaces/srv/SetOperationMode",
       "server": "amr_factory/factory_supervisor_node"
+    },
+    "/amr/factory/stop_sequence": {
+      "type": "std_srvs/srv/Trigger",
+      "server": "amr_factory/factory_supervisor_node"
+    },
+    "/amr/factory/cancel_sequence": {
+      "type": "std_srvs/srv/Trigger",
+      "server": "amr_factory/factory_supervisor_node"
+    },
+    "/amr/manipulation/internal/cancel_cycle_motion": {
+      "type": "std_srvs/srv/Trigger",
+      "server": "amr_manipulation/cycle_manipulation_supervisor.py"
+    },
+    "/amr/exploration/start": {
+      "type": "std_srvs/srv/Trigger",
+      "server": "amr_exploration/frontier_explorer"
+    },
+    "/amr/exploration/stop": {
+      "type": "std_srvs/srv/Trigger",
+      "server": "amr_exploration/frontier_explorer"
     }
   },
   "runtime_modes": {

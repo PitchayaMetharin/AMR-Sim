@@ -5,12 +5,33 @@ terminal. It applies to the laptop-only ROS 2 Humble and Gazebo Harmonic
 workspace. It does not make physical-robot, hardware, or functional-safety
 claims.
 
-Current Gate 6 status: Product102 (3 kg) passed the strict direct-host run at
-`.ros_logs/gate6_product102_geometry_20260902_03/`, including exact stage
-markers, final slot, independent bag analysis, cleanup, and hash integrity.
-Product103 (5 kg) was not attempted. The Product102 branch is accepted, but
-full Gate 6 and Gate 7 remain pending the authorized Product103 result. Do not
-rerun an accepted product merely for progression.
+Current Phase 14 status: Product 101 (1 kg) and Product 102 (3 kg) passed the
+approved autonomous factory-cycle scope. Normal-cycle evidence is retained in
+`.ros_logs/amr_autonomous_factory_20260908_11/` and
+`.ros_logs/amr_autonomous_factory_20260908_13/`; cancellation evidence is in
+`_14/`, and graceful-stop evidence is in `_16/`. Product 103 (5 kg) and Gate 7
+are out of scope and remain disabled. Do not rerun an accepted product merely
+for progression. The `.ros_logs` retention set is intentionally capped below
+1 GB; use a targeted recorder and retain only the gate/analyzer/status evidence
+needed for the run.
+
+As of 2026-09-12, Phase 15 packets P0 through P8 are implemented and
+independently accepted at the source/offline boundary. No fresh canonical
+factory acceptance runtime was run after the factory CLI timeout and
+cycle-adapter shutdown fixes. The installed Python API still exposes no
+publisher GID, so per-edge TF publisher ownership remains fail-closed;
+aggregate `/tf` publisher lists are not a substitute.
+Autonomous mapping runtime acceptance, human map-quality acceptance, runtime
+report PASS, promotion, canonical-map replacement, and hardware or
+functional-safety acceptance remain unverified and must not be inferred from
+the commands below.
+
+On 2026-09-14, a separate AWS warehouse visualization/mapping smoke run reached
+the safe terminal state `INCOMPLETE` with final map version 899, no goal
+failures, and no latched fault. That run used a temporary preview wrapper and
+kept the map in memory; it is visual/runtime evidence only, not canonical
+factory-map acceptance or promotion. The persistent save/validate flow below
+is the supported way to retain a candidate.
 
 The current navigation chain is:
 
@@ -25,6 +46,12 @@ Use a fresh `AMR_RUN_ID`, `GZ_PARTITION`, `ROS_DOMAIN_ID`, and log directory.
 Repeat the same setup in every terminal belonging to that run. Source the
 workspace environment before exporting the run-specific domain because
 `amr_ros_env.sh` sets a default domain.
+
+Keep the complete `.ros_logs` directory below 1 GB. Do not use
+`ros2 bag record -a` for routine work: high-rate clock, sensor, and controller
+topics can create multi-gigabyte bags in minutes. Record only the explicit
+topics required by the gate being exercised, and preserve the gate/analyzer/
+status text outputs as the primary evidence.
 
 Paste this in each terminal, changing the run ID and domain only for a new
 run:
@@ -116,7 +143,25 @@ The factory launch uses the registered static factory map and AMCL. It starts
 the localization, perception, Nav2 planner/smoother, RPP controller,
 arbitration, and mission nodes, but not MoveIt.
 
-### Terminal 1 — factory world
+For the approved native-attachment autonomous product path, use
+`factory_autonomous.launch.py` with `factory_attachment:=true`; the completed
+acceptance runs used that mode. The mapping commissioning commands below also
+use `factory_attachment:=true` so the stowed-authority evidence is explicit.
+
+The canonical autonomous factory launch is:
+
+```bash
+ros2 launch amr_factory factory_autonomous.launch.py \
+  factory_attachment:=true headless:=true software_rendering:=false \
+  require_hardware_rendering:=true control_mode:=autonomous \
+  initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
+```
+
+The lower-level `factory_localization.launch.py` remains useful for manual
+static-map inspection and is included by the autonomous launch; it is not the
+standalone entry point for an accepted autonomous factory cycle.
+
+### Terminal 1 — canonical autonomous factory world
 
 Paste the common setup, run the host renderer preflight, then choose GUI or
 headless mode. Factory launch defaults now require hardware rendering so a
@@ -128,27 +173,28 @@ ros2 run amr_factory factory_runtime_preflight.py host \
   --evidence-dir "$ROS_LOG_DIR/evidence"
 
 # GUI mode:
-ros2 launch amr_factory factory_localization.launch.py \
+ros2 launch amr_factory factory_autonomous.launch.py \
   headless:=false software_rendering:=false \
-  require_hardware_rendering:=true \
-  factory_attachment:=true \
-  initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
+  require_hardware_rendering:=true factory_attachment:=true \
+  control_mode:=autonomous initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
 
 # Headless mode:
-# ros2 launch amr_factory factory_localization.launch.py \
+# ros2 launch amr_factory factory_autonomous.launch.py \
 #   headless:=true software_rendering:=false \
-#   require_hardware_rendering:=true \
-#   factory_attachment:=true \
-#   initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
+#   require_hardware_rendering:=true factory_attachment:=true \
+#   control_mode:=autonomous initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
 ```
 
 If the host preflight fails, stop and fix the host/device access problem. Do
 not substitute software rendering for timing-sensitive evidence.
 
-`factory_attachment:=true` is mandatory for Gate 6 product runs because it
-starts the native attachment bootstrap and detachable-joint interfaces used
-by the fail-closed attachment proof. Keep `factory_attachment:=false` only for
-non-product visualization or mapping sessions.
+`factory_autonomous.launch.py` is the canonical autonomous entry point.
+`factory_attachment:=true` is mandatory for accepted Product 101/102 cycles
+and mapping commissioning because it starts the native attachment bootstrap and
+detachable-joint interfaces used by the fail-closed attachment proof. A
+`factory_attachment:=false` launch is limited to explicitly non-product
+visualization and is not an acceptance path. `factory_demo.launch.py` remains a
+legacy/optional launch and is not a current acceptance entry point.
 
 ### Factory online mapping (manual or autonomous commissioning)
 
@@ -164,31 +210,75 @@ mkdir -p "$mapping_session"
 ros2 launch amr_factory factory_mapping.launch.py \
   control_mode:=manual session_dir:="$mapping_session" \
   headless:=false software_rendering:=false \
-  require_hardware_rendering:=true factory_attachment:=false \
+  require_hardware_rendering:=true factory_attachment:=true \
   initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
 ```
 
 For autonomous frontier exploration, use the same launch with
-`control_mode:=autonomous`; do not run keyboard teleoperation at the same time:
+`control_mode:=autonomous`; do not run keyboard teleoperation at the same time.
+Start the mapping launch and leave it active in one terminal:
 
 ```bash
 ros2 launch amr_factory factory_mapping.launch.py \
   control_mode:=autonomous session_dir:="$mapping_session" \
   headless:=false software_rendering:=false \
-  require_hardware_rendering:=true factory_attachment:=false \
+  require_hardware_rendering:=true factory_attachment:=true \
   initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
 ```
 
+The mapping Explorer uses mapping-specific readiness. Its TF lookup requests
+`map -> base_footprint` at the node's exact current ROS time and rejects zero,
+future, stale, nonfinite, or invalid-quaternion samples. Production planning
+checks non-TF readiness first, clusters frontiers, then obtains one carried TF
+sample for robot-pose and candidate computation; the final reservation gate
+revalidates that same sample and sends no goal if it expires while waiting.
+Initial autostart/start readiness has a 15-second grace episode. After a full
+readiness success, a later no-motion `WAITING_READY`/`SCANNING` miss receives a
+fresh continuous 15-second episode: recovery returns to `SCANNING` and clears
+it, while a persistent miss faults closed. Readiness loss during
+`GOAL_PENDING` or `NAVIGATING` still cancels immediately rather than using
+this grace period.
+
+After the mapping graph passes its readiness gates, use a separate terminal to
+start exploration through its explicit service before collecting the map:
+
+```bash
+ros2 service call /amr/exploration/start std_srvs/srv/Trigger {}
+```
+
 Both modes preserve the factory `require_manipulator_stowed=true` interlock.
-Until Phase 14 provides a valid stowed authority, command arbitration remains
-fail-closed and these commands will not move the robot; do not weaken that
-gate to force a mapping run.
+Accepted Phase 14 Product 101/102 runtime evidence included stowed proof, but
+it does not prove current stowed authority for a Phase 15 mapping run. The
+current mapping run must provide that proof; otherwise command arbitration
+remains fail-closed and these commands will not move the robot. Do not weaken
+that gate to force a mapping run.
 
 Stop autonomous exploration only through its cancellation boundary:
 
 ```bash
 ros2 service call /amr/exploration/stop std_srvs/srv/Trigger {}
 ```
+
+Wait for the final exploration status to be non-faulted and inactive before
+saving the candidate. The current P6 acceptance gate requires a terminal
+`STOPPED`, `COMPLETE`, or `INCOMPLETE` state, fresh status, explicit
+`active: false`, `pending: false`, and `fault_latched: false`, a positive
+`run_generation`, and an exact empty `cancel_target`. Do not treat
+`WAITING_READY`, `SCANNING`, `GOAL_PENDING`, `NAVIGATING`, or `CANCELLING` as
+completion. If frontiers remain without a safe reachable goal, the required
+outcome is `INCOMPLETE`/safely stopped with explicit
+`incomplete_acknowledgement: ACCEPT_INCOMPLETE` and a nonblank
+`incomplete_explanation`. Do not call `start` again after the stop boundary
+unless you are intentionally beginning a new run-specific session.
+
+#### Fresh mapping versus a saved candidate
+
+Every invocation of `factory_mapping.launch.py` starts SLAM Toolbox with a new
+in-memory map. The `session_dir` stores run evidence and explicitly saved
+artifacts; it is not loaded automatically on the next launch. To demonstrate
+mapping from scratch, use a new `AMR_RUN_ID`/`ROS_LOG_DIR` and a new
+`mapping_session`, then launch without a `map_yaml` argument. Do not delete the
+canonical map to reset a demonstration.
 
 Once a valid stowed authority is available, manual mode drives the robot
 through the factory with the existing teleop boundary. Do not start teleop in
@@ -199,8 +289,13 @@ ros2 run amr_control prototype_teleop.py
 ```
 
 After reviewing the online map, the commissioning CLI saves a candidate outside
-the canonical map directory, including the pose graph, surveyed home datum,
-and writes a manifest. It never overwrites `src/amr_factory/maps/factory.yaml`:
+the canonical map directory, including the surveyed home datum and a two-file
+pose-graph bundle: `<prefix>.posegraph` and `<prefix>.data`. The serializer
+receives a bare prefix and appends those suffixes. Manifest schema 3 requires
+both exact, regular, non-empty files, records and hashes both files, and rejects
+legacy, incomplete, aliased, missing, or tampered bundles. Verified discard is
+limited to manifest-enumerated candidate files. The CLI never overwrites
+`src/amr_factory/maps/factory.yaml`:
 
 ```bash
 ros2 run amr_factory factory_mapping_cli.py save \
@@ -210,6 +305,56 @@ ros2 run amr_factory factory_mapping_cli.py validate \
   --session-dir "$mapping_session" --name factory_candidate
 ```
 
+Collect run-specific, read-only evidence before acceptance. The preflight
+commands only observe the existing graph and write their reports under the
+session; they do not replace the bounded mapping acceptance observer:
+
+```bash
+ros2 run amr_factory factory_runtime_preflight.py host \
+  --evidence-dir "$mapping_session/evidence"
+ros2 run amr_factory factory_runtime_preflight.py runtime \
+  --profile phase15_mapping \
+  --evidence-dir "$mapping_session/evidence"
+ros2 run amr_factory factory_mapping_acceptance.py runtime \
+  --session-dir "$mapping_session" --name factory_candidate \
+  --mode autonomous --evidence-dir "$mapping_session/evidence"
+```
+
+Do not run the generic factory graph preflight as the mapping readiness gate.
+Online mapping intentionally omits AMCL, `nav2_map_server`, and `move_group`,
+so that generic product graph contract is expected to fail. Use the named
+`phase15_mapping` runtime profile and the mapping acceptance observer above;
+they validate the SLAM Toolbox/EKF TF path, fresh map, mapping authority, and
+the mode-appropriate exploration chain. Human map-quality review and
+promotion are separate decisions and are not established by these commands.
+
+After the runtime evidence is collected, inspect the map image and the complete
+pose-graph bundle, then create a run-specific
+`$mapping_session/quality_review.yaml` containing the exact candidate path,
+`candidate_sha256`, quality-review schema 2,
+the exact `artifact_bundle_sha256` matching the verified manifest, and the
+exact `runtime_acceptance_sha256` for the actual runtime report, a named
+reviewer, and `decision: ACCEPTED`. If
+exploration ends with remaining frontiers but no safe reachable goal, acceptance
+also requires the explicit `INCOMPLETE` acknowledgement and nonblank
+explanation described above. `accept` and `promote` revalidate these bound
+proofs from persisted observations; do not create a promotion claim from a
+transitional snapshot. Verify the three-proof state before creating the
+promotion-eligibility receipt:
+
+```bash
+ros2 run amr_factory factory_mapping_acceptance.py accept \
+  --session-dir "$mapping_session" --name factory_candidate \
+  --quality-review "$mapping_session/quality_review.yaml"
+ros2 run amr_factory factory_mapping_acceptance.py promote \
+  --session-dir "$mapping_session" --name factory_candidate
+```
+
+`promote` writes only the run-specific eligibility receipt. It never copies,
+replaces, renames over, or modifies `src/amr_factory/maps/factory.*` or the
+installed canonical map; canonical replacement requires separate
+authorization.
+
 Review the candidate before production and pass its exact YAML path:
 
 ```bash
@@ -218,12 +363,14 @@ ros2 launch amr_factory factory_localization.launch.py \
   initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
 ```
 
-To remove one generated session, use the explicit, manifest-guarded command;
-the canonical map is never a valid discard target:
+Saving is opt-in: if `save` is not run, no map candidate is persisted for later
+localization. To remove only this generated candidate for another fresh demo,
+use the explicit, manifest-guarded command; the canonical map is never a valid
+discard target:
 
 ```bash
 ros2 run amr_factory factory_mapping_cli.py discard \
-  --session-dir "$mapping_session" --confirm
+  --session-dir "$mapping_session" --name factory_candidate --confirm
 ```
 
 After Gazebo is running and before starting MoveIt, run the bounded RTF gate
@@ -290,11 +437,11 @@ acceptance check with short-lived `ros2 lifecycle get` processes; fresh DDS
 participants can discover the service but lose the response during startup. If
 lifecycle preflight fails, stop before starting the recorder or product stage.
 
-The MPC controller launch starts `controller_server` before its lifecycle
-manager and applies a bounded one-second construction barrier. This protects
-Humble's zero-delay lifecycle-manager autostart from racing the controller's
-nested local-costmap construction; it does not change controller parameters or
-command ownership.
+The RPP controller launch (retained in the `amr_mpc_controller` compatibility
+package) starts `controller_server` before its lifecycle manager and applies a
+bounded one-second construction barrier. This protects Humble's zero-delay
+lifecycle-manager autostart from racing the controller's nested local-costmap
+construction; it does not change controller parameters or command ownership.
 
 ### Optional — empty-arm motion check
 
@@ -304,16 +451,30 @@ Run this only after MoveIt is ready and before the product stage:
 ros2 launch amr_manipulation gate6_empty_motion.launch.py
 ```
 
-### Optional — factory RViz view
+### Optional — mapping RViz view
 
-Factory simulation has no project-specific RViz layout yet, but RViz2 can be
-run against the same graph. Paste the common setup in another terminal, then:
+RViz2 can inspect the live map, robot, scans, and TF while mapping is running.
+Paste the common setup in another terminal, then:
 
 ```bash
-rviz2 --ros-args -p use_sim_time:=true
+rviz2 -d install/amr_simulation/share/amr_simulation/rviz/sensors.rviz \
+  --ros-args -p use_sim_time:=true
 ```
 
-Add the `TF`, `RobotModel`, `Map`, `LaserScan`, and `Path` displays as needed.
+The supplied view already includes `TF`, `RobotModel`, `/map`, both LiDAR
+scans, and both point clouds. For the mapping run, add two `Map` displays and
+one `PoseWithCovariance` display when you want the navigation overlays:
+
+```text
+global costmap: /amr/global_costmap/costmap
+local costmap:  /amr/local_costmap/costmap
+SLAM pose:      /amr/pose
+```
+
+Use Reliable/Transient Local QoS for both costmap displays and
+Reliable/Volatile QoS for `/amr/pose`. Mapping mode intentionally does not run
+AMCL; `/amr/pose` is the SLAM Toolbox pose. `/amr/amcl_pose` is available only
+when the static-map factory localization launch is being used.
 
 ### Terminal 4 — record evidence
 
@@ -433,69 +594,83 @@ Wait for `Recording...` before starting the stage. Stop the recorder with
 `Ctrl-C` only after the stage has finished so the remaining messages are
 written.
 
-### Terminal 5 — product stage
-
-Paste the common setup, then choose exactly one test. Product102 (3 kg) is
-accepted and should not be rerun merely for progression. Product103 (5 kg)
-remains pending explicit runtime authorization:
+The recorder above is the historical full Gate 6 analyzer contract. It is not
+the default because it includes high-rate sensors and can exceed 1 GB quickly.
+For routine cancellation, graceful-stop, or status/ownership evidence, use
+this bounded recorder instead (it deliberately omits `/clock`, lidar, plans,
+and other high-rate streams):
 
 ```bash
-# Product101, 1 kg reference entry point:
-ros2 launch amr_manipulation gate6_mass_stage.launch.py product_id:=101
+ros2 bag record --include-hidden-topics \
+  --qos-profile-overrides-path "$recorder_qos" \
+  -o "$ROS_LOG_DIR/compact_evidence" \
+  /amr/factory/status /amr/manipulation/status /amr/manipulation/internal/status \
+  /amr/factory/run_sequence/_action/status \
+  /amr/factory/run_sequence/_action/feedback \
+  /amr/manipulation/execute_product_cycle/_action/status \
+  /amr/manipulation/execute_product_cycle/_action/feedback \
+  /amr/simulation/attachment_bootstrap/status \
+  /amr/simulation/internal/attachment/product_101/state \
+  /amr/simulation/internal/attachment/product_102/state \
+  /amr/amcl_pose /amr/simulation/ground_truth/pose \
+  /amr/control/cmd_vel /amr/mpc/cmd_vel /amr/simulation/base/cmd_vel \
+  /amr/base/status /amr/localization/odometry /amr/base/odometry_raw \
+  /amr/base/joint_states /joint_states \
+  /amr/mission/navigate_to_pose/_action/status \
+  /amr/mission/navigate_to_pose/_action/feedback \
+  /amr/mission/navigate_to_pose_precise/_action/status \
+  /amr/mission/navigate_to_pose_precise/_action/feedback \
+  /amr/control/dock_egress/_action/status \
+  /amr/control/dock_egress/_action/feedback \
+  /arm_controller/follow_joint_trajectory/_action/status \
+  /gripper_controller/gripper_cmd/_action/status \
+  /gripper_right_controller/gripper_cmd/_action/status
 ```
 
-For the independent 3 kg or 5 kg test, use one of these aliases instead. Keep
-the factory and MoveIt terminals running; the runner resets only the selected
-product to its registered pickup station, leaves the AMR at its current pose,
-then navigates to that product's dock before starting the existing mass stage:
+This compact recorder is sufficient for the accepted stop/cancellation
+evidence but is intentionally not a substitute for the full analyzer contract
+when a future phase explicitly authorizes a new normal Gate 6 acceptance run.
+
+### Terminal 5 — autonomous factory control
+
+The accepted autonomous boundary is Product 101 (1 kg) and Product 102 (3 kg)
+through the registry-backed factory CLI. Product 103 (5 kg) is disabled and
+must not be started:
 
 ```bash
-# Product B, 3 kg (tag 102) — accepted current command:
-ros2 launch amr_manipulation gate6_3kg_test.launch.py
-
-# Product C, 5 kg (tag 103) — pending authorization:
-# ros2 launch amr_manipulation gate6_5kg_test.launch.py
+ros2 run amr_factory factory_cli.py list
+ros2 run amr_factory factory_cli.py mode autonomous
+ros2 run amr_factory factory_cli.py send pickup_a dispatch --timeout 240
+ros2 run amr_factory factory_cli.py send pickup_b dispatch --timeout 240
+ros2 run amr_factory factory_cli.py loop pickup_a pickup_b --cycles 1 --finish stay
+ros2 run amr_factory factory_cli.py status
 ```
 
-The runner refuses to reset if the arm is attached, deployed, moving, faulted,
-or not at empty stow, and refuses to run beside an active Gate 6 stage. Run
-only one product test at a time. Stop at the first failed gate and retain the
-run directory; do not start the 5 kg test after a failed 3 kg test without
-reviewing the failure.
+Use `factory_cli.py stop` to finish the active delivery and stop a sequence,
+`factory_cli.py cancel` for immediate cooperative cancellation, and
+`factory_cli.py go home` only while idle with fresh safe empty-stowed proof.
+Stop at the first failed gate and preserve the run evidence. Do not rerun an
+accepted product merely for progression.
 
-The recorder command above already includes all matching product topics. For
-reference, the selected higher-mass topic groups are:
+The former standalone `gate6_mass_stage` and higher-mass aliases remain
+historical diagnostic entry points. They are not the current autonomous
+acceptance path; the Product 103/5 kg command must remain disabled.
 
-```bash
-# 3 kg:
-/amr/simulation/internal/attachment/product_102/attach
-/amr/simulation/internal/attachment/product_102/detach
-/amr/simulation/internal/attachment/product_102/state
-/model/product_b/pose
+## Factory supervisor and CLI details
 
-# 5 kg:
-# /amr/simulation/internal/attachment/product_103/attach
-# /amr/simulation/internal/attachment/product_103/detach
-# /amr/simulation/internal/attachment/product_103/state
-# /model/product_c/pose
-```
-
-The reset service is exposed by `factory_localization.launch.py`; do not use
-the optional `factory_demo.launch.py` supervisor at the same time as a manual
-product test.
-
-## Factory supervisor and CLI (optional)
-
-The demo launch adds the factory and manipulation supervisors to the factory
-graph. It does not replace the manual Gate 6 stage and does not start MoveIt:
+The canonical autonomous launch adds the factory and manipulation supervisors
+to the factory graph. MoveIt remains a separately started process:
 
 ```bash
-ros2 launch amr_factory factory_demo.launch.py \
+ros2 launch amr_factory factory_autonomous.launch.py \
   headless:=false software_rendering:=false \
   require_hardware_rendering:=true \
-  factory_attachment:=false \
-  initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
+  factory_attachment:=true control_mode:=autonomous \
+  initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
 ```
+
+`factory_demo.launch.py` is legacy/optional and is not a current acceptance
+entry point.
 
 With the factory graph running, the CLI commands are:
 
@@ -504,7 +679,7 @@ ros2 run amr_factory factory_cli.py list
 ros2 run amr_factory factory_cli.py status
 ros2 run amr_factory factory_cli.py mode manual
 ros2 run amr_factory factory_cli.py mode autonomous
-ros2 run amr_factory factory_cli.py send pickup_a dispatch --timeout 120
+ros2 run amr_factory factory_cli.py send pickup_a dispatch --timeout 240
 ```
 
 Use the CLI only for the boundaries it exposes. Its high-level transport

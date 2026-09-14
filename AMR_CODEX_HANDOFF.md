@@ -3,6 +3,74 @@
 ## Role
 You are the Lead Robotics Engineer responsible for completing this industrial AMR project. Do not teach unless asked.
 
+## Current repository state — 2026-09-14
+
+The repository is currently a laptop-only ROS 2 Humble/Gazebo Harmonic
+simulation and contains 17 ROS 2 packages. The active navigation controller is
+Nav2 Regulated Pure Pursuit (RPP); the compatibility package and topic names
+remain `amr_mpc_controller` and `/amr/mpc/cmd_vel`.
+
+Phase 14 autonomous factory-cycle runtime acceptance is complete for Product
+101 (1 kg) and Product 102 (3 kg). Product 103 (5 kg), Gate 7, physical
+hardware, and functional-safety claims are outside the accepted scope.
+
+Phase 15 packets P0 through P8, the factory mapping CLI packet, and the
+cycle-adapter source/offline packets are complete and accepted at the
+source/offline boundary. The current reviewed mapping support includes:
+
+- a named `phase15_mapping` runtime profile with inclusive median and aggregate
+  RTF floors of `0.80`; the default profile remains `0.90`;
+- direct Nav2 map saving from absolute topic `/map` with transient-local
+  subscription QoS, followed only on success by the live
+  `/amr/slam_toolbox/serialize_map` service; and
+- a required two-file pose-graph bundle, `<prefix>.posegraph` plus
+  `<prefix>.data`, with manifest, terminal-status, runtime-report,
+  quality-review, and promotion gates that remain fail closed.
+
+The original future-dated `map->odom` blocker was corrected in an isolated
+upstream SLAM Toolbox 2.6.10 overlay at
+`/tmp/amr_slam_toolbox_git.vlhnFQ/install/` by publishing the transform at the
+scan timestamp instead of adding the transform lookup timeout. That overlay is
+runtime evidence, not a durable checked-in workspace dependency.
+
+The latest no-recorder diagnostic runtime,
+`phase15_tf_diag_20260914_01`, passed host preflight, Gate 6, all staged mapping
+readiness gates, 30-second stabilization, and the `phase15_mapping` RTF gate
+(aggregate `0.9990677485`, median `1.0000051000`). Exploration then completed
+one navigation goal, discarded two later plans because the carried TF became
+stale during planning, and latched `FAULT` at ROS time `173.183316015`.
+Contemporaneous raw TF showed `map->odom` age `0.080 s` and
+`odom->base_footprint` age `0.013 s`; independent
+`tf2_echo map base_footprint` succeeded around the fault. Global TF publication
+was healthy. The remaining blocker is local to the Explorer lookup/callback
+path, with executor starvation versus a latest-sample timing race still
+unresolved. No production executor change is authorized.
+
+The Sol/high-approved test-only diagnostic in the already-untracked
+`src/amr_exploration/test/test_frontier_lifecycle.py` was interrupted before a
+reliable result. Its current additions are unverified and must not be treated
+as proof of a fix. When work resumes, Sol/high must review that test-only state
+and re-diagnose before any production edit or runtime retry.
+
+Phase 15 mapping acceptance is not complete. No passing terminal exploration
+report, candidate artifact save/validation, human quality decision, promotion,
+or canonical-map replacement is claimed. Evidence is preserved under
+`.ros_logs/phase15_tf_diag_20260914_01/factory_mapping/evidence/`; canonical
+maps remain unchanged. Product 103/5 kg, Gate 7, physical hardware, and
+functional-safety acceptance remain excluded. No simulation processes are
+currently running.
+
+The user explicitly authorized this protected handoff synchronization on
+2026-09-14. The failure/time-box/stop rules in `AGENTS.md` are binding for any
+resume: two consecutive no-progress waits or ten minutes without new evidence
+require an early blocker report and stop; an explicit user stop requires a new
+explicit user instruction before work resumes.
+
+The initial requirements below remain preserved as project intent and
+historical design authority where they are not superseded by the current
+phase status and parameter register. No physical-robot or functional-safety
+claim is implied by simulation evidence.
+
 ## Frozen Decisions
 - Jetson Orin Nano
 - 2× SICK MRS1000
@@ -11,12 +79,13 @@ You are the Lead Robotics Engineer responsible for completing this industrial AM
 - ZLTECH hub motors
 - Differential drive
 - SLAM Toolbox + EKF
-- Nav2 + MPC
+- Nav2 + current Regulated Pure Pursuit implementation (retained MPC
+  compatibility package/topic names)
 - Internal motor PID
 - Remove outdoorScan3.
 - User designs all CAD.
 
-# Robot Mechanical Concept and Simulation Requirements
+# Initial Robot Mechanical Concept and Simulation Requirements
 
 Codex must create and maintain a parameterized URDF/Xacro model for ROS 2 simulation.
 
@@ -191,7 +260,7 @@ amr_description/
 
 ---
 
-## Completion Criteria
+## Historical robot-description completion criteria
 
 The robot description phase is NOT complete until:
 
@@ -256,6 +325,7 @@ PROJECT_STATUS.md
 CHANGELOG.md
 TODO.md
 docs/
+SESSION_HANDOFF.md
 
 ## Git Workflow
 

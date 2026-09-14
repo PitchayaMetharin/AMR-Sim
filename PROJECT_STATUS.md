@@ -1,6 +1,109 @@
 # Project Status
 
-## Current Gate 6 higher-mass boundary — `_13` retained placement — 2026-09-01
+## Current Phase 15 closeout state — 2026-09-13
+
+P0-P8, the factory CLI packet, and the cycle-adapter packet are source/offline
+accepted. The combined scoped pytest rerun after the Gate 6 analyzer correction
+passed 653 tests across `src/amr_exploration/test`, `src/amr_factory/test`, and
+`src/amr_manipulation/test`; focused tests/builds and independent Sol/high
+reviews passed, and `git diff --check` passed. The factory CLI packet retains
+its 240 s default transport/enqueue timeout, 24 focused tests, `amr_factory`
+build, and Sol/high `PASS`; the cycle-adapter packet passed 47 focused tests,
+the `amr_manipulation` build, an isolated Humble probe with exit 0, and Sol/high
+`PASS`.
+
+Fresh direct runtime `phase15_commission_20260912_02` passed the approved
+Product 101 (1 kg) and Product 102 (3 kg) direct terminal/post-status and Gate 6
+analyzer proof. Product 103 and Gate 7 remain excluded.
+
+Mapping evidence is not accepted: `phase15_mapping_diag_20260913_04` stopped
+on a real RegulatedPurePursuit collision/footprint obstacle condition.
+`phase15_mapping_accept_20260913_01`, started from the documented open pose
+`(-4.5, 0, 0)`, passed host, rendering, RTF, and staged mapping graph gates,
+then failed closed in `CANCELLING`/`FAULT` because explorer readiness rejected a
+future-dated composed TF. Bag correlation shows `slam_toolbox` owns
+`map->odom`; it was continuously delivered but approximately 0.87-0.89 s
+future versus `/clock`, while `odom->base_footprint` was fresh at approximately
+0.003 s. Sol/high diagnosed the explorer fail-closed behavior as correct; no
+safe repository-side source/config/threshold/retry change is justified, and
+the upstream SLAM timestamp source needs separate resolution.
+
+Phase 15 is not accepted or complete. No passing mapping runtime report,
+candidate artifact save/validation, human map-quality decision, promotion
+eligibility, canonical-map replacement, per-edge TF ownership proof, or
+hardware/functional-safety acceptance is claimed. Canonical maps remain
+unchanged, and the protected handoff files were not touched.
+
+## Historical Phase 15 source/offline closeout — 2026-09-09 (superseded)
+
+Phase 15 Slices 1 and 2 and Packet C are complete and accepted at the
+source/offline level after the final Packet C correction, Luna/max
+implementation, and independent Sol/high review. The current Phase 14
+Product 101/102 runtime closeout remains a separate runtime boundary; this
+does not claim Phase 15 direct-host, Gazebo, hardware, or human production
+acceptance.
+
+Fresh closeout evidence:
+
+- focused Packet C pytest: 52 passed;
+- `amr_factory` colcon tests: 9/9 passed;
+- `colcon test-result`: 457 tests, 0 errors, 0 failures, 5 skipped;
+- Python compilation, `ament_flake8`, the `amr_factory` build, and
+  `git diff --check`: passed.
+
+No Phase 15 runtime/hardware execution, map-quality acceptance, promotion, or
+canonical-map replacement was performed. Live TF ownership remains fail-closed
+until the edge publisher identity is honestly observable; separate runtime
+authorization is required. Safety/ownership thresholds, artifact provenance,
+fail-closed gates, and the canonical-map boundary remain unchanged.
+
+## Historical Phase 15 frontier-feasibility checkpoint — 2026-09-10 (superseded)
+
+The latest frontier-feasibility packet is implemented in the five approved
+exploration files. Its scoped pytest run reported 124 passed; the
+`amr_exploration` build passed; its registered suites passed 3/3 with 66 tests;
+and `git diff --check` passed. `ament_flake8` still reports nine findings:
+seven E501 findings, the existing E402 finding, and E127 in
+`test_frontier_lifecycle.py`. No runtime was run after this packet, and the
+independent Sol/high review and acceptance are still pending.
+
+The packet admits frontier representatives only after checking the current
+global raw costmap, preserves cluster-local fallback selection, and skips
+fully obstructed clusters without consuming a motion token or navigation
+failure. It does not yet establish collision-free paths, autonomous
+completion, map quality, promotion eligibility, or canonical-map replacement.
+The next ordered work is the saved Phase 15 remediation plan, beginning with
+TF-owner evidence and source review/build follow-up before any separately
+authorized runtime.
+
+## Current Phase 14 autonomous runtime closeout — 2026-09-08
+
+Product 101 (1 kg) and Product 102 (3 kg) passed the approved autonomous
+factory-cycle scope. The final evidence set is:
+
+- `_11`: Product 101 normal native-attachment cycle and analyzer PASS;
+- `_13`: Product 102 normal native-attachment cycle and analyzer PASS;
+- `_14`: navigation cancellation and retained-product manipulation
+  cancellation, both fail-closed with no unauthorized home/next-job motion;
+- `_16`: graceful stop completed the active Product 101 delivery and left the
+  queued Product 102 delivery unstarted, with no fault or home motion.
+
+All mandatory host, runtime, graph, lifecycle, MoveIt, registry, bootstrap,
+status, ownership, attachment, detachment, empty-stow, and fail-closed gates
+passed for the accepted paths. Source validation is fresh: 151 focused
+pytest tests passed, the three-package Humble build passed, and colcon test
+passed 100% (1 bringup, 7 manipulation, 7 factory tests). Product 103/5 kg
+and Gate 7 remain out of scope.
+
+Compact evidence is retained under
+`.ros_logs/amr_autonomous_factory_20260908_{11,13,14,16}/evidence/`; full raw
+bags and superseded exploratory runs were pruned. The entire `.ros_logs`
+directory is 107 MB, below the 1 GB retention limit.
+
+All sections below this closeout are historical correction and failed-boundary
+records; their older status wording does not supersede this section.
+
+## Historical Gate 6 higher-mass boundary — `_13` retained placement — 2026-09-01
 
 Product 102 is the current 3 kg boundary. Phase 14 Gate 6 remains
 **FAIL / unresolved**; Product 103 and Gate 7 remain blocked. The latest
@@ -28,7 +131,7 @@ phase authority for a compliant correction preserving the camera collision
 model, exact release/slot acceptance, retained-path validity, and fail-closed
 behavior. No Luna/max packet is authorized until that choice is explicit.
 
-## Current Gate 6 higher-mass boundary — `_12` pickup frame — 2026-09-01
+## Historical Gate 6 higher-mass boundary — `_12` pickup frame — 2026-09-01
 
 Product 102 is the current 3 kg boundary. Phase 14 Gate 6 higher-mass
 validation remains **FAIL / unresolved**; Product 103 and Gate 7 remain
@@ -62,7 +165,7 @@ The next authorized action is exactly one fresh clean-host direct-host Product
 102-only runtime with refreshed current source/install hashes, stopping at the
 first failed gate. Do not start Product 103 or Gate 7.
 
-## Current Gate 6 higher-mass boundary — `_08`, 2026-09-01
+## Historical Gate 6 higher-mass boundary — `_08`, 2026-09-01
 
 Product 102 is the current 3 kg boundary. Phase 14 Gate 6 higher-mass
 validation remains **FAIL / unresolved**; Product 103 and Gate 7 remain
@@ -177,14 +280,11 @@ Next authorized action: one fresh clean-host direct-host Product 102-only
 runtime with the corrected runner and map, after stale-process and rendering
 preflight. Stop at the first failed gate; do not start Product 103 or Gate 7.
 
-## Active phase
+## Historical active-phase record
 
-Phase 14 factory mobile manipulation remains authorized gate-by-gate. Gates 1
-through 5 passed. Phase J runtime-performance acceptance and Phase K
-integrated MoveIt/Product 101 validation passed on the direct Ubuntu host. The
-independent 1 kg repeatability boundary is now also accepted after corrected
-bag analysis. Product 102 is the current 3 kg boundary; do not start Product
-103, 5 kg, or Gate 7 before it passes.
+This section records the Phase 14 gate-by-gate state before the current
+Product 101/102 autonomous closeout above. It is retained for traceability and
+does not authorize a new Product 102/103 run or supersede the current scope.
 
 ## Superseded `_13` Gate 6 boundary — retained below
 

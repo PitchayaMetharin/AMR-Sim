@@ -6,12 +6,18 @@
   <maintainer email="amr@example.invalid">AMR project</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>ament_index_cpp</depend>
   <build_depend>apriltag</build_depend>
   <build_depend>gz-msgs10</build_depend>
   <build_depend>gz-transport13</build_depend>
   <depend>amr_interfaces</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
+  <depend>nav2_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>yaml_cpp_vendor</depend>
   <exec_depend>amr_description</exec_depend>
   <exec_depend>amr_exploration</exec_depend>
   <exec_depend>amr_base_adapter</exec_depend>
@@ -31,7 +37,6 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>lifecycle_msgs</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>
-  <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
@@ -40,6 +45,7 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>controller_manager_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>kuka_agilus_support</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
@@ -51,8 +57,6 @@
   <exec_depend>ros_gz_sim</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
   <exec_depend>xacro</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>python3-yaml</test_depend>

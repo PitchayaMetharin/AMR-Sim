@@ -4,11 +4,37 @@
 
 ### Changed
 
+- Closed Phase 15 source/offline acceptance for Slices 1 and 2 and Packet C
+  after Luna/max implementation and independent Sol/high review: 52 focused
+  Packet C tests and 9/9 `amr_factory` tests passed; `colcon test-result`
+  reported 457 tests with 0 errors, 0 failures, and 5 skipped. Direct-host/
+  Gazebo/hardware and human production acceptance, plus canonical-map
+  replacement, remain unclaimed; TF ownership stays fail-closed until edge
+  publisher identity is observable.
+- Implemented the latest Phase 15 frontier-feasibility packet: the scoped
+  pytest run reported 124 passed, the `amr_exploration` build passed, its
+  registered suites passed 3/3 with 66 tests, and `git diff --check` passed.
+  Independent review and post-change runtime proof remain pending; nine
+  `ament_flake8` findings remain documented in the session handoff.
+- Completed the approved Phase 14 autonomous factory-cycle runtime acceptance
+  for Product 101 (1 kg) and Product 102 (3 kg): normal native-attachment
+  cycles passed in `_11` and `_13`, cancellation behavior passed in `_14`, and
+  graceful stop passed in `_16`. Product 103/5 kg and Gate 7 remain disabled
+  and out of scope.
+- Completed fresh source validation for the phase: 151 focused pytest tests,
+  the three-package Humble build, and 100% colcon test completion (1 bringup,
+  7 manipulation, 7 factory tests).
+- Reduced the retained `.ros_logs` evidence to the four closeout run folders
+  and the targeted graceful-stop bag; full raw and superseded exploratory bags
+  were pruned, leaving the directory below the 1 GB retention limit.
 - Removed the former simulated-permission subsystem, its interfaces, gate, and
   acceptance tools.
-- The simulation command route is Nav2 MPPI → command arbitration → base
-  adapter → Gazebo plant, protected by adapter and native plant watchdogs.
-- The workspace now contains fourteen ROS 2 packages and 101 automated tests.
+- The current simulation command route is Nav2 Regulated Pure Pursuit (RPP) →
+  command arbitration → base adapter → Gazebo plant, protected by adapter and
+  native plant watchdogs. The compatibility package/topic names remain
+  `amr_mpc_controller` and `/amr/mpc/cmd_vel`.
+- The current workspace contains 17 ROS 2 packages. Earlier fourteen-package
+  and 101-test counts are historical baseline evidence, not current inventory.
 - Recorded the direct-host Phase J runtime-performance PASS for
   `gate6_1kg_retained_20260830_01` (median RTF `1.0000144002`, aggregate RTF
   `0.9999999293`) without changing source or performance settings.

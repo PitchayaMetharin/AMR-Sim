@@ -2,6 +2,11 @@
 
 ## Approved baseline
 
+> Historical Phase 0 snapshot. This document records the initial baseline and
+> dated workstation evidence; the current controller is Nav2 Regulated Pure
+> Pursuit (RPP). The compatibility package/topic names `amr_mpc_controller` and
+> `/amr/mpc/cmd_vel` are retained for existing integrations.
+
 | Item | Baseline | Status |
 |---|---|---|
 | Operating system | Ubuntu 22.04 LTS | Confirmed |
@@ -10,7 +15,7 @@
 | Navigation | Nav2 | Confirmed |
 | State estimation | `robot_localization` EKF | Confirmed |
 | Mapping/localization | SLAM Toolbox | Confirmed |
-| Local controller | MPC | Confirmed; implementation approach TBD |
+| Local controller | MPC (initial planning label) | Historical snapshot; superseded by current Nav2 Regulated Pure Pursuit (RPP) implementation |
 | Manipulation | MoveIt 2 only if a later manipulator or motion-planning use case requires it | Installed but outside the initial mobile-base scope |
 | Simulator | Gazebo Harmonic 8.14.0 | Confirmed Phase 6 baseline; installed and server smoke-tested |
 | ROS/Gazebo integration | `ros-humble-ros-gzharmonic` 0.244.12-3jammy | Installed; `/clock` and sensor-type bridges tested |

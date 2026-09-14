@@ -1,0 +1,229 @@
+{"kind":"deck","id":"pr/zhuys3","name":"Deck"}
+{"kind":"layout","layoutId":"5f744734-f712-4573-ad55-d623e48a280b","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"32638c5b-2894-47e7-9d28-dfdb97e16a56","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/42lse5","slide":1,"title":"ROS 2 Software Architecture","textShapes":10}
+{"kind":"shape","id":"sh/14rups7a","slide":1,"bbox":[0,0,22,720]}
+{"kind":"textbox","id":"sh/e10bex8j","slide":1,"text":"ROS 2 Software Architecture","textPreview":"ROS 2 Software Architecture","textChars":27,"textLines":1,"bbox":[92,105,1020,90]}
+{"kind":"textbox","id":"sh/f29cn2p4","slide":1,"text":"Autonomous mobile manipulator software stack","textPreview":"Autonomous mobile manipulator software stack","textChars":44,"textLines":1,"bbox":[96,205,820,45]}
+{"kind":"textbox","id":"sh/o72dk7q1","slide":1,"text":"ROS 2 Humble  |  Gazebo Harmonic  |  Nav2  |  MoveIt","textPreview":"ROS 2 Humble  |  Gazebo Harmonic  |  Nav2  |  MoveIt","textChars":52,"textLines":1,"bbox":[96,270,930,40]}
+{"kind":"textbox","id":"sh/p8butc76","slide":1,"text":"Software scope only","textPreview":"Software scope only","textChars":19,"textLines":1,"bbox":[96,326,300,36]}
+{"kind":"textbox","id":"sh/250bix8v","slide":1,"text":"Sensing","textPreview":"Sensing","textChars":7,"textLines":1,"bbox":[96,505,170,58]}
+{"kind":"textbox","id":"sh/36tcr2pg","slide":1,"text":"State","textPreview":"State","textChars":5,"textLines":1,"bbox":[316,505,170,58]}
+{"kind":"textbox","id":"sh/cv2dorqx","slide":1,"text":"Planning","textPreview":"Planning","textChars":8,"textLines":1,"bbox":[536,505,170,58]}
+{"kind":"textbox","id":"sh/dwbuxc7i","slide":1,"text":"Authority","textPreview":"Authority","textChars":9,"textLines":1,"bbox":[756,505,170,58]}
+{"kind":"textbox","id":"sh/983a1kre","slide":1,"text":"Motion","textPreview":"Motion","textChars":6,"textLines":1,"bbox":[976,505,170,58]}
+{"kind":"shape","id":"sh/onu98zat","slide":1,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/nmlszu9o","slide":1,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/mlsr6ps3","slide":1,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/xc3a54rq","slide":1,"bbox":[0,0,0,0]}
+{"kind":"textbox","id":"sh/wbu9cza5","slide":1,"text":"Typed interfaces connect intent to controlled execution","textPreview":"Typed interfaces connect intent to controlled execution","textChars":55,"textLines":1,"bbox":[96,595,1060,40]}
+{"kind":"notes","id":"nt/42lse5","slide":1,"text":"Open by defining the software scope. The project uses ROS 2 as a typed distributed graph. Navigation and manipulation request work, while one gated command path decides whether base motion reaches the simulator. Hardware and mechanical design are outside this presentation.\n\nSources:\n- docs/ROS2_SOFTWARE_PRESENTATION_REPORT.md\n- src/README.md"}
+{"kind":"slide","id":"sl/0c3htd","slide":2,"title":"System structure and package ownership","textShapes":16}
+{"kind":"shape","id":"sh/oz2hk7y5","slide":2,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/3yt0b2xk","slide":2,"text":"System structure and package ownership","textPreview":"System structure and package ownership","textChars":38,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/2xkzixgz","slide":2,"text":"17 ROS 2 packages grouped by software responsibility","textPreview":"17 ROS 2 packages grouped by software responsibility","textChars":52,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/1wbi9sfu","slide":2,"text":"02","textPreview":"02","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/gv2hgny9","slide":2,"text":"Contracts + policy","textPreview":"Contracts + policy","textChars":18,"textLines":1,"bbox":[70,145,255,68]}
+{"kind":"textbox","id":"sh/fa907ixo","slide":2,"text":"amr_interfaces  |  amr_bringup","textPreview":"amr_interfaces  |  amr_bringup","textChars":30,"textLines":1,"bbox":[342,145,610,68]}
+{"kind":"textbox","id":"sh/e90zedg3","slide":2,"text":"Model + simulation boundary","textPreview":"Model + simulation boundary","textChars":27,"textLines":1,"bbox":[70,237,255,68]}
+{"kind":"textbox","id":"sh/t8ri58fi","slide":2,"text":"amr_description  |  amr_simulation","textPreview":"amr_description  |  amr_simulation","textChars":34,"textLines":1,"bbox":[342,237,610,68]}
+{"kind":"textbox","id":"sh/s7ihcnyx","slide":2,"text":"Adapters + state","textPreview":"Adapters + state","textChars":16,"textLines":1,"bbox":[70,329,255,68]}
+{"kind":"textbox","id":"sh/ix0zil8n","slide":2,"text":"amr_sensor_adapters  |  amr_base_adapter  |  amr_localization  |  amr_perception","textPreview":"amr_sensor_adapters  |  amr_base_adapter  |  amr_localization  |  amr_perception","textChars":80,"textLines":1,"bbox":[342,329,610,68]}
+{"kind":"textbox","id":"sh/jyt0bqp8","slide":2,"text":"Mapping + navigation","textPreview":"Mapping + navigation","textChars":20,"textLines":1,"bbox":[70,421,255,68]}
+{"kind":"textbox","id":"sh/4z2hkvqt","slide":2,"text":"amr_slam  |  amr_navigation  |  amr_mpc_controller  |  amr_mission","textPreview":"amr_slam  |  amr_navigation  |  amr_mpc_controller  |  amr_mission","textChars":66,"textLines":1,"bbox":[342,421,610,68]}
+{"kind":"textbox","id":"sh/50bid07e","slide":2,"text":"Authority + application","textPreview":"Authority + application","textChars":23,"textLines":1,"bbox":[70,513,255,68]}
+{"kind":"textbox","id":"sh/ut0ze18r","slide":2,"text":"amr_control  |  amr_health  |  amr_exploration  |  amr_factory  |  amr_manipulation","textPreview":"amr_control  |  amr_health  |  amr_exploration  |  amr_factory  |  amr_manipulation","textChars":83,"textLines":1,"bbox":[342,513,610,68]}
+{"kind":"textbox","id":"sh/vu9076pw","slide":2,"text":"External stacks","textPreview":"External stacks","textChars":15,"textLines":1,"bbox":[990,142,220,34]}
+{"kind":"textbox","id":"sh/wvihgbqh","slide":2,"text":"Nav2\nrobot_localization\nSLAM Toolbox + AMCL\nMoveIt\nAprilTag ROS\nros_gz_bridge","textPreview":"Nav2 | robot_localization | SLAM Toolbox + AMCL | MoveIt | AprilTag ROS | ros_gz_bridge","textChars":77,"textLines":6,"bbox":[986,188,230,280]}
+{"kind":"textbox","id":"sh/hwri9g72","slide":2,"text":"Legacy source\namr_machine_controller\nnot an active package","textPreview":"Legacy source | amr_machine_controller | not an active package","textChars":58,"textLines":3,"bbox":[982,500,238,98]}
+{"kind":"notes","id":"nt/0c3htd","slide":2,"text":"Use the layers to connect package names to responsibilities. Packages either define project code and interfaces or configure external ROS 2 components. The orphan amr_machine_controller source has no package manifest or CMake entry, so it does not belong to the active graph.\n\nSources:\n- src/README.md\n- src/amr_bringup/config/interface_ownership.yaml\n- docs/ROS2_SOFTWARE_PRESENTATION_REPORT.md sections 4, 5, and 12"}
+{"kind":"slide","id":"sl/4azhjm","slide":3,"title":"ROS 2 interfaces and communication","textShapes":24}
+{"kind":"shape","id":"sh/uh8n29kj","slide":3,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/hkz6xoja","slide":3,"text":"ROS 2 interfaces and communication","textPreview":"ROS 2 interfaces and communication","textChars":34,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/gjqp4j2p","slide":3,"text":"Names, types, QoS and ownership form the public contract","textPreview":"Names, types, QoS and ownership form the public contract","textChars":56,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/361ozy10","slide":3,"text":"03","textPreview":"03","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"shape","id":"sh/25876t0v","slide":3,"bbox":[65,152,270,215]}
+{"kind":"textbox","id":"sh/p8j61oj6","slide":3,"text":"TOPIC","textPreview":"TOPIC","textChars":5,"textLines":1,"bbox":[83,170,230,30]}
+{"kind":"textbox","id":"sh/47ap83il","slide":3,"text":"Continuous stream","textPreview":"Continuous stream","textChars":17,"textLines":1,"bbox":[83,210,230,46]}
+{"kind":"textbox","id":"sh/ra1o3y1c","slide":3,"text":"/amr/localization/\nodometry","textPreview":"/amr/localization/ | odometry","textChars":27,"textLines":2,"bbox":[83,264,230,58]}
+{"kind":"textbox","id":"sh/q9s7at0r","slide":3,"text":"nav_msgs/Odometry","textPreview":"nav_msgs/Odometry","textChars":17,"textLines":1,"bbox":[83,320,230,38]}
+{"kind":"shape","id":"sh/c7a1o365","slide":3,"bbox":[365,152,270,215]}
+{"kind":"textbox","id":"sh/d83ihonq","slide":3,"text":"SERVICE","textPreview":"SERVICE","textChars":7,"textLines":1,"bbox":[383,170,230,30]}
+{"kind":"textbox","id":"sh/q5sjmtoz","slide":3,"text":"Bounded request / response","textPreview":"Bounded request / response","textChars":26,"textLines":1,"bbox":[383,210,230,46]}
+{"kind":"textbox","id":"sh/r610fy5k","slide":3,"text":"/amr/factory/\nset_operation_mode","textPreview":"/amr/factory/ | set_operation_mode","textChars":32,"textLines":2,"bbox":[383,264,230,58]}
+{"kind":"textbox","id":"sh/0vu1s36h","slide":3,"text":"amr_interfaces/\nSetOperationMode","textPreview":"amr_interfaces/ | SetOperationMode","textChars":32,"textLines":2,"bbox":[383,320,230,38]}
+{"kind":"shape","id":"sh/1w3il8nm","slide":3,"bbox":[665,152,270,215]}
+{"kind":"textbox","id":"sh/etcjqtob","slide":3,"text":"ACTION","textPreview":"ACTION","textChars":6,"textLines":1,"bbox":[683,170,230,30]}
+{"kind":"textbox","id":"sh/zul0jy5w","slide":3,"text":"Goal + feedback + result + cancel","textPreview":"Goal + feedback + result + cancel","textChars":33,"textLines":1,"bbox":[683,210,230,46]}
+{"kind":"textbox","id":"sh/ozu1wn6d","slide":3,"text":"/amr/factory/\nrun_sequence","textPreview":"/amr/factory/ | run_sequence","textChars":26,"textLines":2,"bbox":[683,264,230,58]}
+{"kind":"textbox","id":"sh/90nipsny","slide":3,"text":"amr_interfaces/RunSequence","textPreview":"amr_interfaces/RunSequence","textChars":26,"textLines":1,"bbox":[683,320,230,38]}
+{"kind":"shape","id":"sh/xgji98f2","slide":3,"bbox":[965,152,270,215]}
+{"kind":"textbox","id":"sh/wfa1g3eh","slide":3,"text":"LIFECYCLE","textPreview":"LIFECYCLE","textChars":9,"textLines":1,"bbox":[983,170,230,30]}
+{"kind":"textbox","id":"sh/veh07ixw","slide":3,"text":"Controlled startup","textPreview":"Controlled startup","textChars":18,"textLines":1,"bbox":[983,210,230,46]}
+{"kind":"textbox","id":"sh/ad8zedgb","slide":3,"text":"configure -> inactive -> active","textPreview":"configure -> inactive -> active","textChars":31,"textLines":1,"bbox":[983,264,230,58]}
+{"kind":"textbox","id":"sh/5kjidsfe","slide":3,"text":"adapters, estimation, Nav2","textPreview":"adapters, estimation, Nav2","textChars":26,"textLines":1,"bbox":[983,320,230,38]}
+{"kind":"textbox","id":"sh/4ja1knet","slide":3,"text":"DDS discovery + compatible QoS","textPreview":"DDS discovery + compatible QoS","textChars":30,"textLines":1,"bbox":[430,392,420,34]}
+{"kind":"shape","id":"sh/ji10bix8","slide":3,"bbox":[90,438,1100,0]}
+{"kind":"textbox","id":"sh/ihsjidwn","slide":3,"text":"Project status","textPreview":"Project status","textChars":14,"textLines":1,"bbox":[72,468,210,32]}
+{"kind":"textbox","id":"sh/lozi1ofu","slide":3,"text":"BaseStatus  |  HealthStatus  |  ManipulatorStatus  |  FactoryStatus","textPreview":"BaseStatus  |  HealthStatus  |  ManipulatorStatus  |  FactoryStatus","textChars":67,"textLines":1,"bbox":[72,506,1110,36]}
+{"kind":"textbox","id":"sh/0nqh8jy9","slide":3,"text":"Standard data","textPreview":"Standard data","textChars":13,"textLines":1,"bbox":[72,558,210,32]}
+{"kind":"textbox","id":"sh/qhk7m5sv","slide":3,"text":"Twist  |  TwistStamped  |  Odometry  |  LaserScan  |  PointCloud2  |  Imu  |  OccupancyGrid  |  Path","textPreview":"Twist  |  TwistStamped  |  Odometry  |  LaserScan  |  PointCloud2  |  Imu  |  OccupancyGrid  |  Path","textChars":100,"textLines":1,"bbox":[72,596,1120,54]}
+{"kind":"notes","id":"nt/4azhjm","slide":3,"text":"Explain why the project uses each interface style. Topics carry streams, services handle short requests, and actions retain state for long-running work. DDS matches endpoint names and types, while QoS controls reliability, durability, queue depth, deadline and lifespan. Status messages also carry boot IDs, sequences and validity so consumers can reject stale evidence.\n\nSources:\n- src/amr_interfaces\n- src/amr_interfaces/include/amr_interfaces/qos_profiles.hpp\n- src/amr_bringup/config/interface_ownership.yaml"}
+{"kind":"slide","id":"sl/titx66","slide":4,"title":"Gazebo, ros_gz_bridge, RViz2 and adapters","textShapes":10}
+{"kind":"shape","id":"sh/zu98val4","slide":4,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/kv294fmp","slide":4,"text":"Gazebo, ros_gz_bridge, RViz2 and adapters","textPreview":"Gazebo, ros_gz_bridge, RViz2 and adapters","textChars":41,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/lwbqxk3a","slide":4,"text":"Simulation-specific endpoints become stable project interfaces","textPreview":"Simulation-specific endpoints become stable project interfaces","textChars":62,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/a507y54n","slide":4,"text":"04","textPreview":"04","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/bq98ral8","slide":4,"text":"GAZEBO HARMONIC\nworld + sensors + joints + odometry + base endpoint","textPreview":"GAZEBO HARMONIC | world + sensors + joints + odometry + base endpoint","textChars":67,"textLines":2,"bbox":[65,200,245,130]}
+{"kind":"textbox","id":"sh/crip0fmt","slide":4,"text":"ros_gz_bridge\nmessage conversion","textPreview":"ros_gz_bridge | message conversion","textChars":32,"textLines":2,"bbox":[360,215,200,100]}
+{"kind":"textbox","id":"sh/xsrqtk3e","slide":4,"text":"Lifecycle adapters\n/amr/sensors/*\n/amr/base/*","textPreview":"Lifecycle adapters | /amr/sensors/* | /amr/base/*","textChars":45,"textLines":3,"bbox":[620,195,210,140]}
+{"kind":"textbox","id":"sh/21g7u54r","slide":4,"text":"Consumers\nlocalization | perception\nSLAM | Nav2 | AprilTag","textPreview":"Consumers | localization | perception | SLAM | Nav2 | AprilTag","textChars":58,"textLines":3,"bbox":[900,195,300,140]}
+{"kind":"shape","id":"sh/n2p8nqlc","slide":4,"bbox":[310,265,50,0]}
+{"kind":"shape","id":"sh/vytobaxc","slide":4,"bbox":[560,265,60,0]}
+{"kind":"shape","id":"sh/uxkn25wr","slide":4,"bbox":[830,265,70,0]}
+{"kind":"textbox","id":"sh/hkb6d0fi","slide":4,"text":"RViz2\nmap | TF | RobotModel | scans | clouds | paths\nvisualization only","textPreview":"RViz2 | map | TF | RobotModel | scans | clouds | paths | visualization only","textChars":71,"textLines":3,"bbox":[835,455,365,120]}
+{"kind":"shape","id":"sh/gz254vex","slide":4,"bbox":[1017.5,335,32.5,120]}
+{"kind":"textbox","id":"sh/3mdofax8","slide":4,"text":"Product camera adapter\nexact image / CameraInfo timestamp match\n640 x 480","textPreview":"Product camera adapter | exact image / CameraInfo timestamp match | 640 x 480","textChars":73,"textLines":3,"bbox":[360,450,380,125]}
+{"kind":"textbox","id":"sh/ilkn65w3","slide":4,"text":"Factory acceptance runs headless; sensors.rviz is optional","textPreview":"Factory acceptance runs headless; sensors.rviz is optional","textChars":58,"textLines":1,"bbox":[66,624,1110,32]}
+{"kind":"notes","id":"nt/titx66","slide":4,"text":"Gazebo publishes native simulation endpoints. ros_gz_bridge converts them into ROS 2 messages. The project adapters then create stable names under /amr so downstream nodes do not depend on the simulator's native names. RViz2 subscribes to graph data for inspection and has no accepted velocity authority.\n\nSources:\n- src/amr_simulation/launch/amr_simulation.launch.py\n- src/amr_simulation/rviz/sensors.rviz\n- src/amr_sensor_adapters\n- src/amr_factory/launch/factory_localization.launch.py"}
+{"kind":"slide","id":"sl/546n22","slide":5,"title":"Localization and TF ownership","textShapes":18}
+{"kind":"shape","id":"sh/5sjixwjm","slide":5,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/i5sz2h0b","slide":5,"text":"Localization and TF ownership","textPreview":"Localization and TF ownership","textChars":29,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/j610vm1w","slide":5,"text":"Sensor fusion estimates motion; TF connects global, local and sensor frames","textPreview":"Sensor fusion estimates motion; TF connects global, local and sensor frames","textChars":75,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/w3ah0ri5","slide":5,"text":"05","textPreview":"05","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/h4jitwjq","slide":5,"text":"ESTIMATION","textPreview":"ESTIMATION","textChars":10,"textLines":1,"bbox":[70,140,220,30]}
+{"kind":"textbox","id":"sh/u18zyh0z","slide":5,"text":"wheel joint states","textPreview":"wheel joint states","textChars":18,"textLines":1,"bbox":[70,190,200,62]}
+{"kind":"textbox","id":"sh/v210rm1k","slide":5,"text":"wheel_odometry_node\n/amr/localization/\nwheel_odometry","textPreview":"wheel_odometry_node | /amr/localization/ | wheel_odometry","textChars":53,"textLines":3,"bbox":[330,170,275,102]}
+{"kind":"textbox","id":"sh/gzuhcbi9","slide":5,"text":"IMU\n/amr/sensors/imu/\ndata_raw","textPreview":"IMU | /amr/sensors/imu/ | data_raw","textChars":30,"textLines":3,"bbox":[330,300,275,92]}
+{"kind":"textbox","id":"sh/103i5gju","slide":5,"text":"robot_localization EKF\n30 Hz | two-dimensional mode","textPreview":"robot_localization EKF | 30 Hz | two-dimensional mode","textChars":51,"textLines":2,"bbox":[665,225,255,105]}
+{"kind":"textbox","id":"sh/lkrad0z6","slide":5,"text":"/amr/localization/\nodometry\nodom -> base_footprint","textPreview":"/amr/localization/ | odometry | odom -> base_footprint","textChars":50,"textLines":3,"bbox":[980,220,230,115]}
+{"kind":"shape","id":"sh/kjitkvi1","slide":5,"bbox":[270,221,60,0]}
+{"kind":"shape","id":"sh/zipsbahg","slide":5,"bbox":[605,221,60,56.5]}
+{"kind":"shape","id":"sh/yhgbi50v","slide":5,"bbox":[605,330,187.5,24]}
+{"kind":"shape","id":"sh/xg7a90za","slide":5,"bbox":[920,277.5,60,0]}
+{"kind":"textbox","id":"sh/cfytgvip","slide":5,"text":"TF TREE","textPreview":"TF TREE","textChars":7,"textLines":1,"bbox":[70,438,220,30]}
+{"kind":"textbox","id":"sh/beps7qh4","slide":5,"text":"map","textPreview":"map","textChars":3,"textLines":1,"bbox":[70,492,130,54]}
+{"kind":"textbox","id":"sh/adgbel0j","slide":5,"text":"odom","textPreview":"odom","textChars":4,"textLines":1,"bbox":[270,492,130,54]}
+{"kind":"textbox","id":"sh/hcbulkze","slide":5,"text":"base_footprint","textPreview":"base_footprint","textChars":14,"textLines":1,"bbox":[470,492,190,54]}
+{"kind":"textbox","id":"sh/wb2tsfit","slide":5,"text":"base_link","textPreview":"base_link","textChars":9,"textLines":1,"bbox":[730,492,150,54]}
+{"kind":"textbox","id":"sh/gfado3q5","slide":5,"text":"lidars | IMU | camera | arm","textPreview":"lidars | IMU | camera | arm","textChars":27,"textLines":1,"bbox":[950,492,260,54]}
+{"kind":"shape","id":"sh/hgjeh87q","slide":5,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/ut8vmt8z","slide":5,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/fuhcfypk","slide":5,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/srqdkjq9","slide":5,"bbox":[0,0,0,0]}
+{"kind":"textbox","id":"sh/tszudo7e","slide":5,"text":"SLAM Toolbox (mapping)\nor AMCL (factory)","textPreview":"SLAM Toolbox (mapping) | or AMCL (factory)","textChars":40,"textLines":2,"bbox":[95,560,280,62]}
+{"kind":"textbox","id":"sh/6p8vi983","slide":5,"text":"EKF","textPreview":"EKF","textChars":3,"textLines":1,"bbox":[505,560,120,32]}
+{"kind":"textbox","id":"sh/7qhcbepo","slide":5,"text":"robot_state_publisher (static tree)","textPreview":"robot_state_publisher (static tree)","textChars":35,"textLines":1,"bbox":[740,560,440,32]}
+{"kind":"notes","id":"nt/546n22","slide":5,"text":"Wheel odometry integrates named wheel joint positions, while the EKF fuses wheel velocity and IMU information. The EKF is the only owner of odom to base_footprint. Mapping mode uses SLAM Toolbox for map to odom; factory localization uses AMCL. robot_state_publisher creates the fixed body and sensor tree from URDF.\n\nSources:\n- src/amr_localization/src/wheel_odometry_node.cpp\n- src/amr_localization/config/ekf.yaml\n- src/amr_description/urdf/amr.urdf.xacro\n- src/amr_bringup/config/interface_ownership.yaml"}
+{"kind":"slide","id":"sl/s9d2ec","slide":6,"title":"Nav2 navigation pipeline","textShapes":20}
+{"kind":"shape","id":"sh/8ji1wzml","slide":6,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/7i903ul0","slide":6,"text":"Nav2 navigation pipeline","textPreview":"Nav2 navigation pipeline","textChars":24,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/mh0ju94f","slide":6,"text":"Mission intent becomes a bounded controller request","textPreview":"Mission intent becomes a bounded controller request","textChars":51,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/lgri143u","slide":6,"text":"06","textPreview":"06","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/kfi1szm9","slide":6,"text":"Mission supervisor\nvalidates planar goal","textPreview":"Mission supervisor | validates planar goal","textChars":40,"textLines":2,"bbox":[55,235,210,105]}
+{"kind":"textbox","id":"sh/zup0zul4","slide":6,"text":"NavFn planner\nglobal path","textPreview":"NavFn planner | global path","textChars":25,"textLines":2,"bbox":[295,235,210,105]}
+{"kind":"textbox","id":"sh/ytgjqp4j","slide":6,"text":"Simple Smoother\nrefined path","textPreview":"Simple Smoother | refined path","textChars":28,"textLines":2,"bbox":[535,235,210,105]}
+{"kind":"textbox","id":"sh/5cb2do3e","slide":6,"text":"RPP controller\npath following","textPreview":"RPP controller | path following","textChars":29,"textLines":2,"bbox":[775,235,210,105]}
+{"kind":"textbox","id":"sh/4b214j2t","slide":6,"text":"/amr/mpc/\ncmd_vel\ngeometry_msgs/Twist","textPreview":"/amr/mpc/ | cmd_vel | geometry_msgs/Twist","textChars":37,"textLines":3,"bbox":[1015,235,210,105]}
+{"kind":"shape","id":"sh/ahcf6ps7","slide":6,"bbox":[265,287.5,30,0]}
+{"kind":"shape","id":"sh/vilgzuts","slide":6,"bbox":[505,287.5,30,0]}
+{"kind":"shape","id":"sh/wjuh8fad","slide":6,"bbox":[745,287.5,30,0]}
+{"kind":"shape","id":"sh/xk3y1kby","slide":6,"bbox":[985,287.5,30,0]}
+{"kind":"textbox","id":"sh/mtsf25sb","slide":6,"text":"Map + global costmap","textPreview":"Map + global costmap","textChars":20,"textLines":1,"bbox":[280,145,245,58]}
+{"kind":"textbox","id":"sh/nu1gvatw","slide":6,"text":"front + rear PointCloud2","textPreview":"front + rear PointCloud2","textChars":24,"textLines":1,"bbox":[755,145,250,58]}
+{"kind":"shape","id":"sh/8vux4fah","slide":6,"bbox":[0,0,0,0]}
+{"kind":"shape","id":"sh/9g3yxkbm","slide":6,"bbox":[0,0,0,0]}
+{"kind":"textbox","id":"sh/6pwze9sf","slide":6,"text":"Current controller profile","textPreview":"Current controller profile","textChars":26,"textLines":1,"bbox":[72,430,340,34]}
+{"kind":"textbox","id":"sh/7q5g7et0","slide":6,"text":"0.5 m/s","textPreview":"0.5 m/s","textChars":7,"textLines":1,"bbox":[72,490,250,48]}
+{"kind":"textbox","id":"sh/3uxcz69c","slide":6,"text":"desired speed","textPreview":"desired speed","textChars":13,"textLines":1,"bbox":[72,540,250,34]}
+{"kind":"textbox","id":"sh/2tovq18r","slide":6,"text":"0.3–0.9 m","textPreview":"0.3–0.9 m","textChars":9,"textLines":1,"bbox":[362,490,250,48]}
+{"kind":"textbox","id":"sh/pwze1wri","slide":6,"text":"lookahead range","textPreview":"lookahead range","textChars":15,"textLines":1,"bbox":[362,540,250,34]}
+{"kind":"textbox","id":"sh/4vqdsrqx","slide":6,"text":"1.5 s","textPreview":"1.5 s","textChars":5,"textLines":1,"bbox":[652,490,250,48]}
+{"kind":"textbox","id":"sh/byhw369o","slide":6,"text":"lookahead time","textPreview":"lookahead time","textChars":14,"textLines":1,"bbox":[652,540,250,34]}
+{"kind":"textbox","id":"sh/qx8vu183","slide":6,"text":"1.2 x 0.8 m","textPreview":"1.2 x 0.8 m","textChars":11,"textLines":1,"bbox":[942,490,250,48]}
+{"kind":"textbox","id":"sh/d0ze5gre","slide":6,"text":"software footprint","textPreview":"software footprint","textChars":18,"textLines":1,"bbox":[942,540,250,34]}
+{"kind":"textbox","id":"sh/czqdwbq9","slide":6,"text":"amr_mpc_controller is compatibility naming; the active algorithm is Regulated Pure Pursuit","textPreview":"amr_mpc_controller is compatibility naming; the active algorithm is Regulated Pure Pursuit","textChars":90,"textLines":1,"bbox":[72,620,1110,34]}
+{"kind":"notes","id":"nt/s9d2ec","slide":6,"text":"The mission supervisor exposes the project navigation actions and coordinates Nav2 clients. NavFn computes the path, Simple Smoother refines it, and RPP produces the upstream Twist request. Costmaps combine the map, robot footprint and front/rear perception data. This is a request path, not the final authority path.\n\nSources:\n- src/amr_mission/src/mission_supervisor_node.cpp\n- src/amr_navigation/config/planner.yaml\n- src/amr_mpc_controller/config/controller.yaml"}
+{"kind":"slide","id":"sl/8zbwx6","slide":7,"title":"MoveIt and factory orchestration","textShapes":14}
+{"kind":"shape","id":"sh/3up8jyp8","slide":7,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/4vyps36t","slide":7,"text":"MoveIt and factory orchestration","textPreview":"MoveIt and factory orchestration","textChars":32,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/5w7qlo7y","slide":7,"text":"Factory actions compose navigation and manipulation into a product cycle","textPreview":"Factory actions compose navigation and manipulation into a product cycle","textChars":72,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/qxg7utoj","slide":7,"text":"07","textPreview":"07","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/ry98nyp4","slide":7,"text":"Operator / CLI","textPreview":"Operator / CLI","textChars":14,"textLines":1,"bbox":[55,215,175,86]}
+{"kind":"textbox","id":"sh/szipw36p","slide":7,"text":"Factory supervisor\nregistry + queue + status","textPreview":"Factory supervisor | registry + queue + status","textChars":44,"textLines":2,"bbox":[280,200,225,116]}
+{"kind":"textbox","id":"sh/d0rqp87a","slide":7,"text":"Mission + Nav2\nstation navigation","textPreview":"Mission + Nav2 | station navigation","textChars":33,"textLines":2,"bbox":[555,200,200,116]}
+{"kind":"textbox","id":"sh/61w7i9of","slide":7,"text":"Cycle supervisor\nExecuteProductCycle","textPreview":"Cycle supervisor | ExecuteProductCycle","textChars":36,"textLines":2,"bbox":[805,200,210,116]}
+{"kind":"textbox","id":"sh/725obep0","slide":7,"text":"MoveIt move_group\narm planning + execution","textPreview":"MoveIt move_group | arm planning + execution","textChars":42,"textLines":2,"bbox":[1065,200,170,116]}
+{"kind":"shape","id":"sh/vqhcbe18","slide":7,"bbox":[230,258,50,0]}
+{"kind":"shape","id":"sh/a58b29kn","slide":7,"bbox":[505,258,50,0]}
+{"kind":"shape","id":"sh/xszud4je","slide":7,"bbox":[392.5,316,517.5,24]}
+{"kind":"shape","id":"sh/wrqt4z2t","slide":7,"bbox":[1015,258,50,0]}
+{"kind":"textbox","id":"sh/n2xs7ulc","slide":7,"text":"Public factory interfaces","textPreview":"Public factory interfaces","textChars":25,"textLines":1,"bbox":[70,386,410,38]}
+{"kind":"textbox","id":"sh/m1obypkr","slide":7,"text":"TransportProduct  |  RunSequence  |  NavigateStation  |  SetOperationMode  |  stop / cancel","textPreview":"TransportProduct  |  RunSequence  |  NavigateStation  |  SetOperationMode  |  stop / cancel","textChars":91,"textLines":1,"bbox":[70,430,1120,38]}
+{"kind":"textbox","id":"sh/94fa94ji","slide":7,"text":"Evidence gates","textPreview":"Evidence gates","textChars":14,"textLines":1,"bbox":[70,500,270,38]}
+{"kind":"textbox","id":"sh/836t0z2x","slide":7,"text":"tag identity + five stable observations + contact freshness + pose tolerance + attachment state","textPreview":"tag identity + five stable observations + contact freshness + pose tolerance + attachment state","textChars":95,"textLines":1,"bbox":[70,542,1120,38]}
+{"kind":"textbox","id":"sh/zyxs3al0","slide":7,"text":"Autonomous scope\nProduct 101 + Product 102","textPreview":"Autonomous scope | Product 101 + Product 102","textChars":42,"textLines":2,"bbox":[70,610,360,70]}
+{"kind":"textbox","id":"sh/yxobupkf","slide":7,"text":"Product 103 remains disabled","textPreview":"Product 103 remains disabled","textChars":28,"textLines":1,"bbox":[850,610,365,70]}
+{"kind":"notes","id":"nt/8zbwx6","slide":7,"text":"The factory supervisor loads the product and station registries, validates them and owns the high-level action results. Navigation reaches stations through the mission boundary. The cycle supervisor coordinates the manipulation stage, and MoveIt plans arm trajectories. Evidence gates prevent a cycle from accepting inconsistent tag, contact, pose or attachment data.\n\nSources:\n- src/amr_factory/src/factory_supervisor_node.cpp\n- src/amr_factory/config/products.yaml\n- src/amr_factory/config/stations.yaml\n- src/amr_manipulation/scripts/cycle_manipulation_supervisor.py\n- src/amr_manipulation/launch/move_group.launch.py"}
+{"kind":"slide","id":"sl/wmub9b","slide":8,"title":"Command authority and fail-closed motion","textShapes":20}
+{"kind":"shape","id":"sh/q1wry50n","slide":8,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/dona9kjy","slide":8,"text":"Command authority and fail-closed motion","textPreview":"Command authority and fail-closed motion","textChars":40,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/c3e90fit","slide":8,"text":"Every layer must prove that a velocity request remains admissible","textPreview":"Every layer must prove that a velocity request remains admissible","textChars":65,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/zqpsba14","slide":8,"text":"08","textPreview":"08","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/epgr250j","slide":8,"text":"Nav2 request\nTwist","textPreview":"Nav2 request | Twist","textChars":18,"textLines":2,"bbox":[45,235,155,92]}
+{"kind":"textbox","id":"sh/1s7adkja","slide":8,"text":"COMMAND ARBITRATION\nfreshness | planar validity\nmanipulator permission\nbase readiness | limits","textPreview":"COMMAND ARBITRATION | freshness | planar validity | manipulator permission | base readiness | limits","textChars":94,"textLines":4,"bbox":[230,190,290,180]}
+{"kind":"textbox","id":"sh/0ryt4fip","slide":8,"text":"/amr/control/\ncmd_vel\nTwistStamped","textPreview":"/amr/control/ | cmd_vel | TwistStamped","textChars":34,"textLines":3,"bbox":[550,230,220,102]}
+{"kind":"textbox","id":"sh/nupsfuhg","slide":8,"text":"Base adapter\nrevalidate + zero stale","textPreview":"Base adapter | revalidate + zero stale","textChars":36,"textLines":2,"bbox":[800,225,210,112]}
+{"kind":"textbox","id":"sh/mtgb6p0v","slide":8,"text":"Bridge + Gazebo\nwatchdog expiry","textPreview":"Bridge + Gazebo | watchdog expiry","textChars":31,"textLines":2,"bbox":[1040,225,190,112]}
+{"kind":"shape","id":"sh/sryhcj2t","slide":8,"bbox":[200,280,30,1]}
+{"kind":"shape","id":"sh/ts7ylo3e","slide":8,"bbox":[520,280,30,1]}
+{"kind":"shape","id":"sh/6pgza9kn","slide":8,"bbox":[770,281,30,0]}
+{"kind":"shape","id":"sh/7qpgjel8","slide":8,"bbox":[1010,281,30,0]}
+{"kind":"textbox","id":"sh/gvihg325","slide":8,"text":"Sole project-owned velocity publisher","textPreview":"Sole project-owned velocity publisher","textChars":37,"textLines":1,"bbox":[245,390,275,34]}
+{"kind":"textbox","id":"sh/hwryp83a","slide":8,"text":"20 Hz","textPreview":"20 Hz","textChars":5,"textLines":1,"bbox":[55,495,215,48]}
+{"kind":"textbox","id":"sh/utgzetkz","slide":8,"text":"arbitration output","textPreview":"arbitration output","textChars":18,"textLines":1,"bbox":[55,545,215,42]}
+{"kind":"textbox","id":"sh/fu9gnylk","slide":8,"text":"200 ms","textPreview":"200 ms","textChars":6,"textLines":1,"bbox":[295,495,215,48]}
+{"kind":"textbox","id":"sh/4jihk321","slide":8,"text":"command timeout + lifespan","textPreview":"command timeout + lifespan","textChars":26,"textLines":1,"bbox":[295,545,215,42]}
+{"kind":"textbox","id":"sh/pkryt83m","slide":8,"text":"0.5 m/s","textPreview":"0.5 m/s","textChars":7,"textLines":1,"bbox":[535,495,215,48]}
+{"kind":"textbox","id":"sh/dgnyd8vq","slide":8,"text":"linear limit","textPreview":"linear limit","textChars":12,"textLines":1,"bbox":[535,545,215,42]}
+{"kind":"textbox","id":"sh/cfeh43u5","slide":8,"text":"0.4 rad/s","textPreview":"0.4 rad/s","textChars":9,"textLines":1,"bbox":[775,495,215,48]}
+{"kind":"textbox","id":"sh/be5gbydk","slide":8,"text":"angular limit","textPreview":"angular limit","textChars":13,"textLines":1,"bbox":[775,545,215,42]}
+{"kind":"textbox","id":"sh/qdwz2tcz","slide":8,"text":"0.025 m/s","textPreview":"0.025 m/s","textChars":9,"textLines":1,"bbox":[1015,495,215,48]}
+{"kind":"textbox","id":"sh/l47yh8vm","slide":8,"text":"nominal change per tick","textPreview":"nominal change per tick","textChars":23,"textLines":1,"bbox":[1015,545,215,42]}
+{"kind":"textbox","id":"sh/03yh8nuh","slide":8,"text":"Missing, stale, invalid or contradictory evidence stops or rejects motion","textPreview":"Missing, stale, invalid or contradictory evidence stops or rejects motion","textChars":73,"textLines":1,"bbox":[125,620,1030,58]}
+{"kind":"notes","id":"nt/wmub9b","slide":8,"text":"Separate planning from authority. Nav2 publishes an upstream request. The arbitration node checks freshness, semantics, interlocks and rate limits, then publishes the only project-owned accepted base velocity. The base adapter performs another finite and planar check. The Gazebo watchdog provides independent native command expiry. Health status only reports observations and cannot enable motion.\n\nSources:\n- src/amr_control/src/command_arbitration_node.cpp\n- src/amr_base_adapter/src/base_adapter_node.cpp\n- src/amr_simulation/src/command_watchdog_system.cpp\n- src/amr_interfaces/include/amr_interfaces/qos_profiles.hpp"}
+{"kind":"slide","id":"sl/zu9mpk","slide":9,"title":"Theory and project calculations","textShapes":18}
+{"kind":"shape","id":"sh/g3e1sfah","slide":9,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/f2lkjatw","slide":9,"text":"Theory and project calculations","textPreview":"Theory and project calculations","textChars":31,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/u1cjq5sb","slide":9,"text":"Current software parameters explain odometry, timing and navigation geometry","textPreview":"Current software parameters explain odometry, timing and navigation geometry","textChars":76,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/t032h0bq","slide":9,"text":"09","textPreview":"09","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/szu1oval","slide":9,"text":"DIFFERENTIAL DRIVE","textPreview":"DIFFERENTIAL DRIVE","textChars":18,"textLines":1,"bbox":[70,145,530,58]}
+{"kind":"textbox","id":"sh/7ylkfqt0","slide":9,"text":"v = r/2 (omega_L + omega_R)\nomega = r/L (omega_R - omega_L)","textPreview":"v = r/2 (omega_L + omega_R) | omega = r/L (omega_R - omega_L)","textChars":59,"textLines":2,"bbox":[92,235,490,98]}
+{"kind":"textbox","id":"sh/6xcjmlsf","slide":9,"text":"r = 0.1128 m     L = 0.566 m","textPreview":"r = 0.1128 m     L = 0.566 m","textChars":28,"textLines":1,"bbox":[115,340,445,40]}
+{"kind":"textbox","id":"sh/5w32dgbu","slide":9,"text":"Equal +1 rad wheel motion\nDelta s = 0.1128 m\nDelta theta = 0","textPreview":"Equal +1 rad wheel motion | Delta s = 0.1128 m | Delta theta = 0","textChars":60,"textLines":3,"bbox":[85,425,230,120]}
+{"kind":"textbox","id":"sh/kva1kva9","slide":9,"text":"Opposite +/-1 rad motion\nDelta s = 0\nDelta theta = 0.3986 rad","textPreview":"Opposite +/-1 rad motion | Delta s = 0 | Delta theta = 0.3986 rad","textChars":61,"textLines":3,"bbox":[350,425,230,120]}
+{"kind":"textbox","id":"sh/2hkn2po7","slide":9,"text":"Source: diff_drive.hpp","textPreview":"Source: diff_drive.hpp","textChars":22,"textLines":1,"bbox":[120,580,430,30]}
+{"kind":"textbox","id":"sh/3it4vu5s","slide":9,"text":"NAVIGATION GEOMETRY","textPreview":"NAVIGATION GEOMETRY","textChars":19,"textLines":1,"bbox":[675,145,490,40]}
+{"kind":"textbox","id":"sh/4j254z6d","slide":9,"text":"100 x 100 cells","textPreview":"100 x 100 cells","textChars":15,"textLines":1,"bbox":[675,215,210,76]}
+{"kind":"textbox","id":"sh/pkvmx4ny","slide":9,"text":"5 m local costmap / 0.05 m resolution","textPreview":"5 m local costmap / 0.05 m resolution","textChars":37,"textLines":1,"bbox":[900,225,305,55]}
+{"kind":"textbox","id":"sh/utk3ypob","slide":9,"text":"11 cells","textPreview":"11 cells","textChars":8,"textLines":1,"bbox":[675,325,210,76]}
+{"kind":"textbox","id":"sh/fut4rupw","slide":9,"text":"0.55 m inflation / 0.05 m resolution","textPreview":"0.55 m inflation / 0.05 m resolution","textChars":36,"textLines":1,"bbox":[900,335,305,55]}
+{"kind":"textbox","id":"sh/gv2l0z6h","slide":9,"text":"0.75 m","textPreview":"0.75 m","textChars":6,"textLines":1,"bbox":[675,435,210,76]}
+{"kind":"textbox","id":"sh/hgbmtkn2","slide":9,"text":"RPP: 0.5 m/s x 1.5 s lookahead time","textPreview":"RPP: 0.5 m/s x 1.5 s lookahead time","textChars":35,"textLines":1,"bbox":[900,445,305,55]}
+{"kind":"textbox","id":"sh/6p03u5oz","slide":9,"text":"0.025 m/s per tick","textPreview":"0.025 m/s per tick","textChars":18,"textLines":1,"bbox":[675,545,210,76]}
+{"kind":"textbox","id":"sh/7q94napk","slide":9,"text":"0.5 m/s² acceleration x 0.05 s at 20 Hz","textPreview":"0.5 m/s² acceleration x 0.05 s at 20 Hz","textChars":39,"textLines":1,"bbox":[900,555,305,55]}
+{"kind":"notes","id":"nt/zu9mpk","slide":9,"text":"Connect each equation to a software component. Differential-drive midpoint integration produces wheel odometry. Costmap resolution determines memory geometry and inflation width. RPP scales lookahead with speed. The arbitration timer and acceleration limit determine the nominal per-tick command change. These are explanatory calculations from current parameters, not new thresholds.\n\nSources:\n- src/amr_localization/include/amr_localization/diff_drive.hpp\n- src/amr_navigation/config/planner.yaml\n- src/amr_mpc_controller/config/controller.yaml\n- src/amr_control/src/command_arbitration_node.cpp"}
+{"kind":"slide","id":"sl/2gvqt7","slide":10,"title":"Current software state","textShapes":9}
+{"kind":"shape","id":"sh/jqd8rupk","slide":10,"bbox":[0,0,1280,12]}
+{"kind":"textbox","id":"sh/kbm90zq5","slide":10,"text":"Current software state","textPreview":"Current software state","textChars":22,"textLines":1,"bbox":[64,34,1060,62]}
+{"kind":"textbox","id":"sh/lcvqt47a","slide":10,"text":"Implemented source and remaining runtime evidence are separate claims","textPreview":"Implemented source and remaining runtime evidence are separate claims","textChars":69,"textLines":1,"bbox":[66,92,1060,34]}
+{"kind":"textbox","id":"sh/6d4r298v","slide":10,"text":"10","textPreview":"10","textChars":2,"textLines":1,"bbox":[1170,42,50,30]}
+{"kind":"textbox","id":"sh/7ed8vupg","slide":10,"text":"IMPLEMENTED IN SOURCE","textPreview":"IMPLEMENTED IN SOURCE","textChars":21,"textLines":1,"bbox":[80,145,480,38]}
+{"kind":"textbox","id":"sh/8fm94zq1","slide":10,"text":"PENDING EVIDENCE","textPreview":"PENDING EVIDENCE","textChars":16,"textLines":1,"bbox":[710,145,460,38]}
+{"kind":"shape","id":"sh/tgvqx47m","slide":10,"bbox":[70,195,535,335]}
+{"kind":"textbox","id":"sh/mh07q58r","slide":10,"text":"Typed public interfaces and ownership registry\nAdapters, localization, perception and TF model\nNav2 RPP pipeline and command arbitration\nFactory cycles for Product 101 and 102\nFail-closed freshness and interlock gates","textPreview":"Typed public interfaces and ownership registry | Adapters, localization, perception and TF model | Nav2 RPP pipeline and command arbitrat...","textChars":217,"textLines":5,"bbox":[92,220,490,280]}
+{"kind":"shape","id":"sh/ni98ja9c","slide":10,"bbox":[685,195,525,335]}
+{"kind":"textbox","id":"sh/buhs7i1k","slide":10,"text":"Fresh Phase 15 mapping runtime proof\nLive per-edge TF ownership and freshness proof\nQuantitative map-quality acceptance\nCandidate-map promotion and canonical replacement\nHardware and functional-safety acceptance","textPreview":"Fresh Phase 15 mapping runtime proof | Live per-edge TF ownership and freshness proof | Quantitative map-quality acceptance | Candidate-m...","textChars":211,"textLines":5,"bbox":[710,220,475,280]}
+{"kind":"textbox","id":"sh/qt8byd0z","slide":10,"text":"Contract gap: /amr/mission/navigate_to_pose_retreat exists in source but is absent from the ownership registry","textPreview":"Contract gap: /amr/mission/navigate_to_pose_retreat exists in source but is absent from the ownership registry","textChars":110,"textLines":1,"bbox":[135,552,1010,58]}
+{"kind":"textbox","id":"sh/dwja9sjq","slide":10,"text":"Typed interfaces + explicit ownership + gated motion","textPreview":"Typed interfaces + explicit ownership + gated motion","textChars":52,"textLines":1,"bbox":[190,625,900,46]}
+{"kind":"notes","id":"nt/2gvqt7","slide":10,"text":"Close by distinguishing implementation from runtime proof. The source tree contains the architecture and current Product 101/102 factory scope. Phase 15 still needs a fresh runtime mapping run, per-edge TF evidence, map-quality acceptance and explicit promotion. The ownership registry also needs the source-defined retreat action. Do not claim hardware or functional-safety acceptance.\n\nSources:\n- SESSION_HANDOFF.md\n- docs/PHASE_15_FACTORY_SLAM_COMMISSIONING.md\n- src/amr_bringup/config/interface_ownership.yaml\n- src/amr_mission/src/mission_supervisor_node.cpp"}

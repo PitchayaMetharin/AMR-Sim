@@ -1,6 +1,10 @@
 # Beginner’s guide to this AMR ROS 2 project
 
-This repository is a laptop-only simulation of an autonomous mobile robot (AMR). It uses ROS 2 Humble, C++17, Gazebo Harmonic, Nav2, robot_localization, and SLAM Toolbox. It is not a physical robot controller, fieldbus integration, or functional-safety system.
+This repository is a laptop-only simulation of an autonomous mobile robot (AMR). It uses ROS 2 Humble, C++17, Gazebo Harmonic, Nav2, robot_localization, and SLAM Toolbox. The current navigation controller is Nav2 Regulated Pure Pursuit (RPP); the compatibility package/topic names remain `amr_mpc_controller` and `/amr/mpc/cmd_vel`. It is not a physical robot controller, fieldbus integration, or functional-safety system.
+
+The current accepted factory scope is Product 101 (1 kg) and Product 102 (3 kg)
+through the autonomous factory-cycle entry point. Product 103 (5 kg), Gate 7,
+hardware, and functional-safety acceptance are outside scope.
 
 Its central rule is **fail closed**: a component can request movement, but several later components must independently accept it before the simulated plant moves. Missing, stale, malformed, or inconsistent data becomes zero velocity.
 
@@ -207,6 +211,34 @@ It observes base status and emits /amr/health/status at 10 Hz. It validates fres
 
 Fresh, valid, ready base evidence makes HEALTHY. Missing/stale, invalid, backward-time, or not-ready evidence gives DEGRADED; a fresh base fault gives FAULT. It cannot command motion, change lifecycle state, or recover automatically.
 
+### amr_exploration — bounded frontier exploration
+
+**Node:** `frontier_explorer.py`
+
+This Phase 15 node selects frontier goals from `/map` and sends them through
+the existing `/amr/mission/navigate_to_pose` action. It never publishes base
+velocity. It requires fresh map, costmap, TF, and command-authority evidence;
+fully obstructed clusters are skipped without consuming a motion token. A
+fault, confirmed cancellation, or unsafe evidence stops the run fail-closed.
+The current frontier packet has source/offline evidence only; no post-packet
+runtime acceptance is claimed.
+
+### amr_manipulation — cycle and Gate 6 manipulation
+
+The cycle adapter owns the canonical manipulation status and the
+`/amr/manipulation/execute_product_cycle` action. It coordinates the registered
+product preparation, navigation handoff, MoveIt/gripper work, attachment and
+detachment proof, and empty-stow proof. Missing or stale proof blocks base
+motion and preserves a held-product fault rather than attempting recovery.
+
+### amr_factory — factory orchestration and mapping tools
+
+The factory supervisor owns station-selectable transport and sequence actions,
+the stop/cancel/home/status boundaries, and registry-derived Product 101/102
+mapping. `factory_autonomous.launch.py` is the canonical autonomous launch;
+`factory_demo.launch.py` is legacy/optional. The mapping CLI and acceptance
+tools write only run-specific artifacts and never replace the canonical map.
+
 ## Recommended beginner reading order
 
 1. src/amr_interfaces/msg/ — data contracts and named state/reason values.
@@ -240,13 +272,15 @@ export GZ_VERSION=harmonic
 colcon build --packages-select \
   amr_interfaces amr_description amr_simulation amr_localization \
   amr_perception amr_slam amr_navigation amr_mpc_controller amr_control \
-  amr_mission amr_health amr_base_adapter amr_sensor_adapters amr_factory \
+  amr_mission amr_health amr_exploration amr_base_adapter \
+  amr_sensor_adapters amr_factory \
   amr_manipulation amr_bringup \
   --symlink-install
 source install/setup.bash
 source install/amr_bringup/share/amr_bringup/env/amr_ros_env.sh
 colcon test --packages-select \
-  amr_description amr_mpc_controller amr_mission amr_manipulation amr_factory
+  amr_description amr_mpc_controller amr_mission amr_exploration \
+  amr_manipulation amr_factory
 colcon test-result --verbose
 ```
 
@@ -280,26 +314,27 @@ ros2 run amr_control prototype_teleop.py
 
 Use `W`, `S`, `A`, and `D` to move, `X` or Space to stop, and `Q` to quit.
 
-### 3. Factory and Gate 6 product run
+### 3. Approved autonomous factory cycle
 
-The factory launch starts the Harmonic factory world, AMCL, localization,
-perception, Nav2 planning and collision-checked smoothing, RPP, command
-arbitration, and the mission supervisor. It does not start MoveIt. Start
-terminal 1 with the same setup pattern, using a fresh run identity and an
-initial pose near pickup station A:
+The canonical autonomous launch starts the Harmonic factory world, AMCL,
+localization, perception, Nav2 planning and collision-checked smoothing, RPP,
+command arbitration, the mission supervisor, the cycle adapter, and the
+factory supervisor. MoveIt remains a separately started process. Start
+terminal 1 with a fresh run identity and explicit native-attachment mode:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 source install/amr_bringup/share/amr_bringup/env/amr_ros_env.sh
 export GZ_VERSION=harmonic
-export RUN_ID=gate6_product101_01
+export RUN_ID=amr_autonomous_factory_01
 export GZ_PARTITION=amr_$RUN_ID
 export ROS_DOMAIN_ID=125
 export ROS_LOG_DIR="$PWD/.ros_logs/$RUN_ID"
 mkdir -p "$ROS_LOG_DIR"
-ros2 launch amr_factory factory_localization.launch.py \
-  headless:=true initial_x:=2.4 initial_y:=3.0 initial_yaw:=0.0
+ros2 launch amr_factory factory_autonomous.launch.py \
+  headless:=true control_mode:=autonomous factory_attachment:=true \
+  require_hardware_rendering:=true initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
 ```
 
 Wait for the lifecycle managers to report active planner, smoother, and
@@ -311,16 +346,33 @@ In terminal 2, repeat the same setup and start the project-owned MoveIt server:
 ros2 launch amr_manipulation move_group.launch.py
 ```
 
-The accepted 1 kg Gate 6 path is the existing `product_id:=101` mass-stage
-launch. The independent 3 kg and 5 kg tests use aliases that reset only the
-selected product to its registered pickup station, preserve the AMR's current
-pose, navigate to the selected pickup dock, and then start the same mass-stage
-implementation. They refuse to reset if the arm is attached, deployed,
-moving, faulted, or not at empty stow.
+Product 101 and Product 102 are the only accepted autonomous products. Use the
+registry-backed CLI after MoveIt and readiness checks pass:
 
-For a product-101 evidence run, terminal 3 can record the required clock, TF,
-localization, ground truth, plans, action feedback/status, odometry, contacts,
-joint states, and all three velocity-command paths:
+```bash
+ros2 run amr_factory factory_cli.py list
+ros2 run amr_factory factory_cli.py mode autonomous
+ros2 run amr_factory factory_cli.py send pickup_a dispatch --timeout 240
+ros2 run amr_factory factory_cli.py send pickup_b dispatch --timeout 240
+ros2 run amr_factory factory_cli.py loop pickup_a pickup_b --cycles 1 --finish stay
+ros2 run amr_factory factory_cli.py status
+```
+
+Use `factory_cli.py stop` for graceful stop, `cancel` for immediate
+cooperative cancellation, and `go home` only from an idle safe empty-stowed
+state. Product 103/5 kg must remain disabled and must not be started.
+
+For a current autonomous evidence run, use the bounded recorder and gate
+commands in `SIMULATION_COMMANDS.md`; do not reuse the historical 1/3/5 kg
+mass-stage procedure from older records.
+
+The legacy/manual Gate 6 mass-stage launch remains a historical diagnostic
+entry point, not the current autonomous acceptance path. It is not required for
+Product 101/102 factory-cycle acceptance.
+
+For a legacy product-101 evidence run only, terminal 3 can record the required
+clock, TF, localization, ground truth, plans, action feedback/status, odometry,
+contacts, joint states, and all three velocity-command paths:
 
 ```bash
 ros2 bag record --include-hidden-topics \
@@ -342,30 +394,6 @@ ros2 bag record --include-hidden-topics \
   /amr/simulation/base/cmd_vel /amr/control/cmd_vel /amr/mpc/cmd_vel \
   /model/product_a/pose
 ```
-
-In terminal 4, after repeating the same setup, run the selected mass stage. The
-1 kg acceptance command remains unchanged and should not be rerun as part of
-the independent 3 kg or 5 kg tests:
-
-```bash
-ros2 launch amr_manipulation gate6_mass_stage.launch.py product_id:=101
-```
-
-Choose one independent test when the factory and MoveIt terminals are already
-running:
-
-```bash
-# 3 kg, product B/tag 102:
-ros2 launch amr_manipulation gate6_3kg_test.launch.py
-
-# 5 kg, product C/tag 103:
-# ros2 launch amr_manipulation gate6_5kg_test.launch.py
-```
-
-The stage is fail-closed. Stop at the first failed boundary and retain its
-logs/bag; do not retry the complete product run or tune another parameter
-without a new decision. Run only one product test at a time, and review a
-failed 3 kg run before starting the 5 kg test.
 
 ### 4. Read-only inspection and shutdown
 

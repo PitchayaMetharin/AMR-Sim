@@ -84,32 +84,19 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     // Deactivation is a fail-closed abort, but downstream cancellation still
     // follows the same identity and terminal-result rules as a public cancel.
     std::shared_ptr<MissionGoalHandle> mission;
-    std::shared_ptr<ComputeGoalHandle> planner_goal;
-    std::shared_ptr<SmootherGoalHandle> smoother_goal;
-    std::shared_ptr<FollowGoalHandle> controller_goal;
-    bool pending_acceptance = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       mission = mission_goal_;
-      if (mission) {
-        pending_acceptance = state_ == MissionState::PLANNER_PENDING ||
-          state_ == MissionState::SMOOTHER_PENDING ||
-          state_ == MissionState::CONTROLLER_PENDING;
-        cancel_requested_ = true;
-        abort_on_stop_ = true;
-        state_ = MissionState::CANCELING;
-        planner_goal = planner_goal_;
-        smoother_goal = smoother_goal_;
-        controller_goal = controller_goal_;
-        planner_goal_.reset();
-        smoother_goal_.reset();
-        controller_goal_.reset();
-      }
     }
-    cancel_downstream(mission, planner_goal, smoother_goal, controller_goal);
-    if (mission && !pending_acceptance && !planner_goal && !smoother_goal &&
-      !controller_goal) {
-      complete_after_stop(mission);
+    const auto targets = mark_cancel(mission, true);
+    if (!targets.mission) {
+      return CallbackReturn::SUCCESS;
+    }
+    cancel_downstream(
+      targets.mission, targets.planner, targets.smoother, targets.controller);
+    if (!targets.pending_acceptance && !targets.planner && !targets.smoother &&
+      !targets.controller) {
+      complete_after_stop(targets.mission);
     }
     return CallbackReturn::SUCCESS;
   }
@@ -195,21 +182,25 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         return targets;
       }
       targets.mission = mission;
-      targets.pending_acceptance = state_ == MissionState::PLANNER_PENDING ||
-        state_ == MissionState::SMOOTHER_PENDING ||
-        state_ == MissionState::CONTROLLER_PENDING;
+      targets.pending_acceptance = downstream_acceptance_pending_;
       cancel_requested_ = true;
-      abort_on_stop_ = abort_on_stop;
+      abort_on_stop_ = abort_on_stop_ || abort_on_stop;
       state_ = MissionState::CANCELING;
-      // Copy accepted handles while locked, then clear them before any
-      // downstream call. A handle exists only in its corresponding ACTIVE
-      // state, and late response callbacks are handled by identity checks.
-      targets.planner = planner_goal_;
-      targets.smoother = smoother_goal_;
-      targets.controller = controller_goal_;
-      planner_goal_.reset();
-      smoother_goal_.reset();
-      controller_goal_.reset();
+      // Retain every accepted handle until its terminal result callback. The
+      // cancel-sent flags make repeated cancellation requests idempotent while
+      // preserving the obligation that a result callback must provide proof.
+      if (planner_goal_ && !planner_cancel_sent_) {
+        targets.planner = planner_goal_;
+        planner_cancel_sent_ = true;
+      }
+      if (smoother_goal_ && !smoother_cancel_sent_) {
+        targets.smoother = smoother_goal_;
+        smoother_cancel_sent_ = true;
+      }
+      if (controller_goal_ && !controller_cancel_sent_) {
+        targets.controller = controller_goal_;
+        controller_cancel_sent_ = true;
+      }
     }
     return targets;
   }
@@ -235,6 +226,10 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       abort_on_stop_ = false;
       terminal_reported_ = false;
       state_ = MissionState::PLANNER_PENDING;
+      downstream_acceptance_pending_ = true;
+      planner_cancel_sent_ = false;
+      smoother_cancel_sent_ = false;
+      controller_cancel_sent_ = false;
       mission_start_ = get_clock()->now();
       last_ros_time_ = mission_start_;
     }
@@ -243,12 +238,20 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     if (!planner_client_->action_server_is_ready() ||
         !smoother_client_->action_server_is_ready() ||
         !controller_client_->action_server_is_ready()) {
+      bool canceled = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (mission == mission_goal_ && state_ == MissionState::PLANNER_PENDING)
-          state_ = MissionState::IDLE;
+        if (mission == mission_goal_ && !terminal_reported_) {
+          downstream_acceptance_pending_ = false;
+          canceled = cancel_requested_;
+          if (!canceled) state_ = MissionState::IDLE;
+        }
       }
-      abort(mission, "planner or controller action is unavailable");
+      if (canceled) {
+        complete_after_stop(mission);
+      } else {
+        abort(mission, "planner or controller action is unavailable");
+      }
       return;
     }
 
@@ -262,26 +265,34 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         bool cancel_late = false;
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          if (!planner_goal) {
-            // A rejection is terminal only for the still-current pending
-            // request. A cancellation race is completed as canceled.
-            if (mission != mission_goal_ || terminal_reported_) return;
-            if (cancel_requested_) {
-              state_ = MissionState::CANCELING;
-            } else {
-              state_ = MissionState::IDLE;
-            }
-          } else if (mission == mission_goal_ && !terminal_reported_ &&
-            state_ == MissionState::PLANNER_PENDING && !cancel_requested_)
-          {
-            planner_goal_ = planner_goal;
-            state_ = MissionState::PLANNER_ACTIVE;
+          if (mission != mission_goal_ || terminal_reported_) {
+            cancel_late = static_cast<bool>(planner_goal);
           } else {
-            cancel_late = true;
+            downstream_acceptance_pending_ = false;
+            if (!planner_goal) {
+              planner_cancel_sent_ = false;
+              // A rejection is terminal only for the still-current pending
+              // request. A cancellation race is completed as canceled.
+              if (cancel_requested_) {
+                state_ = MissionState::CANCELING;
+              } else {
+                state_ = MissionState::IDLE;
+              }
+            } else if (mission == mission_goal_ && !terminal_reported_ &&
+              state_ == MissionState::PLANNER_PENDING && !cancel_requested_)
+            {
+              planner_goal_ = planner_goal;
+              planner_cancel_sent_ = false;
+              state_ = MissionState::PLANNER_ACTIVE;
+            } else {
+              planner_goal_ = planner_goal;
+              cancel_late = !planner_cancel_sent_;
+              planner_cancel_sent_ = true;
+            }
           }
         }
         if (planner_goal && cancel_late) {
-          if (!cancel_planner_goal(planner_goal)) complete_after_stop(mission);
+          cancel_planner_goal(planner_goal);
           return;
         }
         if (!planner_goal) {
@@ -300,9 +311,11 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (mission != mission_goal_ || terminal_reported_) return;
-          // The planner handle is cleared before inspecting its terminal
-          // result or starting the controller.
+          // A terminal result is the proof that the retained planner
+          // obligation is complete.
           planner_goal_.reset();
+          planner_cancel_sent_ = false;
+          downstream_acceptance_pending_ = false;
           process = true;
           cancel = cancel_requested_;
           if (cancel) {
@@ -333,7 +346,18 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     const std::shared_ptr<MissionGoalHandle> & mission,
     const nav_msgs::msg::Path & path)
   {
-    if (!is_current_smoother_pending(mission)) {
+    bool send = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (mission == mission_goal_ && !terminal_reported_ &&
+        !cancel_requested_ && state_ == MissionState::SMOOTHER_PENDING)
+      {
+        downstream_acceptance_pending_ = true;
+        smoother_cancel_sent_ = false;
+        send = true;
+      }
+    }
+    if (!send) {
       if (is_canceling(mission)) complete_after_stop(mission);
       return;
     }
@@ -350,24 +374,32 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         bool cancel_late = false;
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          if (!smoother_goal) {
-            if (mission != mission_goal_ || terminal_reported_) return;
-            if (cancel_requested_) {
-              state_ = MissionState::CANCELING;
-            } else {
-              state_ = MissionState::IDLE;
-            }
-          } else if (mission == mission_goal_ && !terminal_reported_ &&
-            state_ == MissionState::SMOOTHER_PENDING && !cancel_requested_)
-          {
-            smoother_goal_ = smoother_goal;
-            state_ = MissionState::SMOOTHER_ACTIVE;
+          if (mission != mission_goal_ || terminal_reported_) {
+            cancel_late = static_cast<bool>(smoother_goal);
           } else {
-            cancel_late = true;
+            downstream_acceptance_pending_ = false;
+            if (!smoother_goal) {
+              smoother_cancel_sent_ = false;
+              if (cancel_requested_) {
+                state_ = MissionState::CANCELING;
+              } else {
+                state_ = MissionState::IDLE;
+              }
+            } else if (mission == mission_goal_ && !terminal_reported_ &&
+              state_ == MissionState::SMOOTHER_PENDING && !cancel_requested_)
+            {
+              smoother_goal_ = smoother_goal;
+              smoother_cancel_sent_ = false;
+              state_ = MissionState::SMOOTHER_ACTIVE;
+            } else {
+              smoother_goal_ = smoother_goal;
+              cancel_late = !smoother_cancel_sent_;
+              smoother_cancel_sent_ = true;
+            }
           }
         }
         if (smoother_goal && cancel_late) {
-          if (!cancel_smoother_goal(smoother_goal)) complete_after_stop(mission);
+          cancel_smoother_goal(smoother_goal);
           return;
         }
         if (!smoother_goal) {
@@ -387,6 +419,8 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           std::lock_guard<std::mutex> lock(mutex_);
           if (mission != mission_goal_ || terminal_reported_) return;
           smoother_goal_.reset();
+          smoother_cancel_sent_ = false;
+          downstream_acceptance_pending_ = false;
           process = true;
           cancel = cancel_requested_;
           if (cancel) {
@@ -421,23 +455,22 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   {
     std::string goal_checker_id;
     std::string controller_id;
+    bool send = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (mission != mission_goal_ || terminal_reported_ || cancel_requested_ ||
-        state_ != MissionState::CONTROLLER_PENDING)
+      if (mission == mission_goal_ && !terminal_reported_ &&
+        !cancel_requested_ && state_ == MissionState::CONTROLLER_PENDING)
       {
-        if (mission == mission_goal_ && cancel_requested_) {
-          state_ = MissionState::CANCELING;
-        }
-        // No downstream controller request has been sent yet in this branch.
-        // Completion is safe after releasing the mutex.
-      } else {
-        // The actual send occurs below, outside the mutex.
         goal_checker_id = mission_goal_checker_id_;
         controller_id = mission_controller_id_;
+        downstream_acceptance_pending_ = true;
+        controller_cancel_sent_ = false;
+        send = true;
+      } else if (mission == mission_goal_ && cancel_requested_) {
+        state_ = MissionState::CANCELING;
       }
     }
-    if (!is_current_controller_pending(mission)) {
+    if (!send) {
       if (is_canceling(mission)) complete_after_stop(mission);
       return;
     }
@@ -452,24 +485,32 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         bool cancel_late = false;
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          if (!controller_goal) {
-            if (mission != mission_goal_ || terminal_reported_) return;
-            if (cancel_requested_) {
-              state_ = MissionState::CANCELING;
-            } else {
-              state_ = MissionState::IDLE;
-            }
-          } else if (mission == mission_goal_ && !terminal_reported_ &&
-            state_ == MissionState::CONTROLLER_PENDING && !cancel_requested_)
-          {
-            controller_goal_ = controller_goal;
-            state_ = MissionState::CONTROLLER_ACTIVE;
+          if (mission != mission_goal_ || terminal_reported_) {
+            cancel_late = static_cast<bool>(controller_goal);
           } else {
-            cancel_late = true;
+            downstream_acceptance_pending_ = false;
+            if (!controller_goal) {
+              controller_cancel_sent_ = false;
+              if (cancel_requested_) {
+                state_ = MissionState::CANCELING;
+              } else {
+                state_ = MissionState::IDLE;
+              }
+            } else if (mission == mission_goal_ && !terminal_reported_ &&
+              state_ == MissionState::CONTROLLER_PENDING && !cancel_requested_)
+            {
+              controller_goal_ = controller_goal;
+              controller_cancel_sent_ = false;
+              state_ = MissionState::CONTROLLER_ACTIVE;
+            } else {
+              controller_goal_ = controller_goal;
+              cancel_late = !controller_cancel_sent_;
+              controller_cancel_sent_ = true;
+            }
           }
         }
         if (controller_goal && cancel_late) {
-          if (!cancel_controller_goal(controller_goal)) complete_after_stop(mission);
+          cancel_controller_goal(controller_goal);
           return;
         }
         if (!controller_goal) {
@@ -496,8 +537,11 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           std::lock_guard<std::mutex> lock(mutex_);
           if (mission != mission_goal_ || terminal_reported_) return;
           // The controller handle is cleared before processing its terminal
-          // result. A cancellation/result race is therefore terminally safe.
+          // result. A cancellation/result race is therefore terminally safe,
+          // and this result is the terminal proof for the retained handle.
           controller_goal_.reset();
+          controller_cancel_sent_ = false;
+          downstream_acceptance_pending_ = false;
           current = true;
           canceled = cancel_requested_ ||
             result.code == rclcpp_action::ResultCode::CANCELED;
@@ -601,7 +645,8 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (mission == mission_goal_ && !terminal_reported_ &&
-        !cancel_requested_ && !planner_goal_ && !smoother_goal_ &&
+        !cancel_requested_ && !downstream_acceptance_pending_ &&
+        !planner_goal_ && !smoother_goal_ &&
         !controller_goal_ &&
         state_ != MissionState::PLANNER_PENDING &&
         state_ != MissionState::SMOOTHER_PENDING &&
@@ -618,7 +663,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (mission != mission_goal_ || terminal_reported_) return;
-      if (planner_goal_ || controller_goal_ ||
+      if (downstream_acceptance_pending_ || planner_goal_ || controller_goal_ ||
         state_ == MissionState::PLANNER_PENDING ||
         smoother_goal_ ||
         state_ == MissionState::SMOOTHER_PENDING ||
@@ -643,14 +688,18 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       state_ = MissionState::IDLE;
       goal_reserved_ = false;
       cancel_requested_ = false;
+      downstream_acceptance_pending_ = false;
       mission_goal_.reset();
       mission_goal_checker_id_.clear();
       reserved_goal_checker_id_.clear();
       mission_controller_id_.clear();
       reserved_controller_id_.clear();
       planner_goal_.reset();
+      planner_cancel_sent_ = false;
       smoother_goal_.reset();
+      smoother_cancel_sent_ = false;
       controller_goal_.reset();
+      controller_cancel_sent_ = false;
       complete = true;
     }
     if (!complete || !mission->is_active()) return;
@@ -696,19 +745,9 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     const std::shared_ptr<FollowGoalHandle> & controller_goal)
   {
     (void)mission;
-    bool planner_unknown = planner_goal && !cancel_planner_goal(planner_goal);
-    bool smoother_unknown = smoother_goal && !cancel_smoother_goal(smoother_goal);
-    bool controller_unknown = controller_goal && !cancel_controller_goal(controller_goal);
-    const bool cancellation_still_pending =
-      (planner_goal && !planner_unknown) ||
-      (smoother_goal && !smoother_unknown) ||
-      (controller_goal && !controller_unknown);
-    if (mission && (planner_unknown || smoother_unknown || controller_unknown) &&
-      !cancellation_still_pending) {
-      // The action client has already reported this copied handle as terminal;
-      // the result callback may race, but no active downstream goal remains.
-      complete_after_stop(mission);
-    }
+    if (planner_goal) (void)cancel_planner_goal(planner_goal);
+    if (smoother_goal) (void)cancel_smoother_goal(smoother_goal);
+    if (controller_goal) (void)cancel_controller_goal(controller_goal);
   }
 
   bool cancel_planner_goal(const ComputeGoalHandle::SharedPtr & planner_goal) {
@@ -752,6 +791,10 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   bool cancel_requested_{false};
   bool abort_on_stop_{false};
   bool terminal_reported_{false};
+  bool downstream_acceptance_pending_{false};
+  bool planner_cancel_sent_{false};
+  bool smoother_cancel_sent_{false};
+  bool controller_cancel_sent_{false};
   std::string reserved_goal_checker_id_;
   std::string reserved_controller_id_;
   std::string mission_goal_checker_id_;

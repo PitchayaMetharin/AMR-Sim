@@ -24,6 +24,13 @@
     <!-- KUKA visual mounting face is flush with the remaining AMR top at z=0.33. -->
     <origin xyz="0 0 0.33" rpy="0 0 0"/>
   </joint>
+  <xacro:exclude_lidar_self_visuals link="arm_base_link"/>
+  <xacro:exclude_lidar_self_visuals link="arm_link_1"/>
+  <xacro:exclude_lidar_self_visuals link="arm_link_2"/>
+  <xacro:exclude_lidar_self_visuals link="arm_link_3"/>
+  <xacro:exclude_lidar_self_visuals link="arm_link_4"/>
+  <xacro:exclude_lidar_self_visuals link="arm_link_5"/>
+  <xacro:exclude_lidar_self_visuals link="arm_link_6"/>
 
   <link name="gripper_base_link">
     <visual><geometry><box size="0.10 0.10 0.04"/></geometry></visual>
@@ -55,6 +62,9 @@
     <limit lower="0.0" upper="0.035" effort="60" velocity="0.05"/>
     <mimic joint="gripper_finger_joint" multiplier="1.0" offset="0.0"/>
   </joint>
+  <xacro:exclude_lidar_self_visuals link="gripper_base_link"/>
+  <xacro:exclude_lidar_self_visuals link="gripper_left_finger_link"/>
+  <xacro:exclude_lidar_self_visuals link="gripper_right_finger_link"/>
   <link name="gripper_tcp"/>
   <joint name="gripper_tcp_joint" type="fixed">
     <parent link="gripper_base_link"/><child link="gripper_tcp"/>
@@ -117,6 +127,7 @@
          active. -->
     <origin xyz="0.25 0.20 0.65" rpy="0 0 0"/>
   </joint>
+  <xacro:exclude_lidar_self_visuals link="product_camera_link"/>
   <link name="product_camera_optical_frame"/>
   <joint name="product_camera_optical_joint" type="fixed">
     <parent link="product_camera_link"/><child link="product_camera_optical_frame"/>
@@ -146,6 +157,7 @@
       <parent link="gripper_tcp"/><child link="stowed_product_link"/>
       <origin xyz="0.15 0 0"/>
     </joint>
+    <xacro:exclude_lidar_self_visuals link="stowed_product_link"/>
   </xacro:if>
 
   <ros2_control name="Phase14MobileManipulatorSystem" type="system">

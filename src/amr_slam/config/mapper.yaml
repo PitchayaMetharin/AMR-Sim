@@ -7,6 +7,9 @@
     scan_topic: /amr/sensors/front_lidar/scan
     mode: mapping
     transform_publish_period: 0.05
+    # slam_toolbox needs this for scan/TF synchronization and stamp offset.
+    # Explorer queries map->base_footprint at exact current ROS time and
+    # rejects future or stale samples fail-closed.
     transform_timeout: 1.0
     scan_queue_size: 10
     map_update_interval: 1.0

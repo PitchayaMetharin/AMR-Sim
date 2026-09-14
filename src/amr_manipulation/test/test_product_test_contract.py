@@ -75,6 +75,16 @@ def test_persistent_product_runner_is_limited_and_fail_closed():
     assert '"gate6_mass_stage.launch.py"' in source
     assert "product_id:=unknown" not in source
     assert "feedback_callback=feedback_callback" in source
+    assert "def _wait_navigation_goal_acceptance" in source
+    acceptance_helper_start = source.index("    def _wait_navigation_goal_acceptance")
+    acceptance_helper_end = source.index("    def _navigate(", acceptance_helper_start)
+    acceptance_helper = source[acceptance_helper_start:acceptance_helper_end]
+    assert "executor.spin_once(timeout_sec=0.05)" in acceptance_helper
+    assert "acceptance_expired = threading.Event()" in acceptance_helper
+    assert "future, \"add_done_callback\"" in acceptance_helper
+    assert "goal_handle.cancel_goal_async()" in acceptance_helper
+    assert "self._cancel_accepted_navigation_goal(goal_handle, endpoint)" in acceptance_helper
+    assert "raise PreparationCanceled" in acceptance_helper
     navigate_start = source.index("    def _navigate(")
     navigate_end = source.index("    def _relocalize_at_reference", navigate_start)
     navigate_source = source[navigate_start:navigate_end]
@@ -232,6 +242,20 @@ def test_final_dock_uses_travel_bearing_then_registered_terminal_heading():
         "self._navigate(self.selected.dock, precise=True)", second_travel)
     assert first_travel < first_heading < second_target
     assert second_travel < second_heading
+
+
+def test_pickup_geometry_compares_registered_product_in_measured_robot_frame():
+    source = RUNNER.read_text(encoding="utf-8")
+    start = source.index("    def _verify_dock_and_product_geometry")
+    end = source.index("    def prepare", start)
+    geometry = source[start:end]
+
+    assert "expected_dx = self.selected.reset_pose[0] - robot_x" in geometry
+    assert "expected_dy = self.selected.reset_pose[1] - robot_y" in geometry
+    assert "math.cos(robot_yaw) * expected_dx" in geometry
+    assert "math.sin(robot_yaw) * expected_dy" in geometry
+    assert "math.cos(self.selected.dock[2]) * expected_dx" not in geometry
+    assert "math.sin(self.selected.dock[2]) * expected_dy" not in geometry
 
 
 def test_dock_correction_uses_physical_minus_localized_bias():

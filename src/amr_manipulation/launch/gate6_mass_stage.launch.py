@@ -103,11 +103,12 @@ def _resolve_registry(context):
             raise RuntimeError(f"dispatch slot {slot.get('id')} has a non-finite pose")
         slot_by_id[slot["id"]] = position
 
-    assignment = {101: "dispatch_1", 102: "dispatch_2", 103: "dispatch_3"}
     raw_id = int(LaunchConfiguration("product_id").perform(context))
-    if raw_id not in assignment or raw_id not in by_id:
+    if raw_id not in by_id:
         raise RuntimeError(f"unknown product_id {raw_id}")
-    selected_slot_id = assignment[raw_id]
+    selected_slot_id = by_id[raw_id][1].get("dispatch_slot")
+    if not isinstance(selected_slot_id, str):
+        raise RuntimeError(f"product {raw_id} has no registered dispatch slot")
     if selected_slot_id not in slot_by_id:
         raise RuntimeError(f"missing dispatch slot {selected_slot_id}")
 
@@ -158,6 +159,10 @@ def _resolve_registry(context):
         "selected_dispatch_slot_id": selected_slot_id,
         "selected_dispatch_slot_position": slot_by_id[selected_slot_id],
         "selected_dispatch_slot_index": int(selected_slot_id[-1]) - 1,
+        "status_topic": LaunchConfiguration("status_topic").perform(context),
+        "cancel_service": LaunchConfiguration("cancel_service").perform(context),
+        "autonomous_mode": LaunchConfiguration("autonomous_mode").perform(context).lower() == "true",
+        "pickup_station_id": LaunchConfiguration("pickup_station_id").perform(context),
     }
 
 
@@ -199,5 +204,12 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument("product_id", default_value="101"),
+        DeclareLaunchArgument(
+            "status_topic", default_value="/amr/manipulation/status"),
+        DeclareLaunchArgument(
+            "cancel_service",
+            default_value="/amr/manipulation/internal/cancel_cycle_motion"),
+        DeclareLaunchArgument("autonomous_mode", default_value="false"),
+        DeclareLaunchArgument("pickup_station_id", default_value=""),
         OpaqueFunction(function=lambda context: _make_node(context, config)),
     ])

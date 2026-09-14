@@ -37,6 +37,26 @@
   <!-- Legacy CAD export colors, made explicit for Gazebo Harmonic. -->
   <xacro:property name="cad_body_rgba" value="0.752941176470588 0.752941176470588 0.752941176470588 1"/>
   <xacro:property name="cad_bluegray_rgba" value="0.792156862745098 0.819607843137255 0.933333333333333 1"/>
+  <!--
+    Gazebo Harmonic gpu_lidar uses the SDF visibility-mask / visual-flags
+    contract.  Bit 0 is reserved for geometry belonging to this robot; the
+    sensor mask accepts all other visibility bits.
+  -->
+  <xacro:property name="lidar_self_visibility_flag" value="1"/>
+  <xacro:property name="lidar_visibility_mask" value="4294967294"/>
+
+  <!--
+    The nested visual extension is applied to every visual on the referenced
+    link by the URDF-to-SDF converter.  Keep source visual elements unnamed so
+    the converter can merge this extension reliably across fixed-joint lumps.
+  -->
+  <xacro:macro name="exclude_lidar_self_visuals" params="link">
+    <gazebo reference="${link}">
+      <visual>
+        <visibility_flags>${lidar_self_visibility_flag}</visibility_flags>
+      </visual>
+    </gazebo>
+  </xacro:macro>
 
   <xacro:macro name="cad_material" params="name rgba">
     <material name="${name}">
@@ -66,7 +86,7 @@
 
   <xacro:macro name="drive_wheel" params="name y rpy axis_z">
     <link name="${name}">
-      <visual name="cad_visual">
+      <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry><mesh filename="package://amr_description/meshes/${name}_link.STL"/></geometry>
         <xacro:cad_material name="cad_bluegray" rgba="${cad_bluegray_rgba}"/>
@@ -84,12 +104,13 @@
       <axis xyz="0 0 ${axis_z}"/>
       <dynamics damping="0.7" friction="0.7"/>
     </joint>
+    <xacro:exclude_lidar_self_visuals link="${name}"/>
   </xacro:macro>
 
   <xacro:macro name="passive_caster" params="name x y body_mesh body_z wheel_mesh wheel_x wheel_y">
     <!-- The mount frame is at the rolling-wheel center and swivels about z. -->
     <link name="${name}_mount">
-      <visual name="cad_body_visual">
+      <visual>
         <origin xyz="0 0 ${body_z}" rpy="0 0 0"/>
         <geometry><mesh filename="package://amr_description/meshes/${body_mesh}"/></geometry>
         <xacro:cad_material name="cad_body" rgba="${cad_body_rgba}"/>
@@ -108,8 +129,9 @@
       <axis xyz="0 0 1"/>
       <dynamics damping="0.05" friction="0.01"/>
     </joint>
+    <xacro:exclude_lidar_self_visuals link="${name}_mount"/>
     <link name="${name}_wheel">
-      <visual name="cad_wheel_visual">
+      <visual>
         <origin xyz="0 0 0" rpy="-1.57079632679 0 0"/>
         <geometry><mesh filename="package://amr_description/meshes/${wheel_mesh}"/></geometry>
         <xacro:cad_material name="cad_body" rgba="${cad_body_rgba}"/>
@@ -130,12 +152,13 @@
       <mu1>0.01</mu1>
       <mu2>0.01</mu2>
     </gazebo>
+    <xacro:exclude_lidar_self_visuals link="${name}_wheel"/>
   </xacro:macro>
 
   <link name="base_footprint"/>
   <link name="base_link">
     <!-- Derived CAD visual; the primitive collision preserves the footprint, bottom -0.02, and top 0.33. -->
-    <visual name="cad_visual">
+    <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://amr_description/meshes/base_link.STL"/></geometry>
       <xacro:cad_material name="cad_body" rgba="${cad_body_rgba}"/>
@@ -152,6 +175,7 @@
     <child link="base_link"/>
     <origin xyz="0 0 ${base_footprint_height}"/>
   </joint>
+  <xacro:exclude_lidar_self_visuals link="base_link"/>
 
   <!-- Generic payload remains base-only default-on at its existing support height. -->
   <xacro:if value="$(arg include_generic_payload)">
@@ -170,6 +194,7 @@
       <child link="payload_link"/>
       <origin xyz="0 0 ${generic_payload_support_top_z + generic_payload_clearance + payload_z_checked / 2.0}"/>
     </joint>
+    <xacro:exclude_lidar_self_visuals link="payload_link"/>
   </xacro:if>
 
   <xacro:drive_wheel name="left_wheel" y="${wheel_separation / 2.0}" rpy="-1.57079632679" axis_z="1"/>
@@ -206,10 +231,11 @@
     <child link="imu_link"/>
     <origin xyz="0 0 0.18"/>
   </joint>
+  <xacro:exclude_lidar_self_visuals link="imu_link"/>
 
   <!-- CAD LiDAR poses are retained as the software frame contract. -->
   <link name="front_lidar_link">
-    <visual name="cad_visual">
+    <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://amr_description/meshes/lidar_front_link.STL"/></geometry>
       <xacro:cad_material name="cad_bluegray" rgba="${cad_bluegray_rgba}"/>
@@ -223,7 +249,7 @@
     <origin xyz="0.30805 -0.153 0.47468" rpy="0 0 0"/>
   </joint>
   <link name="rear_lidar_link">
-    <visual name="cad_visual">
+    <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><mesh filename="package://amr_description/meshes/lidar_back_link.STL"/></geometry>
       <xacro:cad_material name="cad_bluegray" rgba="${cad_bluegray_rgba}"/>
@@ -248,6 +274,7 @@
           <vertical><samples>4</samples><resolution>1</resolution><min_angle>0.0</min_angle><max_angle>0.065</max_angle></vertical>
         </scan>
         <range><min>0.2</min><max>20.0</max><resolution>0.01</resolution></range>
+        <visibility_mask>${lidar_visibility_mask}</visibility_mask>
       </lidar>
     </sensor>
   </gazebo>
@@ -262,9 +289,12 @@
           <vertical><samples>4</samples><resolution>1</resolution><min_angle>0.0</min_angle><max_angle>0.065</max_angle></vertical>
         </scan>
         <range><min>0.2</min><max>20.0</max><resolution>0.01</resolution></range>
+        <visibility_mask>${lidar_visibility_mask}</visibility_mask>
       </lidar>
     </sensor>
   </gazebo>
+  <xacro:exclude_lidar_self_visuals link="front_lidar_link"/>
+  <xacro:exclude_lidar_self_visuals link="rear_lidar_link"/>
   <gazebo reference="imu_link">
     <sensor name="imu" type="imu">
       <topic>/amr/simulation/sensors/imu/data</topic>

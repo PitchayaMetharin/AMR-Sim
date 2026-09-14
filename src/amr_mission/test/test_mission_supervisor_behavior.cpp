@@ -1,28 +1,47 @@
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <future>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "amr_mission/goal_validation.hpp"
+#include <nav2_msgs/action/compute_path_to_pose.hpp>
+#include <nav2_msgs/action/follow_path.hpp>
+#include <nav2_msgs/action/navigate_to_pose.hpp>
+#include <nav2_msgs/action/smooth_path.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <lifecycle_msgs/msg/state.hpp>
 #include <lifecycle_msgs/msg/transition.hpp>
+#include <tf2/exceptions.h>
+#include <tf2/time.h>
 #include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
+#define private public
 #define main mission_supervisor_main
 #include "../src/mission_supervisor_node.cpp"
 #undef main
+#undef private
 
 using namespace std::chrono_literals;
 
-template<typename Predicate>
+template<typename Executor, typename Predicate>
 bool spin_until(
-  rclcpp::executors::SingleThreadedExecutor & executor,
-  Predicate predicate, std::chrono::milliseconds timeout)
+  Executor & executor, Predicate predicate, std::chrono::milliseconds timeout)
 {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
@@ -34,6 +53,41 @@ bool spin_until(
   return predicate();
 }
 
+template<typename Predicate>
+bool wait_until(Predicate predicate, std::chrono::milliseconds timeout)
+{
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) return true;
+    std::this_thread::sleep_for(10ms);
+  }
+  return predicate();
+}
+
+class ExecutorSpinGuard {
+ public:
+  explicit ExecutorSpinGuard(
+    rclcpp::executors::MultiThreadedExecutor & executor,
+    std::function<void()> release = {})
+  : executor_(executor), release_(std::move(release)), thread_([this]() {
+      executor_.spin();
+    })
+  {
+  }
+
+  ~ExecutorSpinGuard()
+  {
+    if (release_) release_();
+    executor_.cancel();
+    if (thread_.joinable()) thread_.join();
+  }
+
+ private:
+  rclcpp::executors::MultiThreadedExecutor & executor_;
+  std::function<void()> release_;
+  std::thread thread_;
+};
+
 class MissionBehaviorContext {
  public:
   using Navigate = nav2_msgs::action::NavigateToPose;
@@ -41,18 +95,37 @@ class MissionBehaviorContext {
   using Smooth = nav2_msgs::action::SmoothPath;
   using Follow = nav2_msgs::action::FollowPath;
 
-  explicit MissionBehaviorContext(const std::string & suffix)
+  explicit MissionBehaviorContext(
+    const std::string & suffix, bool broadcast_tf = true,
+    bool separate_client_peer = false)
   : peer(std::make_shared<rclcpp::Node>("mission_behavior_peer_" + suffix)),
-    tf_broadcaster(peer), supervisor(std::make_shared<amr_mission::MissionSupervisorNode>())
+    client_peer(separate_client_peer ?
+      std::make_shared<rclcpp::Node>("mission_behavior_client_" + suffix) : peer),
+    tf_broadcaster(peer), supervisor(std::make_shared<amr_mission::MissionSupervisorNode>()),
+    broadcast_tf(broadcast_tf)
   {
     planner = rclcpp_action::create_server<Compute>(
       peer, "/amr/compute_path_to_pose",
-      [](const rclcpp_action::GoalUUID &, std::shared_ptr<const Compute::Goal>) {
-        return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+      [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const Compute::Goal>) {
+        if (hold_planner_acceptance.load()) {
+          {
+            std::lock_guard<std::mutex> lock(planner_acceptance_mutex);
+            planner_acceptance_started = true;
+          }
+          planner_acceptance_cv.notify_all();
+          std::unique_lock<std::mutex> lock(planner_acceptance_mutex);
+          planner_acceptance_cv.wait(lock, [this]() {
+            return release_planner_acceptance;
+          });
+        }
+        return planner_accept.load() ?
+          rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE :
+          rclcpp_action::GoalResponse::REJECT;
       },
       [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<Compute>> goal) {
-        planner_cancel_requested = true;
         planner_cancel_goal = goal;
+        ++planner_cancel_calls;
+        planner_cancel_requested = true;
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<Compute>> goal) {
@@ -69,8 +142,8 @@ class MissionBehaviorContext {
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       },
       [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<Smooth>> goal) {
-        smoother_cancel_requested = true;
         smoother_cancel_goal = goal;
+        smoother_cancel_requested = true;
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<Smooth>> goal) {
@@ -86,8 +159,9 @@ class MissionBehaviorContext {
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       },
       [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<Follow>> goal) {
-        controller_cancel_requested = true;
         controller_cancel_goal = goal;
+        ++controller_cancel_calls;
+        controller_cancel_requested = true;
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<Follow>> goal) {
@@ -111,20 +185,22 @@ class MissionBehaviorContext {
       throw std::runtime_error("mission supervisor lifecycle setup failed");
     }
     client = rclcpp_action::create_client<Navigate>(
-      peer, "/amr/mission/navigate_to_pose");
+      client_peer, "/amr/mission/navigate_to_pose");
     precise_client = rclcpp_action::create_client<Navigate>(
-      peer, "/amr/mission/navigate_to_pose_precise");
+      client_peer, "/amr/mission/navigate_to_pose_precise");
     retreat_client = rclcpp_action::create_client<Navigate>(
-      peer, "/amr/mission/navigate_to_pose_retreat");
+      client_peer, "/amr/mission/navigate_to_pose_retreat");
     planner_probe = rclcpp_action::create_client<Compute>(peer, "/amr/compute_path_to_pose");
     smoother_probe = rclcpp_action::create_client<Smooth>(peer, "/amr/smooth_path");
     controller_probe = rclcpp_action::create_client<Follow>(peer, "/amr/follow_path");
 
-    geometry_msgs::msg::TransformStamped transform;
-    transform.header.frame_id = "map";
-    transform.child_frame_id = "base_footprint";
-    transform.transform.rotation.w = 1.0;
-    tf_broadcaster.sendTransform(transform);
+    if (broadcast_tf) {
+      geometry_msgs::msg::TransformStamped transform;
+      transform.header.frame_id = "map";
+      transform.child_frame_id = "base_footprint";
+      transform.transform.rotation.w = 1.0;
+      tf_broadcaster.sendTransform(transform);
+    }
   }
 
   enum class ResultMode { HOLD, SUCCEED, ABORT };
@@ -157,7 +233,21 @@ class MissionBehaviorContext {
     }
   }
 
+  bool planner_acceptance_has_started() {
+    std::lock_guard<std::mutex> lock(planner_acceptance_mutex);
+    return planner_acceptance_started;
+  }
+
+  void release_planner_acceptance_request() {
+    {
+      std::lock_guard<std::mutex> lock(planner_acceptance_mutex);
+      release_planner_acceptance = true;
+    }
+    planner_acceptance_cv.notify_all();
+  }
+
   std::shared_ptr<rclcpp::Node> peer;
+  std::shared_ptr<rclcpp::Node> client_peer;
   tf2_ros::StaticTransformBroadcaster tf_broadcaster;
   std::shared_ptr<amr_mission::MissionSupervisorNode> supervisor;
   rclcpp_action::Server<Compute>::SharedPtr planner;
@@ -180,6 +270,15 @@ class MissionBehaviorContext {
   std::atomic_bool planner_cancel_requested{false};
   std::atomic_bool smoother_cancel_requested{false};
   std::atomic_bool controller_cancel_requested{false};
+  std::atomic_int planner_cancel_calls{0};
+  std::atomic_int controller_cancel_calls{0};
+  std::atomic_bool hold_planner_acceptance{false};
+  std::atomic_bool planner_accept{true};
+  std::mutex planner_acceptance_mutex;
+  std::condition_variable planner_acceptance_cv;
+  bool planner_acceptance_started{false};
+  bool release_planner_acceptance{false};
+  bool broadcast_tf;
   ResultMode planner_result_mode{ResultMode::HOLD};
   ResultMode controller_result_mode{ResultMode::HOLD};
 };
@@ -189,6 +288,226 @@ static nav2_msgs::action::NavigateToPose::Goal valid_goal() {
   goal.pose.header.frame_id = "map";
   goal.pose.pose.orientation.w = 1.0;
   return goal;
+}
+
+TEST(MissionSupervisorBehavior, RepeatedTfFeedbackRetainsCancellationObligation) {
+  MissionBehaviorContext context("repeated_tf_feedback", false);
+  context.planner_result_mode = MissionBehaviorContext::ResultMode::SUCCEED;
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(context.supervisor->get_node_base_interface());
+  executor.add_node(context.peer);
+  ASSERT_TRUE(spin_until(executor, [&]() {
+    return context.client->action_server_is_ready() &&
+      context.planner_probe->action_server_is_ready() &&
+      context.smoother_probe->action_server_is_ready() &&
+      context.controller_probe->action_server_is_ready();
+  }, 2s));
+
+  auto goal_future = context.client->async_send_goal(valid_goal());
+  ASSERT_EQ(executor.spin_until_future_complete(goal_future, 2s),
+    rclcpp::FutureReturnCode::SUCCESS);
+  auto mission_goal = goal_future.get();
+  ASSERT_NE(mission_goal, nullptr);
+  ASSERT_TRUE(spin_until(executor, [&]() {
+    return !context.controller_goals.empty();
+  }, 2s));
+
+  auto cancel_future = context.client->async_cancel_goal(mission_goal);
+  ASSERT_EQ(executor.spin_until_future_complete(cancel_future, 2s),
+    rclcpp::FutureReturnCode::SUCCESS);
+  ASSERT_FALSE(cancel_future.get()->goals_canceling.empty());
+  ASSERT_TRUE(context.controller_cancel_requested.load());
+  ASSERT_EQ(context.controller_cancel_calls.load(), 1);
+
+  auto feedback = std::make_shared<MissionBehaviorContext::Follow::Feedback>();
+  std::shared_ptr<amr_mission::MissionSupervisorNode::MissionGoalHandle> server_goal;
+  {
+    std::lock_guard<std::mutex> lock(context.supervisor->mutex_);
+    server_goal = context.supervisor->mission_goal_;
+  }
+  ASSERT_NE(server_goal, nullptr);
+  context.supervisor->process_feedback(server_goal, feedback);
+  context.supervisor->process_feedback(server_goal, feedback);
+  ASSERT_TRUE(spin_until(executor, [&]() {
+    return context.controller_cancel_goal &&
+      context.controller_cancel_goal->is_canceling();
+  }, 2s));
+
+  auto result_future = context.client->async_get_result(mission_goal);
+  const bool completed_early = spin_until(executor, [&]() {
+    return result_future.wait_for(0ms) == std::future_status::ready;
+  }, 100ms);
+  EXPECT_FALSE(completed_early);
+  if (completed_early || context.supervisor->terminal_reported_) {
+    executor.remove_node(context.peer);
+    executor.remove_node(context.supervisor->get_node_base_interface());
+    return;
+  }
+
+  context.finish_controller_cancel();
+  ASSERT_EQ(executor.spin_until_future_complete(result_future, 2s),
+    rclcpp::FutureReturnCode::SUCCESS);
+  EXPECT_EQ(result_future.get().code, rclcpp_action::ResultCode::CANCELED);
+  executor.remove_node(context.peer);
+  executor.remove_node(context.supervisor->get_node_base_interface());
+}
+
+TEST(MissionSupervisorBehavior, CancelThenDeactivateStrengthensHeldResultToAbort) {
+  MissionBehaviorContext context("cancel_then_deactivate");
+  context.planner_result_mode = MissionBehaviorContext::ResultMode::SUCCEED;
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(context.supervisor->get_node_base_interface());
+  executor.add_node(context.peer);
+  ASSERT_TRUE(spin_until(executor, [&]() {
+    return context.client->action_server_is_ready() &&
+      context.planner_probe->action_server_is_ready() &&
+      context.smoother_probe->action_server_is_ready() &&
+      context.controller_probe->action_server_is_ready();
+  }, 2s));
+
+  auto goal_future = context.client->async_send_goal(valid_goal());
+  ASSERT_EQ(executor.spin_until_future_complete(goal_future, 2s),
+    rclcpp::FutureReturnCode::SUCCESS);
+  auto mission_goal = goal_future.get();
+  ASSERT_NE(mission_goal, nullptr);
+  ASSERT_TRUE(spin_until(executor, [&]() {
+    return !context.controller_goals.empty();
+  }, 2s));
+
+  auto cancel_future = context.client->async_cancel_goal(mission_goal);
+  ASSERT_EQ(executor.spin_until_future_complete(cancel_future, 2s),
+    rclcpp::FutureReturnCode::SUCCESS);
+  ASSERT_FALSE(cancel_future.get()->goals_canceling.empty());
+  ASSERT_TRUE(context.controller_cancel_requested.load());
+  ASSERT_EQ(context.controller_cancel_calls.load(), 1);
+  ASSERT_TRUE(spin_until(executor, [&]() {
+    return context.controller_cancel_goal &&
+      context.controller_cancel_goal->is_canceling();
+  }, 2s));
+  auto result_future = context.client->async_get_result(mission_goal);
+
+  ASSERT_EQ(
+    context.supervisor->trigger_transition(
+      lifecycle_msgs::msg::Transition::TRANSITION_DEACTIVATE).id(),
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  const bool completed_early = spin_until(executor, [&]() {
+    return result_future.wait_for(0ms) == std::future_status::ready;
+  }, 100ms);
+  EXPECT_FALSE(completed_early);
+  EXPECT_EQ(context.controller_cancel_calls.load(), 1);
+  if (completed_early) {
+    executor.remove_node(context.peer);
+    executor.remove_node(context.supervisor->get_node_base_interface());
+    return;
+  }
+
+  context.finish_controller_cancel();
+  ASSERT_EQ(executor.spin_until_future_complete(result_future, 2s),
+    rclcpp::FutureReturnCode::SUCCESS);
+  EXPECT_EQ(result_future.get().code, rclcpp_action::ResultCode::ABORTED);
+  executor.remove_node(context.peer);
+  executor.remove_node(context.supervisor->get_node_base_interface());
+}
+
+TEST(MissionSupervisorBehavior, PendingLateAcceptanceCancelsOnceBeforePublicResult) {
+  MissionBehaviorContext context("pending_late_acceptance", true, true);
+  context.hold_planner_acceptance = true;
+  context.planner_accept = true;
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(context.supervisor->get_node_base_interface());
+  executor.add_node(context.peer);
+  executor.add_node(context.client_peer);
+  ExecutorSpinGuard spin_guard(executor, [&]() {
+    context.release_planner_acceptance_request();
+  });
+  ASSERT_TRUE(wait_until([&]() {
+    return context.client->action_server_is_ready() &&
+      context.planner_probe->action_server_is_ready() &&
+      context.smoother_probe->action_server_is_ready() &&
+      context.controller_probe->action_server_is_ready();
+  }, 2s));
+
+  auto goal_future = context.client->async_send_goal(valid_goal());
+  ASSERT_TRUE(wait_until([&]() {
+    return goal_future.wait_for(0ms) == std::future_status::ready;
+  }, 2s));
+  auto mission_goal = goal_future.get();
+  ASSERT_NE(mission_goal, nullptr);
+  ASSERT_TRUE(wait_until([&]() {
+    return context.planner_acceptance_has_started();
+  }, 2s));
+
+  auto cancel_future = context.client->async_cancel_goal(mission_goal);
+  ASSERT_TRUE(wait_until([&]() {
+    return cancel_future.wait_for(0ms) == std::future_status::ready;
+  }, 2s));
+  ASSERT_FALSE(cancel_future.get()->goals_canceling.empty());
+  auto result_future = context.client->async_get_result(mission_goal);
+  EXPECT_FALSE(wait_until([&]() {
+    return result_future.wait_for(0ms) == std::future_status::ready;
+  }, 100ms));
+
+  context.release_planner_acceptance_request();
+  ASSERT_TRUE(wait_until([&]() {
+    return context.planner_cancel_requested.load();
+  }, 2s));
+  ASSERT_EQ(context.planner_cancel_calls.load(), 1);
+  EXPECT_FALSE(wait_until([&]() {
+    return result_future.wait_for(0ms) == std::future_status::ready;
+  }, 100ms));
+
+  context.finish_planner_cancel();
+  ASSERT_TRUE(wait_until([&]() {
+    return result_future.wait_for(0ms) == std::future_status::ready;
+  }, 2s));
+  EXPECT_EQ(result_future.get().code, rclcpp_action::ResultCode::CANCELED);
+  executor.remove_node(context.peer);
+  executor.remove_node(context.supervisor->get_node_base_interface());
+}
+
+TEST(MissionSupervisorBehavior, PendingLateRejectionProvidesCancellationProof) {
+  MissionBehaviorContext context("pending_late_rejection", true, true);
+  context.hold_planner_acceptance = true;
+  context.planner_accept = false;
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(context.supervisor->get_node_base_interface());
+  executor.add_node(context.peer);
+  executor.add_node(context.client_peer);
+  ExecutorSpinGuard spin_guard(executor, [&]() {
+    context.release_planner_acceptance_request();
+  });
+  ASSERT_TRUE(wait_until([&]() {
+    return context.client->action_server_is_ready() &&
+      context.planner_probe->action_server_is_ready() &&
+      context.smoother_probe->action_server_is_ready() &&
+      context.controller_probe->action_server_is_ready();
+  }, 2s));
+
+  auto goal_future = context.client->async_send_goal(valid_goal());
+  ASSERT_TRUE(wait_until([&]() {
+    return goal_future.wait_for(0ms) == std::future_status::ready;
+  }, 2s));
+  auto mission_goal = goal_future.get();
+  ASSERT_NE(mission_goal, nullptr);
+  ASSERT_TRUE(wait_until([&]() {
+    return context.planner_acceptance_has_started();
+  }, 2s));
+
+  auto cancel_future = context.client->async_cancel_goal(mission_goal);
+  ASSERT_TRUE(wait_until([&]() {
+    return cancel_future.wait_for(0ms) == std::future_status::ready;
+  }, 2s));
+  ASSERT_FALSE(cancel_future.get()->goals_canceling.empty());
+  auto result_future = context.client->async_get_result(mission_goal);
+  context.release_planner_acceptance_request();
+
+  ASSERT_TRUE(wait_until([&]() {
+    return result_future.wait_for(0ms) == std::future_status::ready;
+  }, 2s));
+  EXPECT_EQ(result_future.get().code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_EQ(context.planner_cancel_calls.load(), 0);
+  executor.remove_node(context.peer);
+  executor.remove_node(context.supervisor->get_node_base_interface());
 }
 
 TEST(MissionSupervisorBehavior, CancellationDuringPlanningCompletesOnce) {

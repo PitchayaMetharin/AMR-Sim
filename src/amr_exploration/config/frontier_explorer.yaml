@@ -1,6 +1,7 @@
 /amr/frontier_explorer:
   ros__parameters:
     use_sim_time: true
+    autostart: false
     map_timeout_sec: 3.0
     tf_timeout_sec: 1.0
     no_frontier_updates: 3

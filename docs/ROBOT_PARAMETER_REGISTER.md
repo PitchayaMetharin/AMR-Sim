@@ -1,5 +1,11 @@
 # Robot Parameter Register
 
+The current accepted runtime boundary is the Product 101 (1 kg) and Product
+102 (3 kg) autonomous factory cycle in the laptop simulation. Product 103
+(5 kg), Gate 7, physical hardware, and functional-safety claims remain outside
+scope. Phase 15 mapping has source/offline evidence only; no new mapping runtime
+or canonical-map replacement is accepted.
+
 | ID | Area | Value | Status |
 | --- | --- | --- | --- |
 | SW-001 | Runtime | Ubuntu 22.04, ROS 2 Humble, C++17, Gazebo simulation | Active |
@@ -16,5 +22,5 @@
 | CTRL-001 | Navigation controller | Direct Humble Regulated Pure Pursuit; desired linear speed 0.50 m/s | Provisional simulation tuning; runtime verification pending |
 | CTRL-002 | Normal Nav2 goal checker | 0.07 m XY, 0.15 rad yaw | Preserved public contract |
 | CTRL-003 | Placement goal checker | 0.005 m XY, 0.15 rad yaw, non-stateful | Private placement boundary; runtime verification pending |
-| SIM-001 | Factory physics | Exact `0.0033333333333333335 s` step (`1/300 s`, 300 steps/s; 3 steps per 100 Hz controller/contact cycle and 30 per 10 Hz lidar/camera cycle), real-time factor target 1.0, shadows disabled; D205 observed median/aggregate RTF `0.999818`/`0.994510` | Current 1 kg runtime evidence; repeatability, 3 kg/5 kg, and Gate 7 remain pending |
-| FACT-001 | Factory orchestration | Manual default; autonomous FIFO capacity 3; status at 5 Hz | Source boundary; Gate 7 runtime acceptance pending |
+| SIM-001 | Factory physics | Exact `0.0033333333333333335 s` step (`1/300 s`, 300 steps/s; 3 steps per 100 Hz controller/contact cycle and 30 per 10 Hz lidar/camera cycle), real-time factor target 1.0, shadows disabled; D205 observed median/aggregate RTF `0.999818`/`0.994510` | Historical D205 physics evidence; current Product 101/102 runtime closeout is separate, and Phase 15 mapping runtime remains unverified |
+| FACT-001 | Factory orchestration | Manual default; autonomous FIFO capacity 3; status at 5 Hz; registry enables Product 101/102 only | Product 101/102 autonomous runtime accepted; Product 103 and Gate 7 remain out of scope |
