@@ -21,17 +21,28 @@ factory acceptance runtime was run after the factory CLI timeout and
 cycle-adapter shutdown fixes. The installed Python API still exposes no
 publisher GID, so per-edge TF publisher ownership remains fail-closed;
 aggregate `/tf` publisher lists are not a substitute.
-Autonomous mapping runtime acceptance, human map-quality acceptance, runtime
-report PASS, promotion, canonical-map replacement, and hardware or
-functional-safety acceptance remain unverified and must not be inferred from
-the commands below.
+The recorded Phase 15 mapping runtime is accepted at the safe terminal
+boundary: its non-faulted outcome was `INCOMPLETE` and its bounded runtime
+report passed. Human map-quality approval, promotion, canonical-map
+replacement, and hardware or functional-safety acceptance remain unverified
+and must not be inferred from the commands below.
 
 On 2026-09-14, a separate AWS warehouse visualization/mapping smoke run reached
 the safe terminal state `INCOMPLETE` with final map version 899, no goal
-failures, and no latched fault. That run used a temporary preview wrapper and
-kept the map in memory; it is visual/runtime evidence only, not canonical
-factory-map acceptance or promotion. The persistent save/validate flow below
-is the supported way to retain a candidate.
+failures, and no latched fault. That run used a temporary visualization launch
+and kept the map in memory; that former launch flow is historical, superseded,
+and non-current. The packaged AWS launch below is the supported entry point. This
+runtime result is not human map-quality approval, canonical factory-map
+acceptance, or promotion. The persistent save/validate flow below is the
+supported way to retain a run-specific candidate.
+
+For mapping, `world` means a trusted absolute local SDF 1.9 Gazebo environment;
+`/map` means a fresh in-memory SLAM occupancy map created for each launch. A
+saved map is not loaded automatically and no saved map is loaded or
+overwritten by these commands. `resource_paths` is a colon-separated list of
+absolute local model roots, or the empty string. The portable validator rejects
+direct remote worlds, `file://` resources, malformed or unversioned Fuel URLs,
+and unresolved local model references.
 
 The current navigation chain is:
 
@@ -100,6 +111,9 @@ failure.
 
 This starts the base, sensors, localization, SLAM, Nav2 planning/smoothing,
 RPP, arbitration, and mission stack without the factory world or MoveIt.
+The legacy `amr_simulation.launch.py` entry point below remains a manual smoke
+path; world-parameterized autonomous exploration uses the portable launch in
+the next section.
 
 ### Terminal 1 — Gazebo and ROS graph
 
@@ -136,6 +150,76 @@ rviz2 -d install/amr_simulation/share/amr_simulation/rviz/sensors.rviz \
 
 If a LiDAR or point-cloud display is blank, set its Reliability Policy to
 `Best Effort`.
+
+## Portable exploration with a local world
+
+Use this world-agnostic entry point for a trusted absolute local SDF 1.9 world.
+The example uses the registered simple world and starts the complete portable
+exploration graph with the empty arm, safety authority, SLAM, navigation, and
+frontier explorer:
+
+```bash
+ros2 launch amr_simulation portable_exploration.launch.py \
+  world:=/home/pete/amr_ws/src/amr_simulation/worlds/amr_world.sdf \
+  initial_x:=0.0 initial_y:=0.0 initial_z:=0.12 initial_yaw:=0.0 \
+  resource_paths:='' headless:=false rviz:=true \
+  auto_start_exploration:=true
+```
+
+With `auto_start_exploration:=true` (the default), readiness releases the
+explorer and no `/amr/exploration/start` call is needed. Only an intentional
+`auto_start_exploration:=false` launch uses that service after readiness. Stop
+or cancel exploration only through its cancellation boundary and wait for a
+non-faulted terminal state before saving.
+
+## Canonical AWS warehouse exploration
+
+The packaged AWS preset uses the derived `aws_warehouse.sdf` and the same
+portable graph. It declares only the `headless`, `rviz`, and
+`auto_start_exploration` toggles; it adds no runtime nodes of its own and
+includes the portable launch once:
+
+```bash
+ros2 launch amr_simulation aws_warehouse_exploration.launch.py \
+  headless:=false rviz:=true auto_start_exploration:=true
+```
+
+The SDF contains exact, pinned OpenRobotics Fuel model URLs. Model bundles are
+not vendored: first use requires DNS/TLS/network access to the canonical Fuel
+host unless the exact host, owner, model, and revision are already cached; a
+cache with every exact revision may then be reused offline. See the complete
+[AWS Fuel attribution and provenance record](../src/amr_simulation/assets/AWS_WAREHOUSE_FUEL_ATTRIBUTION.md)
+and the official [industrial-warehouse SDF source](https://fuel.gazebosim.org/1.0/OpenRobotics/worlds/industrial-warehouse/4/files/industrial-warehouse.sdf).
+
+The packaged RViz view uses fixed frame `map` and displays `/map`, the global
+and local costmaps, `/robot_description`, TF, `/amr/pose`, and front/rear
+LaserScan streams; point clouds are optional. `/map` and both costmaps use
+Reliable/Transient Local depth 1, costmap updates use Reliable/Volatile,
+`/amr/pose` uses Reliable/Volatile, and both LaserScan streams use
+Best Effort/Volatile. Mapping uses SLAM Toolbox and intentionally does not run
+AMCL.
+
+The AWS run autostarts exploration; do not issue a separate start call for the
+command above. After the recorded run reaches a non-faulted terminal
+`COMPLETE` or safe `INCOMPLETE` state with no active or pending goal and no
+latched fault, save and validate a run-specific candidate explicitly:
+
+```bash
+aws_session="$ROS_LOG_DIR/aws_mapping"
+mkdir -p "$aws_session"
+ros2 run amr_factory factory_mapping_cli.py save \
+  --session-dir "$aws_session" --name aws_candidate \
+  --datum-x 0.0 --datum-y 0.0 --datum-yaw 0.0
+ros2 run amr_factory factory_mapping_cli.py validate \
+  --session-dir "$aws_session" --name aws_candidate
+```
+
+The datum must match the AWS preset spawn `(0.0, 0.0, 0.12, 0.0)`; the
+candidate remains run-specific and outside the canonical factory map. Saving
+is opt-in: there is no automatic persistence. Do not run `accept` or `promote`,
+copy a candidate into the canonical map directory, replace a canonical map, or
+infer human quality approval from this runtime result. Only an intentional
+`auto_start_exploration:=false` launch uses the start service, after readiness.
 
 ## Factory and Gate 6 simulation
 

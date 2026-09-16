@@ -7,8 +7,8 @@ makes no external-control, physical-actuator, or functional-safety claim.
 
 The current workspace contains 17 ROS 2 packages. Phase 14 autonomous runtime
 acceptance is complete for Product 101 (1 kg) and Product 102 (3 kg). Phase 15
-mapping is accepted only at the source/offline boundary; runtime mapping,
-human map-quality approval, promotion, and canonical-map replacement remain
+mapping has one accepted non-faulted safe `INCOMPLETE` runtime outcome. Human
+map-quality approval, promotion, and canonical-map replacement remain
 unverified. Product 103 (5 kg), Gate 7, hardware, and functional-safety claims
 are outside scope.
 
@@ -35,9 +35,25 @@ are outside scope.
 | `amr_manipulation` | 14 | Cycle adapter, Gate 6 runner, MoveIt launch | Cycle action, manipulation status, attachment proof | Separate processes/launch-managed | Base command ownership or independent status authority |
 
 Packages through Phase 15 are present in the current source tree. The accepted
-runtime boundaries are Product 101/102 factory cycles and the existing
-simulation stack. Phase 15 live mapping and promotion remain separately gated;
-automatic recovery, Product 103, Gate 7, and hardware are excluded from scope.
+runtime boundaries are Product 101/102 factory cycles, the existing simulation
+stack, and the recorded safe `INCOMPLETE` mapping outcome. Phase 15 human
+quality review, promotion, and canonical-map replacement remain separately
+gated; automatic recovery, Product 103, Gate 7, and hardware are excluded from
+scope.
+
+Portable exploration uses `amr_simulation/portable_stow_authority` as the sole
+`/amr/manipulation/status` publisher. That publisher is a portable-runtime
+exception and cannot coexist with the factory or Gate 6 manipulation-status
+owner in the same ROS graph.
+
+For mapping, `world` is a trusted absolute local SDF 1.9 Gazebo environment;
+`/map` is a fresh in-memory SLAM occupancy map created on every launch. No
+saved map is loaded or overwritten. `resource_paths` is a colon-separated list
+of absolute local model roots. The portable validator rejects direct remote
+worlds, `file://` resources, malformed or unversioned Fuel URLs, and unresolved
+local model references. AWS model bundles remain remote; use the pinned
+OpenRobotics Fuel URLs and the [full simulation command reference](../docs/SIMULATION_COMMANDS.md)
+for the network/cache and attribution rules.
 
 ## Build and test
 
@@ -51,7 +67,7 @@ colcon test-result --verbose
 ## Run the simulation
 
 Build the workspace first, then start the full Gazebo simulation in one
-terminal:
+terminal. This legacy launch remains a manual smoke path:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -86,6 +102,29 @@ The LiDAR and point-cloud publishers use Best Effort QoS. If their RViz
 displays are blank, set each corresponding display's Reliability Policy to
 Best Effort. The SLAM map remains available on `/map`.
 
+For world-agnostic autonomous exploration, use the packaged portable launch
+with the trusted simple-world SDF:
+
+```bash
+ros2 launch amr_simulation portable_exploration.launch.py \
+  world:=/home/pete/amr_ws/src/amr_simulation/worlds/amr_world.sdf \
+  initial_x:=0.0 initial_y:=0.0 initial_z:=0.12 initial_yaw:=0.0 \
+  resource_paths:='' headless:=false rviz:=true \
+  auto_start_exploration:=true
+```
+
+For the canonical AWS warehouse preset:
+
+```bash
+ros2 launch amr_simulation aws_warehouse_exploration.launch.py \
+  headless:=false rviz:=true auto_start_exploration:=true
+```
+
+Both commands autostart exploration after readiness; no separate start-service
+call is needed. The AWS source, exact Fuel ownership/revisions, and the local
+MIT-0 ownership boundary are recorded in
+[`AWS_WAREHOUSE_FUEL_ATTRIBUTION.md`](amr_simulation/assets/AWS_WAREHOUSE_FUEL_ATTRIBUTION.md).
+
 ## Autonomous factory cycle
 
 For the accepted Product 101/102 autonomous boundary, use the registry-derived
@@ -100,5 +139,6 @@ Start MoveIt separately, then use `ros2 run amr_factory factory_cli.py` for
 station selection, sequences, stop/cancel, home, and status. Product 103,
 Gate 7, physical hardware, and functional-safety acceptance are outside scope.
 `factory_demo.launch.py` remains legacy/optional. Phase 15 mapping uses the
-separate `factory_mapping.launch.py` entry point and has not received runtime
-or canonical-map acceptance.
+separate `factory_mapping.launch.py` entry point; its recorded runtime boundary
+is a safe `INCOMPLETE` outcome, while human map-quality approval, promotion,
+and canonical-map replacement remain unverified.

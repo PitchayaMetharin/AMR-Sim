@@ -1,5 +1,279 @@
 # AMR Session Handoff
 
+## Active authorized plan — 2026-09-14 — Portable exploration and canonical AWS warehouse
+
+The user has authorized implementation of a new world-agnostic simulation
+entry point while preserving the existing factory product-acceptance launches.
+The work must follow the repository workflow one packet at a time:
+
+`Sol/high diagnosis -> Luna/max implementation -> Sol/high independent review`
+
+No Astra delegation is authorized.  `AMR_CODEX_HANDOFF.md` must remain
+untouched.  Preserve the untracked `phase14_evidence/` directory and exclude it
+from commits.  The final requested commit is
+`feat: add portable simulation exploration and canonical AWS world`; pushing to
+`origin/main` remains approval-gated by the repository rules.
+
+### Packet 1 — portable exploration core
+
+- Add `amr_simulation/launch/portable_exploration.launch.py` without changing
+  `amr_simulation.launch.py`.
+- Accept a required absolute trusted local SDF 1.9 world plus finite spawn pose,
+  optional local model resource paths, `headless`, `rviz`, and
+  `auto_start_exploration` arguments.  Parse the one named world and derive all
+  Gazebo bridge namespaces from it.
+- Fail closed before launch for malformed/multiple worlds, missing required
+  Gazebo systems, unsafe/non-finite physics, a pre-existing `amr` model,
+  invalid pose, unresolved `model://` assets, `file://` resources, direct
+  remote worlds, or Fuel model URLs without an explicit positive revision.
+- Spawn `phase14_mobile_manipulator.urdf.xacro` empty with
+  `factory_attachment=false`; start controller spawners only after successful
+  insertion and shut down on any required-process failure.
+- Add a portable-runtime-only simulation stow authority.  It sends exactly one
+  standard arm trajectory `[0, -1.5708, 1.5708, 0, 0, 0]`, uses the existing
+  0.01-rad tolerance plus fresh joints/base proof and authority QoS, remains
+  `STARTING` with motion denied until proven, admits only `STOWED_EMPTY`,
+  immediately revokes stale/drifted proof, and latches `FAULT` on rejection or
+  explicit failure without retry.
+- Require stowed manipulation in command arbitration and causally stage
+  adapters/authority, SLAM/map, planner, controller, mission, then Explorer.
+  Readiness has no elapsed-time cap while required processes live, reports an
+  unmet condition at least every 60 seconds, and fails immediately on process
+  exit, explicit fault, shutdown, or user stop.  Explorer release requires
+  fresh map/costmap/TF/base/stow/lifecycle/action evidence and passes
+  `auto_start_exploration` through its existing `autostart` parameter.
+- Add package dependencies, portable-runtime ownership documentation, and
+  failing-first contract/behavior tests for validation, dynamic bridge names,
+  stow terminal/freshness/sequence behavior, staged release, process failure,
+  autostart override, and the absence of AMCL/map-server.
+
+### Packet 2 — canonical AWS preset
+
+- Package the proven AWS warehouse as `aws_warehouse_world`, with Bucket at
+  Fuel revision 3 and ShelfF, WallB, ShelfE, ShelfD, GroundB, Lamp,
+  ClutteringA/C/D, TrashCanC, and PalletJackB at revision 4.
+- Add `aws_warehouse_exploration.launch.py` as a thin include of the portable
+  launch at spawn `(0, 0, 0.12, 0)` and package an RViz view for the SLAM map,
+  both costmaps, robot model, TF, pose, and both LiDAR streams.
+- Record exact Fuel ownership, revisions, URLs, cache/network requirements,
+  and attribution without extending the local MIT-0 asset claim.  Remove all
+  repository/runtime dependencies on `/tmp/amr-aws-exploration-preview.*`.
+  SLAM Toolbox remains the sole `map -> odom` owner; AMCL stays absent.
+
+### Packet 3 — commands, saving, and closeout
+
+- Update repository simulation documentation and external AWS/factory quick
+  commands.  Clarify that a "map" input is a Gazebo SDF environment and every
+  launch creates a fresh in-memory SLAM occupancy map.
+- Preserve explicit manual saving through the existing validated mapping CLI
+  after `COMPLETE` or safe `INCOMPLETE`, using the chosen spawn datum.  Do not
+  auto-save, auto-accept, promote, or replace a canonical map.
+- Update this handoff only after validation.  Run Python compilation, focused
+  pytest, selected package builds/tests, verbose `colcon test-result`,
+  `git diff --check`, and installed-package `--show-args` for both launches.
+- With runtime authorization, run one fresh generic simple-world launch and one
+  fresh AWS+RViz launch.  Acceptance requires automatic `run_generation=1`
+  without a start service call, fresh safety authority, growing SLAM map, both
+  costmaps, unique SLAM `map -> odom` ownership, at least one successful
+  navigation goal, and non-faulted `COMPLETE` or safe `INCOMPLETE`.  Save and
+  validate one run-specific AWS candidate without promotion.
+
+### Preserved behavior and stop conditions
+
+The complete arm-equipped AMR remains the portable default with no payload.
+Factory acceptance paths, fail-closed gates, ownership boundaries, public
+interfaces, thresholds, documented hardware values, cancellation semantics,
+and canonical maps remain unchanged unless this plan explicitly says otherwise.
+Any failed implementation returns to Sol/high diagnosis before another source
+change; timing/runtime contradictions and mandatory-gate failures stop the
+packet under the existing two-attempt/three-hypothesis limits.
+
+## Runtime validation checkpoint — 2026-09-15 (in progress)
+
+The first generic attempt, `portable_simple_20260915_02` (ROS domain 230),
+failed before acceptance because the required
+`portable_exploration_readiness.py` crashed on a Humble
+`RcutilsLogger.warning` printf-style `TypeError`.  The launch shut down
+fail-closed.  Evidence is preserved under
+`.ros_logs/portable_simple_20260915_02`.
+
+Sol/high diagnosed the failure, Luna/max implemented the approved two-file
+fix, and Sol/high independently reviewed it as `PASS`.  Focused readiness
+validation passed all 9 tests; build, source/install identity, and diff checks
+also passed.  Command-only retries found that an empty `resource_paths:=`
+argument was rejected and ROS domain 233 was invalid; no simulation started
+for either retry.
+
+The current generic run, `portable_simple_20260915_03` (ROS domain 231,
+partition `amr_portable_simple_20260915_03`), is still in progress at this
+checkpoint with `headless=true`, `rviz=false`, `autostart=true`, and the
+optional `resource_paths` argument omitted.  Robot insertion, controllers,
+stow authority, and SLAM have started.  Fresh map and single-owner
+`TF`/authority evidence has been observed.  Readiness is waiting on fresh
+`map->odom` and composed `map->base_footprint` TF.  There is no terminal
+verdict, no AWS launch, and no Packet 3B closeout yet.  State-observer evidence
+is under `.ros_logs/portable_simple_20260915_03/evidence/`.
+
+`AMR_CODEX_HANDOFF.md` and `phase14_evidence/` remain protected.
+
+## Runtime validation stop checkpoint — 2026-09-15
+
+The generic run `portable_simple_20260915_03` (ROS domain 231,
+partition `amr_portable_simple_20260915_03`) was stopped through its owned
+launch, observer, and TF-observer handles after repeated readiness reports
+left it at `slam_map` with only `fresh map->odom TF` and `fresh composed
+map->base_footprint TF` unmet.  No acceptance verdict was claimed.  Evidence
+is preserved under `.ros_logs/portable_simple_20260915_03/`.
+
+Sol/high diagnosed a source/configuration compatibility defect: Humble
+SLAM Toolbox intentionally future-dates `map->odom` by the configured
+`transform_timeout: 1.0`, while portable readiness rejected all future TF
+stamps with zero tolerance.  Direct TF and ownership evidence showed fresh
+`/amr/slam_toolbox` and `/amr/ekf_filter_node` publishers, so this was not
+missing publication or QoS loss.  The approved next packet is limited to the
+readiness script and its focused tests, permitting at most the exact 1.0-second
+SLAM `map->odom` offset while preserving zero future tolerance elsewhere.
+
+The subsequent Luna/max implementation turn reached its usage limit before
+editing; no TF-tolerance source or test change was made from that attempt.
+The previously accepted logger correction remains installed and reviewed.
+AWS has not been launched, no candidate has been saved, and Packet 3B is not
+complete.  `AMR_CODEX_HANDOFF.md` remains untouched and `phase14_evidence/`
+remains preserved.
+
+## Runtime observer stop checkpoint — 2026-09-15
+
+The fresh generic run `portable_simple_20260915_04` (ROS domain 231) passed
+the corrected readiness stages through Explorer startup and produced fresh
+SLAM map, global/local costmap, base, stow, and TF-owner evidence.  The
+run-specific observer then failed at its own parsing boundary because Humble
+`DiagnosticStatus.level` is byte-valued (`b'\\x00'`) while the observer cast it
+with `int()`.  Its exception escaped into a second finalization path, which
+also reported a closed-JSONL write error.  No terminal acceptance verdict was
+claimed; all evidence is preserved under
+`.ros_logs/portable_simple_20260915_04/`.
+
+Sol/high diagnosed the exact observer-only repair: normalize byte-valued
+levels, catch unexpected spin exceptions before one finalization, and make a
+final JSONL write failure fail closed without a second write.  Two Luna/max
+implementation attempts were made after the usage reset but stalled without
+editing.  Under the repository two-attempt stop rule, autonomous observer
+patching is paused pending explicit user direction.  The source TF-tolerance
+fix remains independently reviewed `PASS`.  AWS has not been launched, no
+candidate has been saved, and Packet 3B remains incomplete.
+
+`AMR_CODEX_HANDOFF.md` remains untouched and the untracked `phase14_evidence/`
+directory remains preserved.
+
+## Runtime observer correction checkpoint — 2026-09-15
+
+The user explicitly authorized a fresh Luna/max observer-fix attempt after the
+two-attempt stop.  The run-specific observer artifact was corrected in place
+only at `.ros_logs/portable_simple_20260915_01/evidence/` (mode `0775`).
+Diagnostic levels now accept Humble's one-byte representation and reject
+malformed values fail-closed.  Unexpected spin exceptions are recorded even
+when terminal admission had already set `finish_requested`; finalization is
+single-path, and final JSONL failures persist a `FAIL` verdict without a
+closed-stream retry.
+
+The corrected artifact was independently reviewed by Sol/high as `PASS` with
+SHA256
+`46daad3bcab151864d6defbbe341376eaa46be78db62c587db720a625c60dc3b`.
+Focused self-check, bytecode compilation, and `git diff --check` passed.  No
+runtime was launched from this correction yet; the next safe step is a fresh
+generic simple-world runtime run using the reviewed observer.  AWS and Packet
+3B remain pending, and `AMR_CODEX_HANDOFF.md` plus `phase14_evidence/` remain
+protected.
+
+## Generic runtime checkpoint — 2026-09-15 (run 05 stopped for diagnosis)
+
+The fresh generic simple-world run `portable_simple_20260915_05` (ROS domain
+231, `headless=true`, `rviz=false`, automatic exploration) reached the
+behavioral acceptance evidence with the corrected observer: Explorer
+`run_generation=1`, two successful navigation goals, SLAM known cells growing
+from 4,921 to 9,032, fresh nonempty global/local costmaps, advancing READY
+base status, fresh `STOWED_EMPTY` authority owned by
+`/amr/portable_stow_authority`, and exact single-owner
+`map->odom`/`odom->base_footprint` TF evidence.  Explorer published a safe
+non-faulted `INCOMPLETE` terminal state with no pending goal, empty
+`cancel_target`, and zero goal failures.
+
+The run-specific observer then failed to finalize its own verdict: its last
+JSONL snapshot contained the terminal state and no failures, but no
+`verdict.yaml` was written and the observer remained alive in
+`futex_wait_queue` for over three minutes.  The owned launch and probes were
+stopped with the exact launch handle; no acceptance verdict is claimed.
+Evidence is preserved under `.ros_logs/portable_simple_20260915_05/`.
+
+Sol/high diagnosis is pending for this observer-only terminal-finalization
+hang.  No source edits were made from the runtime symptom.  AWS and Packet 3B
+remain pending; `AMR_CODEX_HANDOFF.md` remains untouched and
+`phase14_evidence/` remains preserved.
+
+## Generic runtime acceptance checkpoint — 2026-09-15 (run 06 PASS)
+
+The corrected observer was rerun against the simple SDF as
+`portable_simple_20260915_06` (ROS domain 231, `headless=true`, `rviz=false`,
+automatic exploration).  It produced exactly one `PASS` verdict and exited
+cleanly after `finish_reason: terminal evidence evaluated`; no
+`/amr/exploration/start` call was issued.  The accepted terminal was safe
+non-faulted `INCOMPLETE` with `run_generation=1`, `active=false`,
+`pending=false`, empty `cancel_target`, and zero goal failures.
+
+Runtime evidence includes two successful NavigateToPose goals, strict SLAM
+known-cell growth from 4,921 to 9,063, fresh valid nonempty global and local
+costmaps, advancing READY base status, fresh empty stow authority owned by
+`/amr/portable_stow_authority`, exactly one `/map` publisher owned by
+`/amr/slam_toolbox`, and exact TF ownership
+`map->odom=/amr/slam_toolbox` plus
+`odom->base_footprint=/amr/ekf_filter_node`.  No AMCL or map-server node was
+observed.  Evidence is preserved under
+`.ros_logs/portable_simple_20260915_06/` and all runtime processes are
+cleaned up.
+
+The generic runtime gate is now accepted.  The next safe step is the fresh
+canonical AWS warehouse launch with RViz and the AWS-specific lidar checks;
+Packet 3B remains open until that run and manual candidate save/validation
+complete.
+
+## AWS runtime startup checkpoint — 2026-09-15 (run 01 stopped for diagnosis)
+
+The first canonical AWS launch `aws_warehouse_20260915_01` (ROS domain 232,
+`headless=false`, `rviz=true`) failed closed before robot insertion.  The
+canonical-host Fuel bundle was cold: Gazebo downloaded all 12 distinct pinned
+model revisions, and the world/create services became available about 100
+seconds after Gazebo start.  The concurrent `ros_gz_sim create` request timed
+out at about five seconds but returned code 0; the launch consequently started
+the joint-state spawner, which timed out after 30 seconds because
+`/controller_manager/list_controllers` did not yet exist.  The required
+spawner failure shut down the launch.  Network access succeeded and all exact
+Fuel model directories are now cached; GUI/RViz was not causal.
+
+Sol/high diagnosed both the cold-cache timing and a real portable-launch gate
+defect: create-process return code 0 is not positive insertion proof, so the
+spawners are not causally gated on world readiness/control-plugin evidence.
+The observer correctly recorded a fail-closed verdict; no AWS acceptance is
+claimed.  The next implementation packet is limited to an evidence-based
+world/insertion gate (no arbitrary sleep or widened timeout), followed by a
+fresh warm-cache AWS runtime.  `AMR_CODEX_HANDOFF.md` remains untouched and
+`phase14_evidence/` remains preserved.
+
+## User stop checkpoint — 2026-09-15
+
+The user instructed this session to stop after updating the handoff.  All
+runtime processes and probes are stopped.  Generic run 06 remains the accepted
+simple-world runtime (`PASS`, safe `INCOMPLETE`); AWS run 01 remains a
+fail-closed cold-cache startup failure with all exact Fuel model revisions now
+cached.  Sol/high's diagnosis and the proposed causal insertion-gate packet
+are recorded above.  Luna/max was interrupted before making any source edits,
+so the portable launch still needs that reviewed gate before another AWS run.
+
+No AWS candidate was saved, Packet 3B is incomplete, `AMR_CODEX_HANDOFF.md`
+was not modified, and the untracked `phase14_evidence/` directory remains
+preserved.  Safe resume point: Sol/high review of the causal insertion-gate
+implementation, then a warm-cache canonical AWS+RViz runtime and manual
+run-specific save/validate only after a PASS terminal verdict.
+
 ## Latest authoritative state — 2026-09-14 — Phase 15 TF fix and autonomous mapping runtime complete
 
 The Phase 15 Explorer TF/readiness correction is implemented, independently

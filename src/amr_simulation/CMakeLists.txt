@@ -22,6 +22,12 @@ target_link_libraries(
   gz-transport13::gz-transport13)
 install(TARGETS amr-command-watchdog-system DESTINATION lib)
 install(DIRECTORY launch rviz worlds DESTINATION share/${PROJECT_NAME})
+install(FILES assets/AWS_WAREHOUSE_FUEL_ATTRIBUTION.md
+  DESTINATION share/${PROJECT_NAME}/assets)
+install(PROGRAMS
+  scripts/portable_stow_authority.py
+  scripts/portable_exploration_readiness.py
+  DESTINATION lib/${PROJECT_NAME})
 ament_environment_hooks(hooks/gz_sim_system_plugin_path.dsv.in)
 
 if(BUILD_TESTING)
@@ -31,6 +37,14 @@ if(BUILD_TESTING)
     test_command_watchdog test/test_command_watchdog.cpp)
   target_include_directories(test_command_watchdog PRIVATE include)
   ament_add_pytest_test(simulation_contract_test test/test_simulation_contract.py)
+  ament_add_pytest_test(
+    portable_exploration_launch_test test/test_portable_exploration_launch.py)
+  ament_add_pytest_test(
+    portable_stow_authority_test test/test_portable_stow_authority.py)
+  ament_add_pytest_test(
+    portable_exploration_readiness_test test/test_portable_exploration_readiness.py)
+  ament_add_pytest_test(
+    aws_warehouse_exploration_test test/test_aws_warehouse_exploration.py)
 endif()
 
 ament_package()

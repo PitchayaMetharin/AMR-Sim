@@ -21,6 +21,7 @@ For copy/paste runtime procedures, use [SIMULATION_COMMANDS.md](SIMULATION_COMMA
 | Service | Quick request/response operation between ROS nodes. |
 | Action | Long-running cancellable goal; used for missions. |
 | Lifecycle node | A node deliberately moved unconfigured -> inactive -> active; outputs publish only while active. |
+| World | A Gazebo SDF environment. For portable exploration it is a trusted absolute local SDF 1.9 file, not a saved SLAM map. |
 | TF | Coordinate-frame relationships. This project uses map -> odom -> base_footprint. |
 | QoS | Topic delivery rules. Commands/authority are reliable and short-lived; simulated sensors are best effort. |
 
@@ -98,6 +99,23 @@ There is no custom rclcpp node here. amr_simulation.launch.py starts Gazebo, rob
 
 command_watchdog_system.cpp is a Gazebo plugin. It enables the plant when native Gazebo command data arrives and disables it after 200 ms without data. It is independent of ROS nodes.
 
+The legacy `amr_simulation.launch.py` entry point uses the registered simple
+world and is useful for manual smoke tests. The
+`portable_exploration.launch.py` entry point accepts one trusted absolute local
+SDF 1.9 world, validates it before starting processes, derives the
+world-qualified Gazebo bridge names, and starts the staged autonomous
+exploration graph. It spawns the arm empty with
+`factory_attachment=false`, runs a one-shot portable empty-stow authority, and
+keeps motion denied until fresh stow, base, map, TF, costmap, lifecycle, and
+action evidence is present. A failed validation or required process shuts the
+run down fail-closed.
+
+`aws_warehouse_exploration.launch.py` is a thin preset around that portable
+launch. Its world contains pinned OpenRobotics Fuel references; model bundles
+are not vendored. See [SIMULATION_COMMANDS.md](SIMULATION_COMMANDS.md) and the
+[Fuel attribution record](../src/amr_simulation/assets/AWS_WAREHOUSE_FUEL_ATTRIBUTION.md)
+for cache, network, and ownership details.
+
 ### amr_base_adapter — final ROS boundary before Gazebo
 
 **Node:** base_adapter_node
@@ -151,7 +169,10 @@ This is navigation input quality control, not obstacle avoidance or a safety fun
 It consumes the front adapted LaserScan and local TF, publishes /map, and owns map -> odom. Its map resolution is 5 cm. It has no velocity or navigation authority.
 
 The factory launch uses the registered static map and AMCL instead of online
-SLAM; standalone simulation is the normal path for experimenting with SLAM.
+SLAM. Standalone simulation and portable exploration use online SLAM instead;
+each launch creates a fresh in-memory `/map`, and no saved map is loaded or
+overwritten automatically. Portable exploration intentionally has no AMCL or
+`nav2_map_server`.
 
 ### amr_navigation — global planning and path smoothing, configuration only
 
@@ -220,8 +241,16 @@ the existing `/amr/mission/navigate_to_pose` action. It never publishes base
 velocity. It requires fresh map, costmap, TF, and command-authority evidence;
 fully obstructed clusters are skipped without consuming a motion token. A
 fault, confirmed cancellation, or unsafe evidence stops the run fail-closed.
-The current frontier packet has source/offline evidence only; no post-packet
-runtime acceptance is claimed.
+The current portable runtime has one accepted non-faulted safe terminal
+outcome, `INCOMPLETE`; this does not establish human map-quality approval.
+The portable launch autostarts it after staged readiness by default; set
+`auto_start_exploration:=false` only when you intentionally want to call its
+start service after readiness. Human map-quality review and canonical-map
+promotion remain separate decisions.
+
+The portable stow authority is the sole `/amr/manipulation/status` publisher
+in that runtime. Do not combine it with the factory or Gate 6 manipulation
+status owner in the same ROS graph.
 
 ### amr_manipulation — cycle and Gate 6 manipulation
 
@@ -239,16 +268,354 @@ mapping. `factory_autonomous.launch.py` is the canonical autonomous launch;
 `factory_demo.launch.py` is legacy/optional. The mapping CLI and acceptance
 tools write only run-specific artifacts and never replace the canonical map.
 
-## Recommended beginner reading order
+## Beginner learning path: read the project in this order
 
-1. src/amr_interfaces/msg/ — data contracts and named state/reason values.
-2. src/amr_control/src/command_arbitration_node.cpp — parameters, limits, acceleration ramps.
-3. src/amr_base_adapter/src/base_adapter_node.cpp — final ROS boundary.
-4. src/amr_localization/src/wheel_odometry_node.cpp and include/amr_localization/diff_drive.hpp — movement math.
-5. src/amr_mission/src/mission_supervisor_node.cpp — ROS actions and async callbacks.
-6. src/amr_health/src/health_supervisor_node.cpp — defensive diagnostics.
+Do not begin by opening every file in `src/`. This is a working ROS 2 system,
+so the easiest way to understand it is to follow one piece of information from
+its definition, through its producer, to its consumers. Use the lessons below
+in order. For each lesson, read the named files, run the small check, and do
+not move on until you can explain the checkpoint in your own words.
 
-For every lifecycle node, read constructor (parameters), on_configure() (connections), on_activate() (timers/publishers), callbacks, tick(), then on_deactivate().
+### Lesson 0 — learn the vocabulary and the safety story
+
+Read these first:
+
+1. `docs/ROS2_BEGINNER_PROJECT_GUIDE.md` — this guide and its two diagrams.
+2. `src/README.md` — the package ownership table and scope boundaries.
+3. `docs/SIMULATION_COMMANDS.md` — the supported launch commands and what is
+   accepted versus still unverified.
+
+Before reading C++, learn these words: node, topic, publisher, subscriber,
+service, action, lifecycle node, parameter, message, QoS, Gazebo world, URDF,
+SDF, and TF. In this project, remember the difference between these two
+things:
+
+- `world` is the Gazebo environment, such as
+  `src/amr_simulation/worlds/amr_world.sdf`.
+- `/map` is the occupancy grid built by SLAM during a run. Portable launches
+  create it in memory; they do not automatically load a saved map.
+
+Checkpoint: explain why a node can publish a velocity request without the
+robot moving. The answer should include command arbitration, the base adapter,
+and the Gazebo watchdog.
+
+### Lesson 1 — start with the contracts, not the implementations
+
+Read the interface definitions in this order:
+
+1. `src/amr_interfaces/msg/BaseStatus.msg` — what the base reports about
+   readiness, freshness, and faults.
+2. `src/amr_interfaces/msg/HealthStatus.msg` — observation-only health output.
+3. `src/amr_interfaces/msg/ManipulatorStatus.msg` — empty-stow and held-product
+   authority states.
+4. `src/amr_interfaces/msg/FactoryStatus.msg` — factory orchestration state.
+5. `src/amr_interfaces/srv/SetOperationMode.srv` — a request/response service.
+6. `src/amr_interfaces/action/ExecuteProductCycle.action`, then
+   `ManipulateProduct.action`, `NavigateStation.action`, `RunSequence.action`,
+   and `TransportProduct.action` — long-running goals, feedback, results, and
+   cancellation.
+7. `src/amr_interfaces/include/amr_interfaces/qos_profiles.hpp` — why command
+   and authority topics use different delivery rules from simulated sensors.
+
+Then read the tests that describe the contract:
+
+- `src/amr_interfaces/test/test_interface_schema.py`
+- `src/amr_interfaces/test/test_fail_closed_defaults.cpp`
+- `src/amr_interfaces/test/test_qos_profiles.cpp`
+
+Checkpoint: for any status message, identify its timestamp, sequence or boot
+identity, validity, and fault fields. Explain why a consumer must reject stale,
+replayed, malformed, or backward-time evidence instead of guessing.
+
+### Lesson 2 — understand the robot before the nodes
+
+Read the robot model from outside in:
+
+1. `src/amr_description/urdf/amr.urdf.xacro` — the mobile base, frames,
+   wheels, IMU, and LiDAR links.
+2. `src/amr_description/urdf/phase14_mobile_manipulator.urdf.xacro` — the
+   arm-equipped robot used by the portable and factory paths.
+3. `src/amr_description/config/phase14_mobile_manipulator_controllers.yaml` —
+   the simulated joint controllers.
+4. `src/amr_description/config/phase14_mobile_manipulator.srdf` — MoveIt
+   groups and planning relationships.
+5. `src/amr_simulation/worlds/amr_world.sdf` — a simple Gazebo environment.
+6. `src/amr_simulation/src/command_watchdog_system.cpp` and
+   `src/amr_simulation/include/amr_simulation/command_watchdog.hpp` — the
+   native Gazebo stop condition.
+
+Do not spend time on mesh geometry yet. The files under
+`src/amr_description/meshes/` describe appearance and collision shapes; they
+are useful later, but they do not explain the ROS data flow.
+
+Checkpoint: draw the TF chain `map -> odom -> base_footprint -> sensor frame`
+and point to the file or node responsible for each part. Also explain what
+happens if the base receives no command for 200 ms.
+
+### Lesson 3 — learn how the graph is assembled
+
+Read launch files only after you know the contracts and robot model:
+
+1. `src/amr_bringup/config/interface_ownership.yaml` — intended topic
+   publishers and ownership boundaries.
+2. `src/amr_bringup/config/qos_profiles.yaml` — QoS intent.
+3. `src/amr_bringup/config/runtime_defaults.yaml` — shared runtime defaults.
+4. `src/amr_bringup/launch/amr_system.launch.py` — startup of the health
+   supervisor and bring-up conventions.
+5. `src/amr_simulation/launch/amr_simulation.launch.py` — the fixed, legacy
+   smoke-test graph.
+6. `src/amr_simulation/launch/portable_exploration.launch.py` — the validated,
+   world-agnostic graph. Read its validation helpers first, then its staged
+   process graph.
+7. `src/amr_simulation/launch/aws_warehouse_exploration.launch.py` — the thin
+   AWS preset that includes the portable launch once.
+
+When reading a launch file, ask four questions: what arguments are public,
+which process starts first, what event releases the next process, and what
+event shuts the graph down? The portable launch is intentionally more
+defensive: it validates the SDF, spawn pose, local resources, and required
+Gazebo systems before expansion; it also shuts down when a required process
+exits.
+
+Checkpoint: state the difference between the legacy fixed launch, the portable
+local-world launch, and the AWS preset. Also explain why the AWS preset is not
+a second independent implementation of the runtime graph.
+
+### Lesson 4 — trace a velocity request through the safety gates
+
+Read these in runtime order, from the last ROS decision to the simulated
+plant:
+
+1. `src/amr_control/config/control.yaml` — limits, timeouts, and ramp values.
+2. `src/amr_control/src/command_arbitration_node.cpp` — rejects malformed
+   commands, expires stale input, clamps speed, ramps acceleration, and
+   publishes zero when authority is not proven.
+3. `src/amr_control/launch/amr_control.launch.py` — how the node is started.
+4. `src/amr_base_adapter/src/base_adapter_node.cpp` — the final ROS boundary
+   before Gazebo; it validates again and forwards only fresh planar commands.
+5. `src/amr_base_adapter/test/test_base_adapter_contract.py` and
+   `src/amr_base_adapter/test/test_base_adapter_node.cpp` — examples of the
+   boundary tests.
+6. Re-read `src/amr_simulation/src/command_watchdog_system.cpp` — the
+   independent native watchdog.
+
+Do not start with the Nav2 controller. First understand why a bad command is
+stopped even if it came from a trusted-looking node. The project uses several
+independent gates because a single publisher or process must not have total
+motion authority.
+
+Checkpoint: follow `/amr/mpc/cmd_vel` to `/amr/control/cmd_vel` and then to the
+Gazebo command topic. List at least three conditions that cause zero output.
+
+### Lesson 5 — learn the robot's measurements and local motion estimate
+
+Read the sensor path in this order:
+
+1. `src/amr_sensor_adapters/src/lidar_adapter_node.cpp` and
+   `imu_adapter_node.cpp` — stable ROS names over Gazebo bridge topics.
+2. `src/amr_base_adapter/src/base_adapter_node.cpp` — joint states and raw
+   odometry entering the ROS graph.
+3. `src/amr_localization/include/amr_localization/diff_drive.hpp` — the small,
+   testable differential-drive equations.
+4. `src/amr_localization/src/wheel_odometry_node.cpp` — timestamps, wheel
+   deltas, and wheel odometry publication.
+5. `src/amr_localization/config/ekf.yaml` — robot_localization configuration.
+6. `src/amr_localization/launch/amr_localization.launch.py` — how wheel
+   odometry and the EKF are composed.
+7. `src/amr_localization/test/test_diff_drive.cpp`,
+   `test_wheel_odometry_configuration.cpp`, and
+   `test_localization_contract.py` — the expected edge cases.
+
+Checkpoint: explain why the first wheel sample establishes a baseline instead
+of moving the robot, why backward timestamps are rejected, and why the EKF
+alone owns `odom -> base_footprint`.
+
+### Lesson 6 — understand perception validation before SLAM
+
+Read:
+
+1. `src/amr_perception/include/amr_perception/point_cloud_validation.hpp` —
+   the validation rules.
+2. `src/amr_perception/src/lidar_pipeline_node.cpp` — the lifecycle adapter
+   that validates and forwards front/rear point clouds.
+3. `src/amr_perception/launch/amr_perception.launch.py` — the two configured
+   sensor instances.
+4. `src/amr_perception/test/test_point_cloud_validation.cpp`,
+   `test_lidar_pipeline_configuration.cpp`, and
+   `test_perception_contract.py` — stale, future, malformed, and
+   non-monotonic data cases.
+
+Checkpoint: explain why perception can improve navigation without owning
+velocity or personnel safety, and name the conditions that make a cloud
+unusable.
+
+### Lesson 7 — learn SLAM and TF ownership
+
+Read:
+
+1. `src/amr_slam/config/mapper.yaml` — SLAM Toolbox parameters.
+2. `src/amr_slam/launch/amr_slam.launch.py` — the configured external SLAM
+   node.
+3. `src/amr_slam/test/test_slam_contract.py` — the map and ownership
+   expectations.
+4. `src/amr_localization/config/ekf.yaml` again — compare the EKF's TF edge
+   with SLAM's TF edge.
+
+SLAM Toolbox owns `map -> odom`; the EKF owns `odom -> base_footprint`. Do not
+solve a TF problem by adding a second publisher. In portable exploration,
+SLAM creates a new `/map` during every launch. In the factory launch, AMCL and
+the registered static map replace the online SLAM path.
+
+Checkpoint: explain why two publishers for the same TF edge are dangerous and
+why a saved map is not automatically part of a portable exploration launch.
+
+### Lesson 8 — learn planning and path following separately
+
+Read planning first:
+
+1. `src/amr_navigation/config/planner.yaml` — global planner, smoother, and
+   costmap settings.
+2. `src/amr_navigation/launch/amr_navigation.launch.py` — planner, smoother,
+   costmaps, and lifecycle manager.
+3. `src/amr_navigation/test/test_navigation_contract.py` — configuration and
+   ownership checks.
+
+Then read local control:
+
+4. `src/amr_mpc_controller/config/controller.yaml` — the active Regulated
+   Pure Pursuit controller settings.
+5. `src/amr_mpc_controller/launch/amr_mpc_controller.launch.py` — the Nav2
+   controller and lifecycle manager.
+6. `src/amr_mpc_controller/test/test_mpc_controller_contract.py` — the
+   compatibility names and safety assumptions.
+
+Remember the separation: planners create paths, the smoother checks and
+regularizes paths, RPP follows a path and requests velocity, and
+`command_arbitration_node` remains the project-owned motion boundary.
+
+Checkpoint: describe the order `map -> global costmap -> planner -> smoother
+-> controller -> velocity request`, and identify which component is allowed to
+publish the velocity request.
+
+### Lesson 9 — learn one ROS action end to end
+
+Read:
+
+1. `src/amr_mission/include/amr_mission/goal_validation.hpp` — input
+   validation without ROS transport details.
+2. `src/amr_mission/src/mission_supervisor_node.cpp` — action server,
+   asynchronous Nav2 calls, feedback, cancellation, and result handling.
+3. `src/amr_mission/launch/amr_mission.launch.py` — parameters and startup.
+4. `src/amr_mission/test/test_goal_validation.cpp`,
+   `test_mission_supervisor_behavior.cpp`, and `test_mission_contract.py` —
+   invalid goals, cancellation, and downstream failure behavior.
+
+The mission node does not publish velocity. It validates a goal, asks Nav2 for
+a path, asks the smoother to check it, asks the controller to follow it, and
+forwards the result. If a downstream action is unavailable, rejected, or
+fails, the mission must abort rather than inventing success.
+
+Checkpoint: explain the difference between a topic command and an action goal,
+and trace what happens when the operator cancels a mission.
+
+### Lesson 10 — learn health and fail-closed observation
+
+Read:
+
+1. `src/amr_health/src/health_supervisor_node.cpp` — freshness, boot ID,
+   sequence, recognized state/reason, and fault checks.
+2. `src/amr_health/launch/amr_health.launch.py` — startup and parameters.
+3. `src/amr_health/test/test_health_configuration.cpp` and
+   `test_health_contract.py` — the defensive cases.
+
+Health is an observer. It can report `HEALTHY`, `DEGRADED`, or `FAULT`, but it
+cannot command motion, change lifecycle state, or recover a failed process.
+
+Checkpoint: explain why “no message received” is not the same as “healthy,”
+and why health must not secretly become another command authority.
+
+### Lesson 11 — learn portable exploration last among the core runtime paths
+
+Now read the exploration behavior:
+
+1. `src/amr_exploration/config/frontier_explorer.yaml` — bounded exploration
+   parameters.
+2. `src/amr_exploration/scripts/frontier_algorithm.py` — pure frontier
+   selection logic; start here because it is easier to test.
+3. `src/amr_exploration/scripts/frontier_explorer.py` — lifecycle, readiness,
+   mission goals, cancellation, and terminal states.
+4. `src/amr_exploration/launch/frontier_explorer.launch.py` — normal launch
+   wiring.
+5. `src/amr_exploration/test/test_frontier_algorithm.py`,
+   `test_frontier_contract.py`, and `test_frontier_lifecycle.py` — behavior
+   and lifecycle expectations.
+6. `src/amr_simulation/scripts/portable_stow_authority.py` — one-shot arm
+   stow proof and the portable `/amr/manipulation/status` owner.
+7. `src/amr_simulation/scripts/portable_exploration_readiness.py` — staged
+   readiness and the evidence required before Explorer is released.
+8. `src/amr_simulation/test/test_portable_stow_authority.py` and
+   `test_portable_exploration_readiness.py` — terminal, freshness, and
+   fail-closed behavior.
+9. Re-read `src/amr_simulation/launch/portable_exploration.launch.py` and
+   `test_portable_exploration_launch.py` now that its child processes are
+   familiar.
+
+The causal order is adapters and authority, SLAM/map, planner and smoother,
+controller, mission, then Explorer. Readiness is not a timer that eventually
+declares success: it waits for live evidence, reports unmet conditions, and
+fails immediately on process exit, explicit fault, shutdown, or user stop.
+
+Checkpoint: explain why Explorer is released last and why a fresh empty-stow
+proof is required before it can cause navigation.
+
+### Lesson 12 — learn manipulation and factory orchestration after navigation
+
+The factory path combines everything above with products, stations, MoveIt,
+attachments, and cancellation. Read it last:
+
+1. `src/amr_factory/config/products.yaml` and `stations.yaml` — data-driven
+   product and station definitions.
+2. `src/amr_factory/scripts/factory_registry.py` — how those definitions are
+   loaded and validated.
+3. `src/amr_factory/launch/factory_autonomous.launch.py` — the accepted factory
+   graph and its AMCL/static-map path.
+4. `src/amr_factory/src/factory_supervisor_node.cpp` — factory actions,
+   stop/cancel/home, and state ownership.
+5. `src/amr_manipulation/include/amr_manipulation/attachment_gate.hpp` and
+   `src/amr_manipulation/src/attachment_gate.cpp` — attachment proof rules.
+6. `src/amr_manipulation/scripts/cycle_manipulation_supervisor.py` and
+   `src/amr_manipulation/src/manipulation_supervisor_node.cpp` — product-cycle
+   coordination.
+7. `src/amr_manipulation/launch/move_group.launch.py` and the MoveIt YAML files
+   — planning configuration, after you understand the arm URDF/SRDF.
+8. `src/amr_factory/scripts/factory_cli.py` — the operator boundary.
+9. The matching tests under `src/amr_factory/test/` and
+   `src/amr_manipulation/test/` before attempting a product run.
+
+Do not begin with the historical Gate 6 mass-stage launch files or the mesh
+assets. They are specialized evidence and geometry, not the foundation of the
+ROS graph. Product 101 and Product 102 are the accepted factory scope;
+Product 103, hardware, and functional-safety claims remain outside scope.
+
+### How to read any C++ or Python node
+
+Use the same pass every time:
+
+1. Find the executable entry point and node name.
+2. Read parameter declarations and defaults.
+3. List publishers, subscribers, services, and actions with their exact names
+   and message types.
+4. Find the timer or callback that changes state.
+5. Mark every freshness, timeout, validity, lifecycle, and fault check.
+6. Find the success path, cancellation path, process-failure path, and
+   shutdown path.
+7. Read the matching test and identify which invariant it protects.
+
+For a lifecycle node, inspect the constructor, `on_configure()`,
+`on_activate()`, callbacks and timers, `on_deactivate()`, and `on_cleanup()`
+in that order. Keep a one-page notebook with four columns: input, validation,
+output, and failure action. That notebook will make the ownership boundaries
+and fail-closed behavior visible much faster than reading files alphabetically.
 
 ## Build, run, inspect
 
@@ -314,7 +681,62 @@ ros2 run amr_control prototype_teleop.py
 
 Use `W`, `S`, `A`, and `D` to move, `X` or Space to stop, and `Q` to quit.
 
-### 3. Approved autonomous factory cycle
+### 3. Portable world-based exploration
+
+Use the portable launch for autonomous frontier exploration in a trusted local
+Gazebo SDF environment. It creates a fresh in-memory SLAM map, so `world` is
+the environment—not a previously saved map. The validator requires an
+absolute local SDF 1.9 path and rejects unsafe or unresolved resources before
+Gazebo starts. Omit `resource_paths` when the world uses the workspace's
+registered assets; otherwise provide a colon-separated list of existing
+absolute local model directories.
+
+In terminal 1, use a fresh run identity:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+source install/amr_bringup/share/amr_bringup/env/amr_ros_env.sh
+export GZ_VERSION=harmonic
+export RUN_ID=portable_simple_01
+export GZ_PARTITION=amr_$RUN_ID
+export ROS_DOMAIN_ID=126
+export ROS_LOG_DIR="$PWD/.ros_logs/$RUN_ID"
+mkdir -p "$ROS_LOG_DIR"
+ros2 launch amr_simulation portable_exploration.launch.py \
+  world:="$PWD/src/amr_simulation/worlds/amr_world.sdf" \
+  initial_x:=0.0 initial_y:=0.0 initial_z:=0.12 initial_yaw:=0.0 \
+  headless:=true rviz:=false auto_start_exploration:=true
+```
+
+The launch stages adapters and the portable empty-stow authority before SLAM,
+planning, control, mission, and Explorer. With the default
+`auto_start_exploration:=true`, no start-service call is needed. To start
+intentionally after readiness, set it to `false` and then call:
+
+```bash
+ros2 service call /amr/exploration/start std_srvs/srv/Trigger {}
+```
+
+Do not run factory or Gate 6 manipulation processes in the same ROS graph:
+portable exploration owns the sole `/amr/manipulation/status` publisher for
+that run. Stop exploration through its cancellation boundary and wait for a
+non-faulted terminal `COMPLETE` or safe `INCOMPLETE` state before saving a
+run-specific candidate. The full save/validate procedure is in
+[SIMULATION_COMMANDS.md](SIMULATION_COMMANDS.md).
+
+For the packaged AWS warehouse preset, use the canonical pinned Fuel world:
+
+```bash
+ros2 launch amr_simulation aws_warehouse_exploration.launch.py \
+  headless:=false rviz:=true auto_start_exploration:=true
+```
+
+The first AWS run needs network access to download uncached model revisions;
+the exact ownership, revisions, attribution, and cache rules are recorded in
+[`AWS_WAREHOUSE_FUEL_ATTRIBUTION.md`](../src/amr_simulation/assets/AWS_WAREHOUSE_FUEL_ATTRIBUTION.md).
+
+### 4. Approved autonomous factory cycle
 
 The canonical autonomous launch starts the Harmonic factory world, AMCL,
 localization, perception, Nav2 planning and collision-checked smoothing, RPP,
@@ -395,7 +817,7 @@ ros2 bag record --include-hidden-topics \
   /model/product_a/pose
 ```
 
-### 4. Read-only inspection and shutdown
+### 5. Read-only inspection and shutdown
 
 Useful checks while the graph is running:
 

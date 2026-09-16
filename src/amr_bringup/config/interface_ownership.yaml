@@ -172,6 +172,10 @@
     },
     "factory": {
       "/tf:map->odom": "nav2_amcl/amcl"
+    },
+    "portable_exploration": {
+      "/amr/manipulation/status": "amr_simulation/portable_stow_authority",
+      "/tf:map->odom": "slam_toolbox/async_slam_toolbox_node"
     }
   }
 }
