@@ -4,7 +4,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.actions import EmitEvent, RegisterEventHandler
+from launch.actions import EmitEvent, RegisterEventHandler, TimerAction
 from launch.events import matches_action
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
@@ -27,6 +27,10 @@ def managed_node(executable, parameters):
         lifecycle_node_matcher=matches_action(node),
         transition_id=Transition.TRANSITION_CONFIGURE,
     ))
+    configure = TimerAction(
+        period=LaunchConfiguration("configure_delay_sec"),
+        actions=[configure],
+    )
     activate = RegisterEventHandler(OnStateTransition(
         target_lifecycle_node=node,
         goal_state="inactive",
@@ -46,10 +50,17 @@ def generate_launch_description():
         actions.extend(managed_node(executable, [parameters, {
             # Keep the generic control launch base-only by default.  Factory
             # orchestration explicitly enables this interlock below.
+            "source_timeout_ms": ParameterValue(
+                LaunchConfiguration("source_timeout_ms"), value_type=int),
+            "manipulator_status_timeout_ms": ParameterValue(
+                LaunchConfiguration("manipulator_status_timeout_ms"), value_type=int),
             "require_manipulator_stowed": ParameterValue(
                 LaunchConfiguration("require_manipulator_stowed"), value_type=bool),
         }]))
     return LaunchDescription([
+        DeclareLaunchArgument("configure_delay_sec", default_value="0.0"),
+        DeclareLaunchArgument("source_timeout_ms", default_value="200"),
+        DeclareLaunchArgument("manipulator_status_timeout_ms", default_value="200"),
         DeclareLaunchArgument("require_manipulator_stowed", default_value="false"),
         *actions,
     ])

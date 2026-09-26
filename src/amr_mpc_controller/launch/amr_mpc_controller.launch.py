@@ -3,8 +3,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import TimerAction
+from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -25,7 +27,10 @@ def generate_launch_description():
         name="controller_server",
         namespace="/amr",
         output="screen",
-        parameters=[parameters],
+        parameters=[parameters, {
+            "controller_frequency": ParameterValue(
+                LaunchConfiguration("controller_frequency"), value_type=float),
+        }],
         remappings=[("cmd_vel", "/amr/mpc/cmd_vel")],
     )
     lifecycle_manager = Node(
@@ -37,6 +42,7 @@ def generate_launch_description():
         parameters=[parameters],
     )
     return LaunchDescription([
+        DeclareLaunchArgument("controller_frequency", default_value="20.0"),
         controller_server,
         TimerAction(period=1.0, actions=[lifecycle_manager]),
     ])

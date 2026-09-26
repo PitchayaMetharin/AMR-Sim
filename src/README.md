@@ -109,7 +109,7 @@ with the trusted simple-world SDF:
 ros2 launch amr_simulation portable_exploration.launch.py \
   world:=/home/pete/amr_ws/src/amr_simulation/worlds/amr_world.sdf \
   initial_x:=0.0 initial_y:=0.0 initial_z:=0.12 initial_yaw:=0.0 \
-  resource_paths:='' headless:=false rviz:=true \
+  resource_paths:='' headless:=false software_rendering:=auto rviz:=true \
   auto_start_exploration:=true
 ```
 
@@ -117,7 +117,7 @@ For the canonical AWS warehouse preset:
 
 ```bash
 ros2 launch amr_simulation aws_warehouse_exploration.launch.py \
-  headless:=false rviz:=true auto_start_exploration:=true
+  headless:=false software_rendering:=auto rviz:=true auto_start_exploration:=true
 ```
 
 Both commands autostart exploration after readiness; no separate start-service

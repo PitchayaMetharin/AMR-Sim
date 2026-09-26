@@ -27,6 +27,22 @@ def test_explorer_has_only_action_and_stop_boundaries():
     assert '"/amr/exploration/start"' in source
     assert '"/amr/exploration/stop"' in source
     assert '"/amr/exploration/status"' in source
+    assert '"/amr/mission/status"' in source
+    assert "DiagnosticArray" in source
+    assert "MISSION_STATUS_DIAGNOSTIC" in source
+    assert "_expected_goal_uuid" in source
+    for field in (
+            "goal_uuid", "stage", "outcome", "reason",
+            "blockage_confirmed", "fault_class", "motion_stopped",
+            "reached_goal_count", "unresolved_frontier_count",
+            "blocked_count", "retry_exhausted_count", "completion_policy",
+            "raw_frontier_count", "blocked_frontier_count",
+            "blocked_safety_count", "blocked_route_count"):
+        assert field in source
+    assert '"SAFE_REACHABLE_AREA_V1"' in source
+    assert '"RECOVERY_WAIT"' in source
+    assert "_is_recoverable_planner_abort" in source
+    assert '"global planning failed"' in source
     assert 'declare_parameter("autostart", True)' in source
     assert "cmd_vel" not in source
     assert "Twist" not in source

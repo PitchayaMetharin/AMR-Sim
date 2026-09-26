@@ -42,6 +42,54 @@ def test_existing_amr_world_validates_and_dynamic_bridge_names_are_derived():
     assert any("/amr/simulation/sensors/product_camera/camera_info" in item for item in bridge)
 
 
+def test_simulation_diagnostics_bridge_and_generated_robot_plugin_are_opt_in():
+    launch = _load_launch()
+
+    default_bridge = launch.bridge_arguments("amr_world")
+    diagnostic_bridge = launch.bridge_arguments(
+        "amr_world", simulation_diagnostics=True)
+
+    assert not any("/amr/simulation/diagnostics/" in item for item in default_bridge)
+    assert (
+        "/amr/simulation/diagnostics/contacts"
+        "@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts"
+    ) in diagnostic_bridge
+    assert (
+        "/amr/simulation/diagnostics/delivered_cmd_vel"
+        "@geometry_msgs/msg/TwistStamped[gz.msgs.Twist"
+    ) in diagnostic_bridge
+    assert (
+        "/amr/simulation/diagnostics/contact_coverage"
+        "@std_msgs/msg/String[gz.msgs.StringMsg"
+    ) in diagnostic_bridge
+
+    original = "<robot name='amr'><link name='base_link'/></robot>"
+    unchanged = launch.robot_xml_with_simulation_diagnostics(
+        original, enabled=False)
+    instrumented = launch.robot_xml_with_simulation_diagnostics(
+        original, enabled=True)
+    assert unchanged == original
+    original_root = ET.fromstring(original)
+    instrumented_root = ET.fromstring(instrumented)
+    assert original_root.find("gazebo") is None
+    plugin = instrumented_root.find("./gazebo/plugin")
+    assert plugin is not None
+    assert plugin.attrib == {
+        "filename": "amr-exploration-evidence-system",
+        "name": "amr_simulation::ExplorationEvidenceSystem",
+    }
+    assert plugin.findtext("command_topic") == "/model/amr/cmd_vel"
+    assert plugin.findtext("contacts_topic") == "/amr/simulation/diagnostics/contacts"
+    assert (
+        plugin.findtext("delivered_command_topic")
+        == "/amr/simulation/diagnostics/delivered_cmd_vel"
+    )
+    assert (
+        plugin.findtext("coverage_topic")
+        == "/amr/simulation/diagnostics/contact_coverage"
+    )
+
+
 @pytest.mark.parametrize(
     "mutator",
     [
@@ -179,8 +227,12 @@ def test_launch_contract_is_isolated_and_stages_explorer_after_readiness():
     assert 'DeclareLaunchArgument("initial_z", default_value="0.12"' in text
     assert 'DeclareLaunchArgument("resource_paths", default_value=""' in text
     assert 'DeclareLaunchArgument("headless", default_value="false"' in text
+    assert 'DeclareLaunchArgument("software_rendering", default_value="auto"' in text
     assert 'DeclareLaunchArgument("rviz", default_value="true"' in text
     assert 'DeclareLaunchArgument("auto_start_exploration", default_value="true"' in text
+    assert 'DeclareLaunchArgument("simulation_diagnostics", default_value="false"' in text
+    assert 'DeclareLaunchArgument("localization_mode", default_value="slam"' in text
+    assert 'DeclareLaunchArgument("map_yaml", default_value=""' in text
     assert 'include_generic_payload": "false"' in text
     assert 'loaded_product": "false"' in text
     assert 'factory_attachment": "false"' in text
@@ -188,8 +240,24 @@ def test_launch_contract_is_isolated_and_stages_explorer_after_readiness():
     assert 'ParameterValue(LaunchConfiguration("auto_start_exploration"' in text
     assert "ready" in text and "portable_exploration_readiness" in text
     assert "amr_simulation.launch.py" not in text
-    assert "amcl" not in text.lower()
-    assert "map_server" not in text.lower()
+
+
+def test_static_localization_mode_requires_an_existing_absolute_map_yaml(tmp_path):
+    launch = _load_launch()
+
+    assert launch.PORTABLE_LOCALIZATION_MODES == ("slam", "amcl")
+    assert launch.validate_localization_mode("slam") == "slam"
+    assert launch.validate_localization_mode("AMCL") == "amcl"
+    with pytest.raises(launch.WorldValidationError):
+        launch.validate_localization_mode("unknown")
+    with pytest.raises(launch.WorldValidationError):
+        launch.validate_map_yaml("")
+
+    map_yaml = tmp_path / "aws_candidate.yaml"
+    map_yaml.write_text("image: aws_candidate.pgm\n")
+    assert launch.validate_map_yaml(str(map_yaml)) == map_yaml.resolve()
+    with pytest.raises(launch.WorldValidationError):
+        launch.validate_map_yaml(str(tmp_path / "missing.yaml"))
 
 
 def test_process_release_callbacks_fail_closed_on_nonzero_one_shot():
@@ -250,7 +318,105 @@ def test_causal_graph_uses_lifecycle_aware_includes_and_adapter_barrier():
         "amr_slam", "amr_navigation", "amr_mpc_controller", "amr_control", "amr_mission",
     )
     assert launch.PORTABLE_ADAPTER_CONFIGURE_DELAY_S == 8.0
-    assert launch.PORTABLE_CONTROL_ARGUMENTS == {"require_manipulator_stowed": "true"}
+    assert launch.PORTABLE_CONTROLLER_FREQUENCY == 5.0
+    assert launch.PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC == 60.0
+    assert launch.PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC > 0
+    assert launch.PORTABLE_BASE_INPUT_TIMEOUT_MS == 3500
+    assert launch.PORTABLE_BASE_INPUT_TIMEOUT_MS > 0
+    assert launch.PORTABLE_BASE_GATED_COMMAND_TIMEOUT_MS == 1500
+    assert launch.PORTABLE_BASE_GATED_COMMAND_TIMEOUT_MS > 0
+    assert launch.PORTABLE_MAP_TIMEOUT_SEC == 12.0
+    assert launch.PORTABLE_MAP_TIMEOUT_SEC > 0
+    assert launch.PORTABLE_GOAL_TIMEOUT_SEC == 600.0
+    assert launch.PORTABLE_GOAL_TIMEOUT_SEC > 0
+    assert launch.PORTABLE_STARTUP_GRACE_SEC == 30.0
+    assert launch.PORTABLE_STARTUP_GRACE_SEC > 0
+    assert launch.PORTABLE_TF_TIMEOUT_SEC == 1.5
+    assert launch.PORTABLE_TF_TIMEOUT_SEC > 0
+    assert launch.PORTABLE_CONTROL_SOURCE_TIMEOUT_MS == 1500
+    assert launch.PORTABLE_CONTROL_SOURCE_TIMEOUT_MS > 0
+    assert launch.PORTABLE_MANIPULATOR_STATUS_TIMEOUT_MS == 2000
+    assert launch.PORTABLE_MANIPULATOR_STATUS_TIMEOUT_MS > 0
+    assert launch.PORTABLE_CONTROL_ARGUMENTS == {
+        "require_manipulator_stowed": "true",
+        "source_timeout_ms": "1500",
+        "manipulator_status_timeout_ms": "2000",
+        "configure_delay_sec": "8.0",
+    }
+    source = LAUNCH_PATH.read_text()
+    assert "PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC = 60.0" in source
+    assert source.count('executable="portable_controller_spawner.py"') == 4
+    for controller in (
+        "joint_state_broadcaster",
+        "arm_controller",
+        "gripper_controller",
+        "gripper_right_controller",
+    ):
+        assert (
+            f'            "{controller}",\n'
+            '            "--controller-manager-timeout", "30",\n'
+            '            "--service-call-timeout", str(PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC),\n'
+        ) in source
+    mpc_start = source.index('mpc_include = _package_launch_include(')
+    mission_start = source.index('mission_include = _package_launch_include(', mpc_start)
+    mpc_call = source[mpc_start:mission_start]
+    assert 'arguments={"controller_frequency": str(PORTABLE_CONTROLLER_FREQUENCY)}' in mpc_call
+
+
+def test_portable_base_adapter_carries_simulation_input_timeout():
+    launch = _load_launch()
+    source = LAUNCH_PATH.read_text()
+    base_start = source.index(
+        'base, (base_activate, base_configure) = _managed_node(')
+    front_start = source.index(
+        'front, (front_activate, front_configure) = _managed_node(', base_start)
+    base_call = source[base_start:front_start]
+
+    assert (
+        '"input_timeout_ms": PORTABLE_BASE_INPUT_TIMEOUT_MS,' in base_call
+        and '"gated_command_timeout_ms": PORTABLE_BASE_GATED_COMMAND_TIMEOUT_MS,' in base_call
+    )
+    adapter_tail_start = source.index("adapter_tail: List[object] = [")
+    adapter_tail_end = source.index("adapter_initial.append", adapter_tail_start)
+    adapter_tail = source[adapter_tail_start:adapter_tail_end]
+    for timer in (
+        """TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S,
+            actions=[wheel_configure],
+        )""",
+        """TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 1.0,
+            actions=[front_perception_configure],
+        )""",
+        """TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 2.0,
+            actions=[rear_perception_configure],
+        )""",
+        """TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 3.0,
+            actions=[health_configure],
+        )""",
+    ):
+        assert timer in adapter_tail
+
+
+def test_portable_explorer_carries_simulation_map_timeout():
+    launch = _load_launch()
+    source = LAUNCH_PATH.read_text()
+    explorer_start = source.index(
+        'explorer = Node(\n        package="amr_exploration",')
+    rviz_start = source.index('    rviz_config = LaunchConfiguration(', explorer_start)
+    explorer_call = source[explorer_start:rviz_start]
+
+    assert '{"map_timeout_sec": PORTABLE_MAP_TIMEOUT_SEC}' in explorer_call
+    assert '{"goal_timeout_sec": PORTABLE_GOAL_TIMEOUT_SEC}' in explorer_call
+    assert '{"startup_grace_sec": PORTABLE_STARTUP_GRACE_SEC}' in explorer_call
+    assert launch.PORTABLE_TF_TIMEOUT_SEC == 1.5
+    assert launch.PORTABLE_TF_TIMEOUT_SEC > 0
+    assert '{"tf_timeout_sec": PORTABLE_TF_TIMEOUT_SEC}' in explorer_call
+    assert launch.PORTABLE_AUTHORITY_TIMEOUT_SEC == 3.0
+    assert launch.PORTABLE_AUTHORITY_TIMEOUT_SEC > 0
+    assert '{"authority_timeout_sec": PORTABLE_AUTHORITY_TIMEOUT_SEC}' in explorer_call
 
 
 def test_each_success_callback_releases_only_its_immediate_successor_and_nonzero_shuts_down():

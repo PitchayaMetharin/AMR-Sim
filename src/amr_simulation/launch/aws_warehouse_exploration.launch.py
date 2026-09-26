@@ -27,8 +27,10 @@ def generate_launch_description() -> LaunchDescription:
             "initial_yaw": "0.0",
             "resource_paths": "",
             "headless": LaunchConfiguration("headless"),
+            "software_rendering": LaunchConfiguration("software_rendering"),
             "rviz": LaunchConfiguration("rviz"),
             "auto_start_exploration": LaunchConfiguration("auto_start_exploration"),
+            "simulation_diagnostics": LaunchConfiguration("simulation_diagnostics"),
             # This is intentionally internal: portable exploration keeps its
             # sensors.rviz default and does not grow another public argument.
             "rviz_config": str(rviz_config),
@@ -37,10 +39,16 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         DeclareLaunchArgument("headless", default_value="false", choices=["true", "false"]),
+        DeclareLaunchArgument("software_rendering", default_value="auto", choices=["auto", "true", "false"]),
         DeclareLaunchArgument("rviz", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument(
             "auto_start_exploration",
             default_value="true",
+            choices=["true", "false"],
+        ),
+        DeclareLaunchArgument(
+            "simulation_diagnostics",
+            default_value="false",
             choices=["true", "false"],
         ),
         portable,

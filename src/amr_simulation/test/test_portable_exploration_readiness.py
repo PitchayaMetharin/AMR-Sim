@@ -391,3 +391,60 @@ def test_required_process_disappearance_is_an_explicit_fault():
     readiness._lifecycle_clients = {}
     readiness._refresh_lifecycle_states(set())
     assert readiness._fault_reason == "required portable process exited: slam_toolbox"
+
+
+class _MainTestNode:
+    def __init__(self, *, ready):
+        self._ready = ready
+        self._fault_reason = ""
+        self.destroyed = False
+
+    def destroy_node(self):
+        self.destroyed = True
+
+
+class _WaitSetErrorExecutor:
+    def __init__(self, error):
+        self._error = error
+        self.node = None
+
+    def add_node(self, node):
+        self.node = node
+
+    def spin(self):
+        raise self._error
+
+
+def _run_main_with_wait_set_error(module, *, ready):
+    node = _MainTestNode(ready=ready)
+    executor = _WaitSetErrorExecutor(module.RCLError("context is not valid"))
+    with (
+        patch.object(module.rclpy, "init"),
+        patch.object(module.rclpy, "ok", return_value=False),
+        patch.object(module, "PortableExplorationReadiness", return_value=node),
+        patch.object(module, "MultiThreadedExecutor", return_value=executor),
+    ):
+        result = module.main()
+    return result, node, executor
+
+
+def test_main_accepts_wait_set_error_after_final_readiness_proof():
+    module = _load()
+
+    result, node, executor = _run_main_with_wait_set_error(module, ready=True)
+
+    assert result == 0
+    assert node._fault_reason == ""
+    assert node.destroyed
+    assert executor.node is node
+
+
+def test_main_fails_closed_on_wait_set_error_before_readiness_proof():
+    module = _load()
+
+    result, node, executor = _run_main_with_wait_set_error(module, ready=False)
+
+    assert result == 1
+    assert node._fault_reason == "readiness shutdown or user stop"
+    assert node.destroyed
+    assert executor.node is node

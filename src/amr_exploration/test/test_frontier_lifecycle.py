@@ -10,6 +10,7 @@ import pytest
 from action_msgs.msg import GoalStatus
 from amr_interfaces.msg import BaseStatus, ManipulatorStatus
 from builtin_interfaces.msg import Time as RosTime
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import TransformStamped
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.msg import Costmap
@@ -130,8 +131,14 @@ class QueryTimeTransformBuffer:
 
 
 class FakeGoalHandle:
+    _next_uuid = 1
+
     def __init__(self):
         self.accepted = True
+        goal_number = FakeGoalHandle._next_uuid
+        FakeGoalHandle._next_uuid += 1
+        self.goal_id = SimpleNamespace(
+            uuid=goal_number.to_bytes(16, byteorder="big"))
         self.cancel_calls = 0
         self.cancel_future = FakeFuture()
         self.result_future = FakeFuture()
@@ -191,9 +198,13 @@ def _transform(stamp_ns=9_500_000_000, x=10.0, y=10.0):
 
 
 def _map_message(data=None, width=2, height=1, resolution=1.0,
-                 origin_x=0.0, origin_y=0.0, yaw=0.0):
+                 origin_x=0.0, origin_y=0.0, yaw=0.0, stamp_ns=0):
     return SimpleNamespace(
-        header=SimpleNamespace(frame_id="map"),
+        header=SimpleNamespace(
+            frame_id="map",
+            stamp=RosTime(
+                sec=stamp_ns // 1_000_000_000,
+                nanosec=stamp_ns % 1_000_000_000)),
         data=(
             [0, -1]
             if data is None and width == 2 and height == 1
@@ -211,14 +222,26 @@ def _map_message(data=None, width=2, height=1, resolution=1.0,
 
 def _costmap_message(data=None, width=2, height=1, resolution=2.0,
                      origin_x=-1.0, origin_y=-1.0, yaw=0.0,
-                     frame_id="map"):
+                     frame_id="map", stamp_ns=0, update_time_ns=0,
+                     map_load_time_ns=0, layer="master"):
     return SimpleNamespace(
-        header=SimpleNamespace(frame_id=frame_id),
+        header=SimpleNamespace(
+            frame_id=frame_id,
+            stamp=RosTime(
+                sec=stamp_ns // 1_000_000_000,
+                nanosec=stamp_ns % 1_000_000_000)),
         data=[0] * (width * height) if data is None else data,
         metadata=SimpleNamespace(
             size_x=width,
             size_y=height,
             resolution=resolution,
+            update_time=RosTime(
+                sec=update_time_ns // 1_000_000_000,
+                nanosec=update_time_ns % 1_000_000_000),
+            map_load_time=RosTime(
+                sec=map_load_time_ns // 1_000_000_000,
+                nanosec=map_load_time_ns % 1_000_000_000),
+            layer=layer,
             origin=SimpleNamespace(
                 position=SimpleNamespace(x=origin_x, y=origin_y, z=0.0),
                 orientation=SimpleNamespace(
@@ -773,6 +796,9 @@ def _node(autostart=False):
         valid=True,
         base_motion_allowed=True,
         state=ManipulatorStatus.STOWED_EMPTY)
+    node.runtime_diagnostics = False
+    node._runtime_trace_sequence = 0
+    node._runtime_trace_events = []
     node.run_generation = 1 if autostart else 0
     node.motion_generation = 0
     node._motion_token = None
@@ -797,6 +823,22 @@ def _node(autostart=False):
     node._cancel_ack = False
     node._cancel_record = None
     node.cancel_event = threading.Event()
+    node._expected_goal_uuid = None
+    node._mission_status_by_uuid = {}
+    node._mission_status_invalid_at = None
+    node._blocked_destinations = {}
+    node._retry_exhausted_destinations = set()
+    node._recovery_goal_world = None
+    node._recovery_stationary_sample = None
+    node._recovery_stationary_samples = 0
+    node.reached_goal_count = 0
+    node.raw_frontier_count = 0
+    node.blocked_frontier_count = 0
+    node.blocked_safety_count = 0
+    node.blocked_route_count = 0
+    node.unresolved_frontier_count = 0
+    node._mission_blockage_confirmed = False
+    node._mission_fault_class = "NONE"
     node.blacklist = set()
     node.failed_goal_worlds = set()
     node.goal_failures = 0
@@ -806,6 +848,25 @@ def _node(autostart=False):
     node.fault_latched = False
     node.reason = "autostart waiting for readiness" if autostart else "autostart disabled"
     node.state = "WAITING_READY" if autostart else "STOPPED"
+    return node
+
+
+def _selection_fixture(node):
+    """Give selection tests a robot, footprint, and frontier in one map."""
+    width = height = 20
+    map_data = [0] * (width * height)
+    map_data[10 * width + 14] = -1
+    costmap_data = [0] * (width * height)
+    node.latest_map = _map_message(
+        data=map_data, width=width, height=height, resolution=1.0,
+        origin_x=0.0, origin_y=0.0)
+    node.map_version += 1
+    node.last_map_at = node._monotonic()
+    node.latest_costmap = _costmap_message(
+        data=costmap_data, width=width, height=height, resolution=1.0,
+        origin_x=0.0, origin_y=0.0)
+    node.costmap_version += 1
+    node.last_costmap_at = node._monotonic()
     return node
 
 
@@ -831,6 +892,28 @@ def _dispatch_pending(node, candidate=(1, 0), goal_world=(1.5, 0.5)):
     assert len(node.action_client.send_calls) == 1
 
 
+def _real_route_node():
+    """Use the small route that exercises the actual footprint search."""
+    node = _node(autostart=True)
+    map_data = [0] * 49
+    map_data[3 * 7 + 5] = -1
+    costmap_data = [0] * 49
+    costmap_data[3 * 7 + 5] = 255
+    node.latest_map = _map_message(
+        data=map_data, width=7, height=7, resolution=1.0)
+    node.map_version = 2
+    node.last_map_at = node._monotonic()
+    node.latest_costmap = _costmap_message(
+        data=costmap_data, width=7, height=7, resolution=1.0,
+        origin_x=0.0, origin_y=0.0)
+    node.costmap_version = 2
+    node.last_costmap_at = node._monotonic()
+    node.state = "PLANNING"
+    ros_clock = FakeClock()
+    node.get_clock = lambda: ros_clock
+    return node, ros_clock
+
+
 def _accept(node):
     handle = FakeGoalHandle()
     node.action_client.pending[-1].set_result(handle)
@@ -840,6 +923,29 @@ def _accept(node):
 
 def _diagnostic_values(node):
     return {item.key: item.value for item in node.status_pub.messages[-1].status[0].values}
+
+
+def _mission_status(goal_uuid, *, stage="TERMINAL", outcome="FAULT",
+                    reason="smoother collision boundary", blockage=True,
+                    fault_class="OBSTACLE_BLOCKAGE"):
+    message = DiagnosticArray()
+    diagnostic = DiagnosticStatus()
+    diagnostic.name = "amr_mission/mission_supervisor"
+    fields = {
+        "goal_uuid": goal_uuid,
+        "stage": stage,
+        "outcome": outcome,
+        "reason": reason,
+        "blockage_confirmed": "true" if blockage else "false",
+        "fault_class": fault_class,
+    }
+    for key, value in fields.items():
+        item = KeyValue()
+        item.key = key
+        item.value = value
+        diagnostic.values.append(item)
+    message.status.append(diagnostic)
+    return message
 
 
 @pytest.mark.parametrize("name,value", [
@@ -935,7 +1041,7 @@ def test_autostart_and_start_boundary_reset_state_and_publish_status():
 
 
 def test_readiness_and_goal_lifecycle_has_one_pending_request():
-    node = _node(autostart=True)
+    node = _selection_fixture(_node(autostart=True))
     node._tick()
     assert node.state == "SCANNING"
     node._tick()
@@ -972,10 +1078,145 @@ def test_initial_persistent_invalid_readiness_faults_after_startup_grace():
     assert node.action_client.send_calls == []
 
 
+def _set_message_header_stamp(message, stamp_ns):
+    message.header.stamp = RosTime(
+        sec=stamp_ns // 1_000_000_000,
+        nanosec=stamp_ns % 1_000_000_000)
+
+
+def _set_status_header_stamp(message, stamp_ns):
+    message.header = SimpleNamespace(
+        stamp=RosTime(
+            sec=stamp_ns // 1_000_000_000,
+            nanosec=stamp_ns % 1_000_000_000))
+
+
+def test_positive_ros_headers_keep_readiness_and_snapshot_fresh_after_receipt_expiry():
+    node = _node(autostart=True)
+    node.authority_timeout = node.map_timeout
+    ros_fresh_stamp = 8_000_000_000
+    for message in (node.latest_map, node.latest_costmap):
+        _set_message_header_stamp(message, ros_fresh_stamp)
+    for message in (node.base_status, node.manipulator_status):
+        _set_status_header_stamp(message, ros_fresh_stamp)
+    old_receipt = node._monotonic() - node.map_timeout - 1.0
+    node.last_map_at = old_receipt
+    node.last_costmap_at = old_receipt
+    node.last_base_status_at = old_receipt
+    node.last_manipulator_status_at = old_receipt
+
+    assert node._map_readiness()[0] is True
+    assert node._costmap_readiness()[0] is True
+    # Map/costmap freshness is tied to their stamped evidence.  Authority
+    # liveness is intentionally tied to the steady-clock receipt TTL, so a
+    # stale status receipt cannot be revived by its header.
+    assert node._authority_ready() is False
+    assert node._content_and_freshness_matches_locked(
+        (node.latest_map, node.map_version, node.last_map_at),
+        (node.latest_costmap, node.costmap_version,
+         node.last_costmap_at))[0] is True
+
+
+@pytest.mark.parametrize("stamp_ns", [6_000_000_000, 11_000_000_000])
+def test_positive_stale_or_future_ros_header_rejects_receipt_fresh_message(stamp_ns):
+    node = _node(autostart=True)
+    _set_message_header_stamp(node.latest_map, stamp_ns)
+    _set_message_header_stamp(node.latest_costmap, stamp_ns)
+    _set_status_header_stamp(node.base_status, stamp_ns)
+    _set_status_header_stamp(node.manipulator_status, stamp_ns)
+
+    assert node._map_readiness()[0] is False
+    assert node._costmap_readiness()[0] is False
+    # Status headers are observation stamps; a fresh receipt remains valid
+    # authority even when that stamp is briefly stale or future-dated.
+    assert node._authority_ready() is True
+    assert node._content_and_freshness_matches_locked(
+        (node.latest_map, node.map_version, node.last_map_at),
+        (node.latest_costmap, node.costmap_version,
+         node.last_costmap_at))[0] is False
+
+
+def test_zero_stamp_headers_retain_receipt_age_fallback():
+    node = _node(autostart=True)
+    for message in (node.latest_map, node.latest_costmap):
+        _set_message_header_stamp(message, 0)
+    for message in (node.base_status, node.manipulator_status):
+        _set_status_header_stamp(message, 0)
+    old_receipt = node._monotonic() - node.map_timeout - 1.0
+    node.last_map_at = old_receipt
+    node.last_costmap_at = old_receipt
+    node.last_base_status_at = old_receipt
+    node.last_manipulator_status_at = old_receipt
+
+    assert node._map_readiness()[0] is False
+    assert node._costmap_readiness()[0] is False
+    assert node._authority_ready() is False
+
+    now = node._monotonic()
+    node.last_map_at = now
+    node.last_costmap_at = now
+    node.last_base_status_at = now
+    node.last_manipulator_status_at = now
+    assert node._map_readiness()[0] is True
+    assert node._costmap_readiness()[0] is True
+    assert node._authority_ready() is True
+
+
+def test_costmap_content_excludes_only_update_time_and_keeps_other_gates():
+    node = _node(autostart=True)
+    planned = _costmap_message(
+        stamp_ns=9_000_000_000, update_time_ns=1_000_000_000,
+        map_load_time_ns=2_000_000_000)
+    latest = _costmap_message(
+        stamp_ns=9_000_000_000, update_time_ns=3_000_000_000,
+        map_load_time_ns=2_000_000_000)
+    node.latest_costmap = latest
+    node.last_costmap_at = node._monotonic()
+    snapshot = (planned, 1, node.last_costmap_at)
+
+    assert node._costmap_content_equal(planned, latest)
+    assert node._content_and_freshness_matches_locked(
+        (node.latest_map, node.map_version, node.last_map_at), snapshot
+    ) == (True, "")
+
+    latest.header.frame_id = "odom"
+    assert not node._costmap_content_equal(planned, latest)
+    latest.header.frame_id = "map"
+    latest.metadata.origin.position.x = 1.0
+    assert not node._costmap_content_equal(planned, latest)
+    latest.metadata.origin.position.x = -1.0
+    latest.metadata.layer = "local"
+    assert not node._costmap_content_equal(planned, latest)
+    latest.metadata.layer = "master"
+    latest.metadata.map_load_time = RosTime(sec=4, nanosec=0)
+    assert not node._costmap_content_equal(planned, latest)
+    latest.metadata.map_load_time = RosTime(sec=2, nanosec=0)
+    latest.data[0] = 1
+    assert not node._costmap_content_equal(planned, latest)
+
+    latest = _costmap_message(
+        stamp_ns=1_000_000_000, update_time_ns=4_000_000_000,
+        map_load_time_ns=2_000_000_000)
+    node.latest_costmap = latest
+    node.last_costmap_at = node._monotonic()
+    assert node._content_and_freshness_matches_locked(
+        (node.latest_map, node.map_version, node.last_map_at), snapshot
+    ) == (False, "frontier plan discarded because costmap evidence is stale")
+
+    latest = _costmap_message(
+        stamp_ns=0, update_time_ns=4_000_000_000,
+        map_load_time_ns=2_000_000_000)
+    node.latest_costmap = latest
+    node.last_costmap_at = node._monotonic() - node.map_timeout - 0.01
+    assert node._content_and_freshness_matches_locked(
+        (node.latest_map, node.map_version, node.last_map_at), snapshot
+    ) == (False, "frontier plan discarded because costmap evidence is stale")
+
+
 def test_post_navigation_tf_miss_uses_fresh_episode_and_recovers_before_fault():
     clock = FakeMonotonic(100.0)
     ros_clock = FakeClock()
-    node = _node(autostart=True)
+    node = _selection_fixture(_node(autostart=True))
     node._monotonic = clock
     node.started_at = clock()
     node.readiness_wait_started_at = clock()
@@ -1046,7 +1287,7 @@ def test_post_navigation_tf_miss_uses_fresh_episode_and_recovers_before_fault():
 
 
 def test_production_selection_looks_up_tf_after_frontier_clustering(monkeypatch):
-    node = _node(autostart=True)
+    node = _selection_fixture(_node(autostart=True))
     ros_clock = FakeClock()
     events = []
     node.get_clock = lambda: ros_clock
@@ -1130,7 +1371,7 @@ def test_failed_world_reprojection_uses_translated_resolution_and_planar_yaw():
     node.state = "PLANNING"
 
     assert failed_world == pytest.approx((9.0, 23.0))
-    node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
+    node._select_frontier(node.run_generation, _transform(x=9.0, y=21.0))
 
     assert len(node.action_client.send_calls) == 1
     assert node._pending_candidate == (1, 1)
@@ -1198,7 +1439,8 @@ def test_failed_goal_worlds_survive_success_cleanup_skipped_cluster_and_map_upda
     assert node.failed_goal_worlds == {retained_world}
 
 
-@pytest.mark.parametrize("change", ["map", "costmap", "authority"])
+@pytest.mark.parametrize(
+    "change", ["map", "map_geometry", "costmap", "costmap_geometry", "authority"])
 def test_reservation_discards_plan_when_evidence_changes_during_action_wait(change):
     node = _node(autostart=True)
     node.state = "PLANNING"
@@ -1207,12 +1449,19 @@ def test_reservation_discards_plan_when_evidence_changes_during_action_wait(chan
 
     def change_evidence(timeout_sec):
         if change == "map":
-            node.latest_map = _map_message(data=[0, 0])
-            node.map_version += 1
+            node._map_callback(
+                _map_message(data=[0, 0], stamp_ns=9_000_000_000))
+        elif change == "map_geometry":
+            node._map_callback(
+                _map_message(origin_x=1.0, stamp_ns=9_000_000_000))
         elif change == "costmap":
-            node.latest_costmap = _costmap_message(data=[253, 253])
-            node.last_costmap_at = node._monotonic()
-            node.costmap_version += 1
+            node._costmap_callback(
+                _costmap_message(
+                    data=[253, 253], stamp_ns=9_000_000_000))
+        elif change == "costmap_geometry":
+            node._costmap_callback(
+                _costmap_message(
+                    resolution=1.0, stamp_ns=9_000_000_000))
         else:
             node.base_status.valid = False
         return old_wait(timeout_sec)
@@ -1226,6 +1475,90 @@ def test_reservation_discards_plan_when_evidence_changes_during_action_wait(chan
     assert node._motion_owned is False
     assert node.no_frontier_updates_seen == 2
     assert node.reason.startswith("frontier plan discarded because")
+
+
+@pytest.mark.parametrize("duplicate", ["map", "costmap", "both"])
+def test_newer_duplicate_equivalent_receipts_allow_reservation_dispatch(duplicate):
+    node = _node(autostart=True)
+    node.state = "PLANNING"
+    old_wait = node.action_client.wait_for_server
+
+    def publish_duplicate(timeout_sec):
+        if duplicate in ("map", "both"):
+            node._map_callback(_map_message(stamp_ns=9_000_000_000))
+        if duplicate in ("costmap", "both"):
+            node._costmap_callback(
+                _costmap_message(stamp_ns=9_000_000_000))
+        return old_wait(timeout_sec)
+
+    node.action_client.wait_for_server = publish_duplicate
+    node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
+
+    assert len(node.action_client.send_calls) == 1
+    assert node.state == "GOAL_PENDING"
+    assert node._motion_owned is True
+
+
+@pytest.mark.parametrize("invalid", ["map", "costmap"])
+def test_reservation_discards_invalid_newer_receipt(invalid):
+    node = _node(autostart=True)
+    node.state = "PLANNING"
+    old_wait = node.action_client.wait_for_server
+
+    def publish_invalid(timeout_sec):
+        if invalid == "map":
+            node._map_callback(
+                _map_message(data=[0, 0.5], stamp_ns=9_000_000_000))
+        else:
+            node._costmap_callback(
+                _costmap_message(data=[0], width=2, stamp_ns=9_000_000_000))
+        return old_wait(timeout_sec)
+
+    node.action_client.wait_for_server = publish_invalid
+    node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
+
+    assert node.action_client.send_calls == []
+    assert node._motion_owned is False
+    assert node.no_frontier_updates_seen == 0
+
+
+def test_equivalent_duplicate_receipts_only_count_current_valid_evidence_without_goal(
+        monkeypatch):
+    node = _node(autostart=True)
+    node.latest_costmap = _costmap_message(data=[253, 253])
+    node.state = "PLANNING"
+    original_candidates = frontier_explorer_module.costmap_frontier_candidates
+
+    def equivalent_receipts(*args, **kwargs):
+        node._map_callback(_map_message(stamp_ns=9_000_000_000))
+        node._costmap_callback(
+            _costmap_message(data=[253, 253], stamp_ns=9_000_000_000))
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(
+        frontier_explorer_module,
+        "costmap_frontier_candidates",
+        equivalent_receipts)
+    node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
+
+    assert node.no_frontier_updates_seen == 1
+    assert node.state == "SCANNING"
+
+    def changed_receipt(*args, **kwargs):
+        node._map_callback(
+            _map_message(data=[0, 0], stamp_ns=9_100_000_000))
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(
+        frontier_explorer_module,
+        "costmap_frontier_candidates",
+        changed_receipt)
+    node.state = "PLANNING"
+    node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
+
+    assert node.no_frontier_updates_seen == 1
+    assert node.state == "SCANNING"
+    assert node.reason == "frontier plan discarded because map evidence changed"
 
 
 def test_evidence_change_during_blocked_selection_prevents_dispatch(monkeypatch):
@@ -1322,11 +1655,11 @@ def test_reservation_discards_plan_when_receipt_expires_during_action_wait(stale
 
 
 def test_reservation_discards_plan_when_carried_tf_expires_during_action_wait():
-    node = _node(autostart=True)
-    node.state = "PLANNING"
-    ros_clock = FakeClock()
+    node, ros_clock = _real_route_node()
     node.get_clock = lambda: ros_clock
-    transform = _transform(stamp_ns=ros_clock.nanoseconds - 500_000_000)
+    transform = _transform(
+        stamp_ns=ros_clock.nanoseconds - 500_000_000,
+        x=3.5, y=3.5)
     old_wait = node.action_client.wait_for_server
 
     def expire_tf(timeout_sec):
@@ -1343,7 +1676,377 @@ def test_reservation_discards_plan_when_carried_tf_expires_during_action_wait():
     assert node.reason == "frontier plan discarded because carried TF is stale"
 
 
-def test_fully_blocked_frontier_is_skipped_without_motion_or_goal_failure():
+def test_stale_carried_tf_refreshes_same_route_and_dispatches(monkeypatch):
+    node, ros_clock = _real_route_node()
+    old_transform = _transform(
+        stamp_ns=ros_clock.nanoseconds - 500_000_000,
+        x=3.5, y=3.5)
+    fresh_transform = _transform(
+        stamp_ns=ros_clock.nanoseconds + 900_000_000,
+        x=3.5, y=3.5)
+
+    class FreshTransformBuffer:
+        def __init__(self):
+            self.lookup_calls = 0
+
+        def lookup_transform(self, *_args, **_kwargs):
+            self.lookup_calls += 1
+            return fresh_transform
+
+    node.tf_buffer = FreshTransformBuffer()
+    original_candidates = frontier_explorer_module.costmap_frontier_candidates
+
+    def delayed_candidates(*args, **kwargs):
+        ros_clock.nanoseconds += 1_100_000_000
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(
+        frontier_explorer_module,
+        "costmap_frontier_candidates",
+        delayed_candidates)
+    node._select_frontier(node.run_generation, old_transform)
+
+    assert node.tf_buffer.lookup_calls == 1
+    assert len(node.action_client.send_calls) == 1
+    assert node.state == "GOAL_PENDING"
+    assert node._motion_owned is True
+
+
+@pytest.mark.parametrize(
+    "case", ["changed_cell", "blocked_same_cell", "missing", "future", "stale"])
+def test_stale_carried_tf_refresh_requires_safe_fresh_route(
+        monkeypatch, case):
+    node, ros_clock = _real_route_node()
+    old_x = 3.1 if case in ("changed_cell", "blocked_same_cell") else 3.5
+    old_transform = _transform(
+        stamp_ns=ros_clock.nanoseconds - 500_000_000,
+        x=old_x, y=3.5)
+    if case == "changed_cell":
+        fresh_x = 4.1
+    elif case == "blocked_same_cell":
+        fresh_x = 3.45
+        node.latest_costmap.data[3 * 7 + 4] = 254
+    else:
+        fresh_x = old_x
+
+    node.tf_buffer = SimpleNamespace()
+
+    def lookup_transform(*_args, **_kwargs):
+        if case == "missing":
+            raise RuntimeError("fresh TF intentionally unavailable")
+        if case == "future":
+            # The selection delay advances the clock by 1.1 seconds before
+            # this lookup; keep the returned sample just beyond the one-second
+            # lookup-only future tolerance at that point.
+            return _transform(
+                stamp_ns=ros_clock.nanoseconds + 2_100_000_001,
+                x=fresh_x, y=3.5)
+        if case == "stale":
+            return _transform(
+                stamp_ns=ros_clock.nanoseconds - 2_000_000_000,
+                x=fresh_x, y=3.5)
+        return _transform(
+            stamp_ns=ros_clock.nanoseconds - 200_000_000,
+            x=fresh_x, y=3.5)
+
+    node.tf_buffer.lookup_transform = lookup_transform
+    original_candidates = frontier_explorer_module.costmap_frontier_candidates
+
+    def delayed_candidates(*args, **kwargs):
+        ros_clock.nanoseconds += 1_100_000_000
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(
+        frontier_explorer_module,
+        "costmap_frontier_candidates",
+        delayed_candidates)
+    node._select_frontier(node.run_generation, old_transform)
+
+    assert node.action_client.send_calls == []
+    assert node.state == "SCANNING"
+    assert node._motion_owned is False
+
+
+def test_matching_obstacle_blockage_enters_recovery_wait_then_requires_stationary_proof():
+    node = _selection_fixture(_node(autostart=True))
+    blocked_world = (14.5, 10.5)
+    _dispatch_pending(node, candidate=(14, 10), goal_world=blocked_world)
+    handle = _accept(node)
+    node._mission_status_callback(
+        _mission_status(node._expected_goal_uuid))
+
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+
+    assert node.state == "RECOVERY_WAIT"
+    assert node._motion_owned is False
+    assert len(node.action_client.send_calls) == 1
+    assert node._blocked_destinations
+
+    node.latest_costmap.data[0] = 1
+    node.costmap_version += 1
+    node.last_costmap_at = node._monotonic()
+    node._tick()
+    assert node.state == "RECOVERY_WAIT"
+    assert len(node.action_client.send_calls) == 1
+    node._tick()
+    assert node.state == "SCANNING"
+    assert len(node.action_client.send_calls) == 1
+    node._tick()
+    assert len(node.action_client.send_calls) == 2
+
+
+def test_matching_global_planning_abort_defers_frontier_without_latching_fault():
+    node = _selection_fixture(_node(autostart=True))
+    unreachable_world = (14.5, 10.5)
+    _dispatch_pending(node, candidate=(14, 10), goal_world=unreachable_world)
+    handle = _accept(node)
+    node._mission_status_callback(
+        _mission_status(
+            node._expected_goal_uuid,
+            reason="global planning failed",
+            blockage=False,
+            fault_class="PLANNER_ABORT"))
+
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+
+    assert node.state == "RECOVERY_WAIT"
+    assert node.fault_latched is False
+    assert node._mission_fault_class == "PLANNER_ABORT"
+    assert node.goal_failures == 1
+    assert node._motion_owned is False
+    assert node._blocked_destinations
+
+    node.latest_costmap.data[0] = 1
+    node.costmap_version += 1
+    node.last_costmap_at = node._monotonic()
+    node._tick()
+    assert node.state == "RECOVERY_WAIT"
+    node._tick()
+    assert node.state == "SCANNING"
+    assert node.fault_latched is False
+
+
+@pytest.mark.parametrize("reason", [
+    "planner or controller action is unavailable",
+    "planner rejected the mission goal",
+])
+def test_non_global_planner_abort_remains_fail_closed(reason):
+    node = _node(autostart=True)
+    _dispatch_pending(node)
+    handle = _accept(node)
+    node._mission_status_callback(
+        _mission_status(
+            node._expected_goal_uuid,
+            reason=reason,
+            blockage=False,
+            fault_class="PLANNER_ABORT"))
+
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+
+    assert node.state == "FAULT"
+    assert node.fault_latched is True
+    assert node._mission_fault_class == "PLANNER_ABORT"
+    assert node._blocked_destinations == {}
+
+
+def test_same_route_evidence_cannot_retry_a_confirmed_blocked_destination():
+    node = _selection_fixture(_node(autostart=True))
+    blocked_world = (14.5, 9.5)
+    _dispatch_pending(node, candidate=(14, 9), goal_world=blocked_world)
+    handle = _accept(node)
+    node._mission_status_callback(_mission_status(node._expected_goal_uuid))
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+
+    node._tick()
+    node._tick()
+    node._tick()
+
+    assert len(node.action_client.send_calls) == 2
+    assert node.action_client.send_calls[-1].pose.pose.position.x != pytest.approx(
+        blocked_world[0])
+
+
+def test_material_route_evidence_allows_only_three_blockage_attempts():
+    node = _node(autostart=True)
+    world = (1.5, 0.5)
+    for value in (0, 1, 2, 3):
+        node.latest_costmap.data[0] = value
+        fingerprint = node._route_evidence_fingerprint(
+            node.latest_map, node.latest_costmap)
+        with node._lock:
+            node._record_blockage_locked(world, fingerprint)
+        if value < 2:
+            assert world not in node._blocked_worlds_for_fingerprint_locked(
+                ("materially-different", value))
+
+    identity = node._world_identity(world)
+    assert node._blocked_destinations[identity]["attempts"] == 3
+    assert identity in node._retry_exhausted_destinations
+
+
+@pytest.mark.parametrize("status", [
+    GoalStatus.STATUS_ABORTED, GoalStatus.STATUS_CANCELED, 99])
+def test_non_success_without_matching_mission_terminal_faults_without_replan(status):
+    node = _node(autostart=True)
+    _dispatch_pending(node)
+    handle = _accept(node)
+    handle.result_future.set_result(SimpleNamespace(status=status))
+
+    assert node.state == "FAULT"
+    assert node.fault_latched is True
+    assert node._motion_owned is False
+    assert len(node.action_client.send_calls) == 1
+    fields = _diagnostic_values(node)
+    assert fields["motion_stopped"] == "true"
+    assert fields["mission_fault_class"] == "NAVIGATION_FAULT"
+    assert int(fields["raw_frontier_count"]) == int(
+        fields["unresolved_frontier_count"])
+    assert fields["blocked_frontier_count"] == "0"
+
+
+def test_mismatched_or_stale_mission_status_cannot_authorize_recovery():
+    node = _node(autostart=True)
+    _dispatch_pending(node)
+    handle = _accept(node)
+    node._mission_status_callback(_mission_status("00" * 16))
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+    assert node.state == "FAULT"
+    assert len(node.action_client.send_calls) == 1
+
+    node = _node(autostart=True)
+    _dispatch_pending(node)
+    handle = _accept(node)
+    node._mission_status_callback(_mission_status(node._expected_goal_uuid))
+    node._mission_status_by_uuid[node._expected_goal_uuid]["received_at"] = (
+        node._monotonic() - node._mission_status_max_age() - 0.1)
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+    assert node.state == "FAULT"
+    assert len(node.action_client.send_calls) == 1
+
+
+def test_canceled_action_cannot_use_obstacle_status_to_enter_recovery():
+    node = _node(autostart=True)
+    _dispatch_pending(node)
+    handle = _accept(node)
+    node._mission_status_callback(_mission_status(node._expected_goal_uuid))
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_CANCELED))
+
+    assert node.state == "FAULT"
+    assert node._motion_owned is False
+    assert len(node.action_client.send_calls) == 1
+
+
+def test_recovery_wait_stays_fail_closed_when_fresh_authority_or_map_is_missing():
+    node = _selection_fixture(_node(autostart=True))
+    _dispatch_pending(node, candidate=(14, 10), goal_world=(14.5, 10.5))
+    handle = _accept(node)
+    node._mission_status_callback(_mission_status(node._expected_goal_uuid))
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+    node.latest_map = None
+    node.last_map_at = None
+    node._tick()
+    node._tick()
+    assert node.state == "RECOVERY_WAIT"
+    assert len(node.action_client.send_calls) == 1
+    assert node.processed_map_version == -1
+
+
+@pytest.mark.parametrize("change", ["map", "costmap", "authority"])
+def test_refreshed_tf_reservation_rechecks_live_safety_evidence(
+        monkeypatch, change):
+    node, ros_clock = _real_route_node()
+    old_transform = _transform(
+        stamp_ns=ros_clock.nanoseconds - 500_000_000,
+        x=3.5, y=3.5)
+    fresh_transform = _transform(
+        stamp_ns=ros_clock.nanoseconds + 900_000_000,
+        x=3.5, y=3.5)
+    node.tf_buffer = SimpleNamespace(
+        lookup_transform=lambda *_args, **_kwargs: fresh_transform)
+    original_candidates = frontier_explorer_module.costmap_frontier_candidates
+
+    def delayed_candidates(*args, **kwargs):
+        ros_clock.nanoseconds += 1_100_000_000
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(
+        frontier_explorer_module,
+        "costmap_frontier_candidates",
+        delayed_candidates)
+    old_wait = node.action_client.wait_for_server
+
+    def change_evidence(timeout_sec):
+        if change == "map":
+            changed_map = [0] * 49
+            changed_map[3 * 7 + 5] = -1
+            changed_map[0] = 1
+            node._map_callback(
+                _map_message(data=changed_map, width=7, height=7))
+        elif change == "costmap":
+            changed_costmap = [0] * 49
+            changed_costmap[3 * 7 + 5] = 255
+            changed_costmap[0] = 1
+            node._costmap_callback(
+                _costmap_message(
+                    data=changed_costmap, width=7, height=7,
+                    resolution=1.0, origin_x=0.0, origin_y=0.0))
+        else:
+            node.base_status.valid = False
+        return old_wait(timeout_sec)
+
+    node.action_client.wait_for_server = change_evidence
+    node._select_frontier(node.run_generation, old_transform)
+
+    assert node.action_client.send_calls == []
+    assert node.state == "SCANNING"
+    assert node._motion_owned is False
+    assert node.reason.startswith("frontier plan discarded because")
+
+
+def test_refreshed_tf_must_remain_fresh_until_reservation(monkeypatch):
+    node, ros_clock = _real_route_node()
+    old_transform = _transform(
+        stamp_ns=ros_clock.nanoseconds - 500_000_000,
+        x=3.5, y=3.5)
+    fresh_transform = _transform(
+        stamp_ns=ros_clock.nanoseconds + 900_000_000,
+        x=3.5, y=3.5)
+    node.tf_buffer = SimpleNamespace(
+        lookup_transform=lambda *_args, **_kwargs: fresh_transform)
+    original_candidates = frontier_explorer_module.costmap_frontier_candidates
+
+    def delayed_candidates(*args, **kwargs):
+        ros_clock.nanoseconds += 1_100_000_000
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(
+        frontier_explorer_module,
+        "costmap_frontier_candidates",
+        delayed_candidates)
+    old_wait = node.action_client.wait_for_server
+
+    def expire_refreshed_tf(timeout_sec):
+        ros_clock.nanoseconds += 1_100_000_000
+        return old_wait(timeout_sec)
+
+    node.action_client.wait_for_server = expire_refreshed_tf
+    node._select_frontier(node.run_generation, old_transform)
+
+    assert node.action_client.send_calls == []
+    assert node.state == "SCANNING"
+    assert node._motion_owned is False
+    assert node.reason == "frontier plan discarded because refreshed TF is stale"
+
+
+def test_fully_blocked_frontier_reaches_safe_reachable_completion():
     node = _node(autostart=True)
     node.latest_costmap = _costmap_message(data=[253, 253])
     node.state = "PLANNING"
@@ -1363,17 +2066,23 @@ def test_fully_blocked_frontier_is_skipped_without_motion_or_goal_failure():
         node.state = "PLANNING"
         node.map_version += 1
         node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
-    assert node.state == "INCOMPLETE"
-    assert node.reason == "exploration incomplete: no safe costmap-valid frontier remains"
+    assert node.state == "COMPLETE"
+    assert node.reason == (
+        "exploration complete: reachable area exhausted; blocked frontiers remain")
+    assert node.raw_frontier_count == 1
+    assert node.blocked_frontier_count == 1
+    assert node.blocked_safety_count == 1
+    assert node.blocked_route_count == 0
+    assert node.unresolved_frontier_count == 0
     assert node.goal_failures == 0
     assert node.blacklist == set()
 
 
-def test_footprint_blocked_frontier_reaches_incomplete_without_dispatch():
+def test_footprint_blocked_frontier_reaches_completion_without_dispatch():
     node = _node(autostart=True)
     width = height = 20
     data = [0] * (width * height)
-    data[5 * width + 6] = 253
+    data[5 * width + 6] = 254
     node.latest_costmap = _costmap_message(
         data=data, width=width, height=height, resolution=1.0,
         origin_x=-5.0, origin_y=-5.0)
@@ -1389,8 +2098,41 @@ def test_footprint_blocked_frontier_reaches_incomplete_without_dispatch():
             node.state = "PLANNING"
             node.map_version += 1
 
+    assert node.state == "COMPLETE"
+    assert node.reason == (
+        "exploration complete: reachable area exhausted; blocked frontiers remain")
+    assert node.blocked_frontier_count == node.raw_frontier_count
+    assert node.blocked_safety_count == node.raw_frontier_count
+    assert node.blocked_route_count == 0
+    assert node.unresolved_frontier_count == 0
+
+
+def test_unresolved_frontier_classification_remains_fail_closed(monkeypatch):
+    node = _node(autostart=True)
+
+    def unresolved_selector(*_args, **_kwargs):
+        return ([], [{
+            "classification": "UNRESOLVED",
+            "safe_endpoint_count": 0,
+            "reachable_endpoint_count": 0,
+        }])
+
+    monkeypatch.setattr(
+        frontier_explorer_module,
+        "costmap_frontier_candidates",
+        unresolved_selector)
+    for index in range(node.no_frontier_limit):
+        node.state = "PLANNING"
+        node.map_version += 1
+        node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
+        if index + 1 < node.no_frontier_limit:
+            assert node.state == "SCANNING"
+
     assert node.state == "INCOMPLETE"
-    assert node.reason == "exploration incomplete: no safe costmap-valid frontier remains"
+    assert node.reason == "exploration incomplete: frontier classification is unresolved"
+    assert node.raw_frontier_count == 1
+    assert node.blocked_frontier_count == 0
+    assert node.unresolved_frontier_count == 1
 
 
 def test_true_raw_frontier_exhaustion_reaches_complete():
@@ -1430,7 +2172,7 @@ def test_dispatchable_choice_resets_exhaustion_only_after_reservation():
     assert node.no_frontier_updates_seen == 0
 
 
-def test_incomplete_stop_preserves_safe_stop_and_restart_clears_it():
+def test_safe_reachable_completion_stop_and_restart_clears_it():
     node = _node(autostart=True)
     node.latest_costmap = _costmap_message(data=[253, 253])
     for index in range(node.no_frontier_limit):
@@ -1439,12 +2181,12 @@ def test_incomplete_stop_preserves_safe_stop_and_restart_clears_it():
         node._select_frontier(node.run_generation, _transform(x=0.0, y=0.0))
         if index + 1 < node.no_frontier_limit:
             assert node.state == "SCANNING"
-    assert node.state == "INCOMPLETE"
+    assert node.state == "COMPLETE"
 
     response = node._stop_callback(None, Trigger.Response())
     assert response.success is True
-    assert node.state == "INCOMPLETE"
-    assert node.reason == "exploration incomplete: no safe costmap-valid frontier remains"
+    assert node.state == "STOPPED"
+    assert node.reason == "operator stop acknowledged after completion"
 
     response = _start(node)
     assert response.success is True
@@ -1927,8 +2669,8 @@ def test_tf_requires_nonzero_finite_ros_time_fresh_stamp(stamp_ns, expected):
         _transform(stamp_ns), 10_000_000_000, 1.0) is expected
 
 
-def test_lookup_uses_exact_nonzero_node_ros_time():
-    class ExactNodeClock:
+def test_lookup_uses_latest_time_with_nonzero_node_ros_time():
+    class NonzeroNodeClock:
         def __init__(self, nanoseconds):
             self.nanoseconds = nanoseconds
             self.times = []
@@ -1939,17 +2681,27 @@ def test_lookup_uses_exact_nonzero_node_ros_time():
             return value
 
     node = _node(autostart=True)
-    clock = ExactNodeClock(10_000_000_000)
-    buffer = QueryTimeTransformBuffer()
+    clock = NonzeroNodeClock(10_000_000_000)
+
+    class LatestOnlyTransformBuffer:
+        def __init__(self):
+            self.calls = []
+
+        def lookup_transform(self, target, source, query_time, **kwargs):
+            self.calls.append((target, source, query_time, kwargs))
+            if query_time.nanoseconds != 0:
+                raise RuntimeError("exact-time lookup intentionally unavailable")
+            return _transform(stamp_ns=clock.nanoseconds - 100_000_000)
+
+    buffer = LatestOnlyTransformBuffer()
     node.get_clock = lambda: clock
     node.tf_buffer = buffer
 
     assert node._lookup_fresh_transform() is not None
     assert len(buffer.calls) == 1
     query_time = buffer.calls[0][2]
-    assert query_time is clock.times[0]
-    assert query_time.nanoseconds == 10_000_000_000
-    assert query_time.nanoseconds > 0
+    assert query_time.nanoseconds == 0
+    assert query_time.nanoseconds != clock.times[0].nanoseconds
 
 
 def test_zero_node_ros_time_fails_closed_before_tf_lookup():
@@ -1967,29 +2719,114 @@ def test_zero_node_ros_time_fails_closed_before_tf_lookup():
     assert buffer.calls == []
 
 
-def test_newer_slightly_future_tf_sample_is_rejected_with_valid_past_sample():
+def test_lookup_accepts_bounded_future_tf_but_rejects_over_limit():
     now_ros_ns = 10_000_000_000
     past_transform = _transform(stamp_ns=now_ros_ns - 80_000_000)
-    future_transform = _transform(stamp_ns=now_ros_ns + 1_000_000)
+    bounded_future_transform = _transform(
+        stamp_ns=now_ros_ns + 1_000_000_000)
+    over_limit_transform = _transform(
+        stamp_ns=now_ros_ns + 1_000_000_001)
 
     assert FrontierExplorer._valid_transform(
         past_transform, now_ros_ns, 1.0) is True
     assert FrontierExplorer._valid_transform(
-        future_transform, now_ros_ns, 1.0) is False
+        bounded_future_transform, now_ros_ns, 1.0) is False
+    assert FrontierExplorer._valid_transform(
+        bounded_future_transform, now_ros_ns, 1.0,
+        future_tolerance_sec=1.0) is True
+    assert FrontierExplorer._valid_transform(
+        over_limit_transform, now_ros_ns, 1.0,
+        future_tolerance_sec=1.0) is False
 
     class FutureTransformBuffer:
-        def __init__(self):
+        def __init__(self, transform):
+            self.transform = transform
             self.calls = []
 
         def lookup_transform(self, target, source, query_time, **kwargs):
             self.calls.append((target, source, query_time, kwargs))
-            return future_transform
+            return self.transform
 
     node = _node(autostart=True)
     node.get_clock = lambda: FakeClock(now_ros_ns)
-    node.tf_buffer = FutureTransformBuffer()
+    node.tf_buffer = FutureTransformBuffer(bounded_future_transform)
+    assert node._lookup_fresh_transform() is bounded_future_transform
+    node.tf_buffer.transform = over_limit_transform
     assert node._lookup_fresh_transform() is None
-    assert len(node.tf_buffer.calls) == 1
+    invalid_future_transform = _transform(
+        stamp_ns=now_ros_ns + 500_000_000)
+    invalid_future_transform.transform.rotation.x = 0.0
+    invalid_future_transform.transform.rotation.y = 0.0
+    invalid_future_transform.transform.rotation.z = 0.0
+    invalid_future_transform.transform.rotation.w = 0.0
+    node.tf_buffer.transform = invalid_future_transform
+    assert node._lookup_fresh_transform() is None
+    assert len(node.tf_buffer.calls) == 3
+
+
+def test_runtime_diagnostics_are_opt_in_and_capture_admission_phases():
+    disabled = _node(autostart=True)
+    disabled._lookup_fresh_transform()
+    assert disabled._runtime_trace_events == []
+
+    node = _selection_fixture(_node(autostart=True))
+    node.runtime_diagnostics = True
+    node._tick()
+    node._tick()
+
+    assert node.state == "GOAL_PENDING"
+    events = node._runtime_trace_events
+    phases = {event["phase"] for event in events}
+    assert {"lookup", "action_wait", "clustering", "route_search", "reservation"} <= phases
+    for event in events:
+        assert event["generation"] == node.run_generation
+        assert event["wall_after_sec"] >= event["wall_before_sec"]
+        assert "wall_duration_sec" in event
+        assert "ros_before_ns" in event
+        assert "ros_after_ns" in event
+        assert "map_version_before" in event
+        assert "map_version_after" in event
+        assert "costmap_version_before" in event
+        assert "costmap_version_after" in event
+        assert "base_receipt_age_sec_before" in event
+        assert "manipulator_receipt_age_sec_after" in event
+    lookup = next(event for event in events if event["phase"] == "lookup")
+    assert lookup["outcome"] == "accepted"
+    assert lookup["tf_stamp_ns"] > 0
+    assert lookup["tf_validation_age_sec"] >= 0.0
+    reservation = next(event for event in events if event["phase"] == "reservation")
+    assert reservation["outcome"] == "reserved"
+    assert reservation["motion_owned_after"] is True
+
+
+def test_runtime_diagnostics_record_lookup_errors_without_changing_fail_closed_result():
+    node = _node(autostart=True)
+    node.runtime_diagnostics = True
+    node._runtime_trace_events = []
+    node.tf_buffer = QueryTimeTransformBuffer(missing=True)
+
+    assert node._lookup_fresh_transform() is None
+    assert node._runtime_trace_events[-1]["phase"] == "lookup"
+    assert node._runtime_trace_events[-1]["outcome"] == "lookup_error"
+    assert "intentionally unavailable" in node._runtime_trace_events[-1]["lookup_error"]
+
+
+def test_runtime_diagnostics_record_evidence_change_reason():
+    node = _node(autostart=True)
+    node.runtime_diagnostics = True
+    expected_map = node.latest_map
+    expected_costmap = node.latest_costmap
+    node.latest_map = _map_message(data=[100, -1])
+
+    result = node._content_and_freshness_matches_locked(
+        (expected_map, node.map_version, node.last_map_at),
+        (expected_costmap, node.costmap_version, node.last_costmap_at))
+
+    assert result[0] is False
+    event = node._runtime_trace_events[-1]
+    assert event["phase"] == "evidence_check"
+    assert event["outcome"] == "rejected"
+    assert event["evidence_reason"] == "frontier plan discarded because map evidence changed"
 
 
 def test_stale_generation_callback_cannot_change_new_run():
@@ -2598,7 +3435,7 @@ def test_real_executor_capacity_keeps_tf_buffer_fresh_during_cpu_loaded_selectio
     # This is intentionally the production value for the required red run.
     executor_workers = 2
     ros_context = Context()
-    domain_id = (os.getpid() % 200) + 40
+    domain_id = (os.getpid() % 193) + 40
     explorer = None
     publisher_node = None
     executor = None

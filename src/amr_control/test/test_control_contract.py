@@ -23,6 +23,17 @@ def test_control_lifecycle_registers_activation_before_configuration():
     return_order = launch.index("return node, activate, configure", managed_start)
     assert "return node, configure, activate" not in launch[managed_start:return_order]
     assert launch.index("activate = RegisterEventHandler", managed_start) < return_order
+    assert 'DeclareLaunchArgument("configure_delay_sec", default_value="0.0")' in launch
+    assert 'period=LaunchConfiguration("configure_delay_sec")' in launch
+    assert 'DeclareLaunchArgument("source_timeout_ms", default_value="200")' in launch
+    assert '"source_timeout_ms": ParameterValue(' in launch
+    assert 'LaunchConfiguration("source_timeout_ms"), value_type=int' in launch
+    assert 'DeclareLaunchArgument("manipulator_status_timeout_ms", default_value="200")' in launch
+    assert '"manipulator_status_timeout_ms": ParameterValue(' in launch
+    assert 'LaunchConfiguration("manipulator_status_timeout_ms"), value_type=int' in launch
+    assert 'DeclareLaunchArgument("require_manipulator_stowed", default_value="false")' in launch
+    assert '"require_manipulator_stowed": ParameterValue(' in launch
+    assert 'LaunchConfiguration("require_manipulator_stowed"), value_type=bool' in launch
 
 
 def test_arbitration_owns_constraints_and_stamped_command():

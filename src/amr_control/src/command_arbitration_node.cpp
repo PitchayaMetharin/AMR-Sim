@@ -345,8 +345,17 @@ class CommandArbitrationNode final : public rclcpp_lifecycle::LifecycleNode {
           source_command_.linear.x, -max_linear_velocity_, max_linear_velocity_);
         const double angular_target = std::clamp(
           source_command_.angular.z, -max_angular_velocity_, max_angular_velocity_);
-        linear = slew(linear_target, last_linear_, max_linear_acceleration_, elapsed);
-        angular = slew(angular_target, last_angular_, max_angular_acceleration_, elapsed);
+        // An explicit all-zero command is a terminal stop request.  Do not
+        // slew a safety stop: after a controller collision abort, continuing
+        // to publish the prior velocity can carry the robot into the obstacle
+        // before the acceleration limit reaches zero.
+        if (linear_target == 0.0 && angular_target == 0.0) {
+          linear = 0.0;
+          angular = 0.0;
+        } else {
+          linear = slew(linear_target, last_linear_, max_linear_acceleration_, elapsed);
+          angular = slew(angular_target, last_angular_, max_angular_acceleration_, elapsed);
+        }
         last_linear_ = linear;
         last_angular_ = angular;
         source_active_ = true;

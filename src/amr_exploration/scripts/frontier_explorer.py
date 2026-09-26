@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Fail-closed frontier exploration through the AMR mission action boundary."""
 
+from copy import deepcopy
+from contextlib import contextmanager
 import math
 from numbers import Integral, Real
 import threading
@@ -17,19 +19,33 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.duration import Duration
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import (
+    ExternalShutdownException, MultiThreadedExecutor, SingleThreadedExecutor)
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from frontier_algorithm import (
-    NAVIGATION_FOOTPRINT, costmap_frontier_candidates, frontier_cell_world,
-    frontier_clusters, costmap_geometry, frontier_world_cell,
-    occupancy_grid_geometry)
+    NAVIGATION_FOOTPRINT, _goal_distance_is_valid, _route_start_proof,
+    costmap_frontier_candidates, frontier_cell_world, frontier_clusters,
+    costmap_geometry, frontier_world_cell, occupancy_grid_geometry)
 
 
 _UNSET = object()
+SLAM_MAP_ODOM_FUTURE_TOLERANCE_SEC = 1.0
+MISSION_STATUS_DIAGNOSTIC = "amr_mission/mission_supervisor"
+SAFE_REACHABLE_COMPLETION_POLICY = "SAFE_REACHABLE_AREA_V1"
+FRONTIER_BLOCKED_CLASSES = frozenset(("BLOCKED_SAFETY", "BLOCKED_ROUTE"))
+MAX_BLOCKAGE_ATTEMPTS = 3
+RECOVERY_YAW_TOLERANCE_RAD = math.radians(1.0)
+MISSION_FAULT_CLASSES = frozenset((
+    "NONE", "OBSTACLE_BLOCKAGE", "PLANNER_ABORT", "SMOOTHER_ABORT",
+    "CONTROLLER_ABORT", "CANCELLATION", "NAVIGATION_FAULT"))
+MISSION_STAGES = frozenset((
+    "PLANNING", "SMOOTHING", "FOLLOWING", "CANCELING", "TERMINAL"))
+MISSION_OUTCOMES = frozenset((
+    "PENDING", "SUCCEEDED", "CANCELED", "ABORTED", "FAULT"))
 
 
 def _parameter_bool(value, name):
@@ -98,6 +114,7 @@ class FrontierExplorer(Node):
         self.declare_parameter("startup_grace_sec", 15.0)
         self.declare_parameter("cancel_timeout_sec", 5.0)
         self.declare_parameter("min_goal_distance_m", 0.3)
+        self.declare_parameter("runtime_diagnostics", False)
         self.autostart = _parameter_bool(
             self.get_parameter("autostart").value, "autostart")
         self.map_timeout = _parameter_positive_real(
@@ -118,6 +135,8 @@ class FrontierExplorer(Node):
             self.get_parameter("cancel_timeout_sec").value, "cancel_timeout_sec")
         self.min_goal_distance = _parameter_positive_real(
             self.get_parameter("min_goal_distance_m").value, "min_goal_distance_m")
+        self.runtime_diagnostics = _parameter_bool(
+            self.get_parameter("runtime_diagnostics").value, "runtime_diagnostics")
 
         self._lock = threading.RLock()
         self.action_callback_group = ReentrantCallbackGroup()
@@ -136,6 +155,9 @@ class FrontierExplorer(Node):
         self.base_sub = self.create_subscription(BaseStatus, "/amr/base/status", self._base_callback, 10)
         self.manipulator_sub = self.create_subscription(
             ManipulatorStatus, "/amr/manipulation/status", self._manipulator_callback, 1)
+        self.mission_status_sub = self.create_subscription(
+            DiagnosticArray, "/amr/mission/status",
+            self._mission_status_callback, 10)
         self.status_pub = self.create_publisher(DiagnosticArray, "/amr/exploration/status", 10)
         self.start_service = self.create_service(
             Trigger, "/amr/exploration/start", self._start_callback,
@@ -147,7 +169,25 @@ class FrontierExplorer(Node):
             self, NavigateToPose, "/amr/mission/navigate_to_pose",
             callback_group=self.action_callback_group)
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        # Route selection is intentionally CPU-bound Python work.  Keep TF
+        # receipt independent of that callback so the final reservation proof
+        # does not validate a sample that the local buffer received seconds
+        # earlier even though upstream TF is current.
+        self._tf_listener_node = Node(
+            "frontier_explorer_tf_listener_%x" % id(self),
+            context=self.context,
+            enable_rosout=False,
+            start_parameter_services=False,
+        )
+        self.tf_listener = TransformListener(self.tf_buffer, self._tf_listener_node)
+        self._tf_listener_executor = SingleThreadedExecutor(context=self.context)
+        self._tf_listener_executor.add_node(self._tf_listener_node)
+        self._tf_listener_thread = threading.Thread(
+            target=self._spin_tf_listener,
+            name="frontier-explorer-tf-listener",
+            daemon=True,
+        )
+        self._tf_listener_thread.start()
 
         # Receipt times use the steady clock.  ROS time is reserved for TF
         # header age and goal timestamps.
@@ -165,6 +205,8 @@ class FrontierExplorer(Node):
         self.last_manipulator_status_at = None
         self.base_status = None
         self.manipulator_status = None
+        self._runtime_trace_sequence = 0
+        self._runtime_trace_events = []
 
         # A motion token remains owned from reservation through result and
         # cancellation acknowledgement.  This prevents late action futures
@@ -193,6 +235,22 @@ class FrontierExplorer(Node):
         self._cancel_ack = False
         self._cancel_record = None
         self.cancel_event = threading.Event()
+        self._expected_goal_uuid = None
+        self._mission_status_by_uuid = {}
+        self._mission_status_invalid_at = None
+        self._blocked_destinations = {}
+        self._retry_exhausted_destinations = set()
+        self._recovery_goal_world = None
+        self._recovery_stationary_sample = None
+        self._recovery_stationary_samples = 0
+        self.reached_goal_count = 0
+        self.raw_frontier_count = 0
+        self.blocked_frontier_count = 0
+        self.blocked_safety_count = 0
+        self.blocked_route_count = 0
+        self.unresolved_frontier_count = 0
+        self._mission_blockage_confirmed = False
+        self._mission_fault_class = "NONE"
         self.blacklist = set()
         self.failed_goal_worlds = set()
         self.goal_failures = 0
@@ -207,6 +265,44 @@ class FrontierExplorer(Node):
             0.2, self._tick, callback_group=self.planning_callback_group)
         with self._lock:
             self._publish_status_locked()
+
+    def _spin_tf_listener(self):
+        try:
+            self._tf_listener_executor.spin()
+        except ExternalShutdownException:
+            pass
+
+    def _stop_tf_listener(self):
+        listener = getattr(self, "tf_listener", None)
+        listener_node = getattr(self, "_tf_listener_node", None)
+        executor = getattr(self, "_tf_listener_executor", None)
+        thread = getattr(self, "_tf_listener_thread", None)
+        if listener is not None:
+            try:
+                listener.unregister()
+            except (AttributeError, RuntimeError):
+                pass
+        if executor is not None:
+            if listener_node is not None:
+                try:
+                    executor.remove_node(listener_node)
+                except (AttributeError, RuntimeError):
+                    pass
+            try:
+                executor.shutdown(timeout_sec=1.0)
+            except (AttributeError, RuntimeError):
+                pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+        if listener_node is not None:
+            try:
+                listener_node.destroy_node()
+            except (AttributeError, RuntimeError):
+                pass
+
+    def destroy_node(self):
+        self._stop_tf_listener()
+        return super().destroy_node()
 
     # ------------------------------------------------------------------
     # Status and lifecycle helpers
@@ -229,6 +325,176 @@ class FrontierExplorer(Node):
             return None
 
     @staticmethod
+    def _receipt_age(now, received_at):
+        if received_at is None:
+            return None
+        try:
+            return float(now - received_at)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _trace_evidence_snapshot(self, wall_now):
+        return {
+            "map_version": getattr(self, "map_version", None),
+            "costmap_version": getattr(self, "costmap_version", None),
+            "base_receipt_age_sec": self._receipt_age(
+                wall_now, getattr(self, "last_base_status_at", None)),
+            "manipulator_receipt_age_sec": self._receipt_age(
+                wall_now, getattr(self, "last_manipulator_status_at", None)),
+        }
+
+    @staticmethod
+    def _trace_value(value):
+        if isinstance(value, bool):
+            return str(value).lower()
+        return str(value)
+
+    def _publish_runtime_trace(self, event):
+        """Publish one opt-in, machine-readable timing/evidence event."""
+        publisher = getattr(self, "status_pub", None)
+        if publisher is None:
+            return
+        message = DiagnosticArray()
+        now = self._now_ros_msg()
+        if now is not None:
+            message.header.stamp = now
+        diagnostic = DiagnosticStatus()
+        diagnostic.name = "amr_exploration/runtime_trace"
+        diagnostic.level = (
+            DiagnosticStatus.OK
+            if event.get("outcome") in ("ok", "available", "accepted", "reserved")
+            else DiagnosticStatus.WARN)
+        diagnostic.message = "%s: %s" % (
+            event.get("phase", "unknown"), event.get("outcome", "unknown"))
+        for key, value in sorted(event.items()):
+            item = KeyValue()
+            item.key = str(key)
+            item.value = self._trace_value(value)
+            diagnostic.values.append(item)
+        message.status.append(diagnostic)
+        publisher.publish(message)
+
+    @contextmanager
+    def _trace_span(self, phase, generation=None, **initial):
+        """Record an opt-in phase span without changing the control path."""
+        if not getattr(self, "runtime_diagnostics", False):
+            yield None
+            return
+
+        wall_before = self._monotonic()
+        ros_before = self._now_ros_ns()
+        event = {
+            "phase": phase,
+            "generation": (
+                getattr(self, "run_generation", None)
+                if generation is None else generation),
+            "outcome": "ok",
+        }
+        event.update(initial)
+        for key, value in self._trace_evidence_snapshot(wall_before).items():
+            event["%s_before" % key] = value
+        event["wall_before_sec"] = wall_before
+        event["ros_before_ns"] = ros_before
+        try:
+            yield event
+        except Exception as exc:
+            event["outcome"] = "exception"
+            event["error"] = str(exc)
+            raise
+        finally:
+            wall_after = self._monotonic()
+            ros_after = self._now_ros_ns()
+            for key, value in self._trace_evidence_snapshot(wall_after).items():
+                event["%s_after" % key] = value
+            event["wall_after_sec"] = wall_after
+            event["wall_duration_sec"] = wall_after - wall_before
+            event["ros_after_ns"] = ros_after
+            event["ros_duration_ns"] = ros_after - ros_before
+            self._runtime_trace_sequence = (
+                getattr(self, "_runtime_trace_sequence", 0) + 1)
+            event["sequence"] = self._runtime_trace_sequence
+            self._runtime_trace_events = list(
+                getattr(self, "_runtime_trace_events", ())) + [dict(event)]
+            # Trace publication is observational.  A diagnostics transport
+            # failure must not change admission, cancellation, or fault state.
+            try:
+                self._publish_runtime_trace(event)
+            except Exception:  # pragma: no cover - middleware boundary
+                pass
+
+    @staticmethod
+    def _header_stamp_ns(message):
+        """Return a header stamp, or distinguish unavailable from malformed."""
+        try:
+            header = message.header
+        except AttributeError:
+            return None
+        if header is None:
+            return _UNSET
+        try:
+            stamp = header.stamp
+        except AttributeError:
+            return None
+        if stamp is None:
+            return _UNSET
+        try:
+            sec_value = stamp.sec
+            nanosec_value = stamp.nanosec
+        except AttributeError:
+            return None
+        if isinstance(sec_value, bool) or isinstance(nanosec_value, bool):
+            return _UNSET
+        try:
+            sec_float = float(sec_value)
+            nanosec_float = float(nanosec_value)
+        except (TypeError, ValueError, OverflowError):
+            return _UNSET
+        if (not math.isfinite(sec_float)
+                or not math.isfinite(nanosec_float)
+                or not sec_float.is_integer()
+                or not nanosec_float.is_integer()):
+            return _UNSET
+        sec = int(sec_float)
+        nanosec = int(nanosec_float)
+        if sec < 0 or nanosec < 0 or nanosec >= 1_000_000_000:
+            return _UNSET
+        return sec * 1_000_000_000 + nanosec
+
+    def _message_is_fresh(self, message, received_at, max_age_sec, now=None):
+        """Check ROS header age, falling back to the steady receipt age."""
+        if message is None or received_at is None:
+            return False
+        if now is None:
+            now = self._monotonic()
+        receipt_fresh = 0.0 <= now - received_at <= max_age_sec
+        stamp_ns = self._header_stamp_ns(message)
+        if stamp_ns is _UNSET:
+            return False
+        ros_now_ns = self._now_ros_ns()
+        if stamp_ns is None or stamp_ns == 0 or ros_now_ns <= 0:
+            return receipt_fresh
+        age_ns = ros_now_ns - stamp_ns
+        return 0 <= age_ns <= int(max_age_sec * 1_000_000_000)
+
+    def _authority_message_is_fresh(
+            self, message, received_at, max_age_sec, now=None):
+        """Check the live receipt TTL for an authority status stream.
+
+        BaseStatus and ManipulatorStatus headers describe the observation that
+        produced the status.  They are not the Explorer's liveness clock: in
+        the portable runtime the publisher and Explorer can observe the same
+        ROS clock on adjacent executor turns, making a freshly received
+        status header briefly appear future-dated here.  Authority therefore
+        requires a recent steady-clock receipt, while the semantic status
+        gates remain enforced by ``_authority_ready_locked``.
+        """
+        if message is None or received_at is None:
+            return False
+        if now is None:
+            now = self._monotonic()
+        return 0.0 <= now - received_at <= max_age_sec
+
+    @staticmethod
     def _format_candidate(candidate):
         if candidate is None:
             return ""
@@ -246,6 +512,66 @@ class FrontierExplorer(Node):
             return None
 
     @staticmethod
+    def _world_identity(world):
+        """Use a finite, stable world-coordinate bucket for blockage history."""
+        world = FrontierExplorer._validated_world_point(world)
+        if world is None:
+            return None
+        # Five centimetres is below the footprint scale and keeps equivalent
+        # cell-center goals together while allowing genuinely different goals.
+        return tuple(int(math.floor(value / 0.05 + 0.5)) for value in world)
+
+    @staticmethod
+    def _route_evidence_fingerprint(grid, costmap):
+        """Fingerprint only map/costmap geometry and content.
+
+        Receipt counters and all message timestamps are deliberately omitted;
+        the fingerprint changes only when route evidence itself changes.
+        """
+        try:
+            map_geometry = occupancy_grid_geometry(grid)
+            costmap_geometry_value = costmap_geometry(costmap)
+            if map_geometry is None or costmap_geometry_value is None:
+                return None
+            return (
+                (grid.header.frame_id, tuple(map_geometry), tuple(grid.data)),
+                (costmap.header.frame_id, tuple(costmap_geometry_value),
+                 tuple(costmap.data)),
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+    def _blocked_worlds_for_fingerprint_locked(self, fingerprint):
+        blocked = []
+        for record in getattr(self, "_blocked_destinations", {}).values():
+            if (record.get("attempts", 0) >= MAX_BLOCKAGE_ATTEMPTS
+                    or fingerprint in record.get("fingerprints", set())):
+                world = self._validated_world_point(record.get("world"))
+                if world is not None:
+                    blocked.append(world)
+        return tuple(blocked)
+
+    def _record_blockage_locked(self, world, fingerprint):
+        world = self._validated_world_point(world)
+        identity = self._world_identity(world)
+        if identity is None:
+            return
+        destinations = getattr(self, "_blocked_destinations", None)
+        if destinations is None:
+            destinations = {}
+            self._blocked_destinations = destinations
+        record = destinations.setdefault(
+            identity, {"world": world, "fingerprints": set(), "attempts": 0})
+        fingerprints = record.setdefault("fingerprints", set())
+        if fingerprint not in fingerprints:
+            if record.get("attempts", 0) >= MAX_BLOCKAGE_ATTEMPTS:
+                return
+            fingerprints.add(fingerprint)
+            record["attempts"] = int(record.get("attempts", 0)) + 1
+        if record.get("attempts", 0) >= MAX_BLOCKAGE_ATTEMPTS:
+            getattr(self, "_retry_exhausted_destinations", set()).add(identity)
+
+    @staticmethod
     def _goal_pose_world(goal):
         try:
             position = goal.pose.pose.position
@@ -253,6 +579,171 @@ class FrontierExplorer(Node):
                 (position.x, position.y))
         except (AttributeError, TypeError, ValueError, OverflowError):
             return None
+
+    @staticmethod
+    def _transform_world_yaw(transform):
+        try:
+            translation = transform.transform.translation
+            world = FrontierExplorer._validated_world_point(
+                (translation.x, translation.y))
+            if world is None:
+                return None
+            rotation = transform.transform.rotation
+            yaw = math.atan2(
+                2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+                rotation.w * rotation.w + rotation.x * rotation.x
+                - rotation.y * rotation.y - rotation.z * rotation.z)
+            if not math.isfinite(yaw):
+                return None
+            return world, yaw
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _canonical_goal_uuid(value):
+        """Return the action UUID as the lowercase 32-character hex form."""
+        try:
+            raw = getattr(value, "uuid", value)
+            if isinstance(raw, str):
+                text = raw.replace("-", "").strip().lower()
+                if (len(text) != 32
+                        or any(character not in "0123456789abcdef" for character in text)):
+                    return None
+                return text
+            data = bytes(raw)
+            if len(data) != 16:
+                return None
+            return data.hex()
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _diagnostic_fields(diagnostic):
+        fields = {}
+        try:
+            for item in diagnostic.values:
+                key = str(item.key)
+                value = str(item.value)
+                if not key or key in fields:
+                    return None
+                fields[key] = value
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return fields
+
+    def _mission_status_callback(self, message):
+        """Retain only structured mission evidence; it never authorizes motion."""
+        received_at = self._monotonic()
+        try:
+            diagnostics = tuple(message.status)
+        except (AttributeError, TypeError):
+            with self._lock:
+                self._mission_status_invalid_at = received_at
+            return
+        matching = [
+            diagnostic for diagnostic in diagnostics
+            if getattr(diagnostic, "name", None) == MISSION_STATUS_DIAGNOSTIC]
+        with self._lock:
+            if not matching:
+                return
+            diagnostic = matching[-1]
+            fields = self._diagnostic_fields(diagnostic)
+            goal_uuid = (
+                self._canonical_goal_uuid(fields.get("goal_uuid"))
+                if fields is not None else None)
+            required = (
+                "goal_uuid", "stage", "outcome", "reason",
+                "blockage_confirmed", "fault_class")
+            valid = (
+                fields is not None
+                and all(key in fields for key in required)
+                and goal_uuid is not None
+                and fields.get("stage") in MISSION_STAGES
+                and fields.get("outcome") in MISSION_OUTCOMES
+                and fields.get("fault_class") in MISSION_FAULT_CLASSES
+                and bool(fields.get("reason"))
+                and fields.get("blockage_confirmed") in ("true", "false"))
+            record = {
+                "received_at": received_at,
+                "valid": bool(valid),
+                "goal_uuid": goal_uuid,
+                "stage": fields.get("stage", "") if fields is not None else "",
+                "outcome": fields.get("outcome", "") if fields is not None else "",
+                "reason": fields.get("reason", "") if fields is not None else "",
+                "blockage_confirmed": (
+                    fields.get("blockage_confirmed") == "true"
+                    if fields is not None else False),
+                "fault_class": fields.get("fault_class", "") if fields is not None else "",
+            }
+            if goal_uuid is None:
+                self._mission_status_invalid_at = received_at
+            else:
+                self._mission_status_by_uuid[goal_uuid] = record
+
+    def _mission_status_max_age(self):
+        return max(
+            1.0,
+            float(getattr(self, "map_timeout", 1.0)),
+            float(getattr(self, "tf_timeout", 1.0)),
+            float(getattr(self, "authority_timeout", 1.0)))
+
+    def _matching_mission_terminal_locked(self):
+        expected_uuid = getattr(self, "_expected_goal_uuid", None)
+        if expected_uuid is None:
+            return None, "accepted navigation goal UUID is unavailable"
+        record = getattr(self, "_mission_status_by_uuid", {}).get(expected_uuid)
+        if record is None:
+            return None, "matching mission terminal status is missing"
+        now = self._monotonic()
+        received_at = record.get("received_at")
+        if (received_at is None
+                or now < received_at
+                or now - received_at > self._mission_status_max_age()):
+            return None, "matching mission terminal status is stale"
+        started_at = getattr(self, "goal_started_at", None)
+        if started_at is not None and received_at < started_at:
+            return None, "matching mission terminal status predates the action"
+        if not record.get("valid", False):
+            return None, "matching mission terminal status is malformed"
+        if record.get("stage") != "TERMINAL":
+            return None, "matching mission status is not terminal"
+        return record, ""
+
+    @staticmethod
+    def _is_recoverable_planner_abort(status, mission_record):
+        """Recognize only a completed no-path result as a safe deferral."""
+        return (
+            status == GoalStatus.STATUS_ABORTED
+            and mission_record is not None
+            and mission_record.get("outcome") == "FAULT"
+            and mission_record.get("fault_class") == "PLANNER_ABORT"
+            and mission_record.get("reason") == "global planning failed"
+            and mission_record.get("blockage_confirmed") is False)
+
+    @staticmethod
+    def _mission_stage_for_state(state):
+        if state in FrontierExplorer._TERMINAL_STATES:
+            return "TERMINAL"
+        if state in ("GOAL_PENDING", "WAITING_READY", "SCANNING", "PLANNING"):
+            return "PLANNING"
+        if state == "RECOVERY_WAIT":
+            return "RECOVERY_WAIT"
+        if state == "CANCELLING":
+            return "CANCELING"
+        if state == "NAVIGATING":
+            return "FOLLOWING"
+        return str(state)
+
+    def _mission_outcome_for_state(self):
+        if self.state == "COMPLETE":
+            return "SUCCEEDED"
+        if self.state == "STOPPED":
+            return "CANCELED"
+        if self.state == "INCOMPLETE":
+            return "ABORTED"
+        if self.state == "FAULT":
+            return "FAULT"
+        return "PENDING"
 
     def _status_message_locked(self):
         message = DiagnosticArray()
@@ -272,12 +763,33 @@ class FrontierExplorer(Node):
             "map_version": self.map_version,
             "pending": self._pending,
             "active": self.active_goal is not None,
+            "cancel_owned_motion": self.cancel_requested and self._motion_owned,
             "cancel_target": self._cancel_target,
             "cancel_ack": self._cancel_ack,
             "goal_failures": self.goal_failures,
             "no_frontier_updates_seen": self.no_frontier_updates_seen,
             "candidate": self._format_candidate(self.active_candidate),
             "fault_latched": self.fault_latched,
+            "reached_goal_count": getattr(self, "reached_goal_count", 0),
+            "completion_policy": SAFE_REACHABLE_COMPLETION_POLICY,
+            "raw_frontier_count": getattr(self, "raw_frontier_count", 0),
+            "blocked_frontier_count": getattr(
+                self, "blocked_frontier_count", 0),
+            "blocked_safety_count": getattr(self, "blocked_safety_count", 0),
+            "blocked_route_count": getattr(self, "blocked_route_count", 0),
+            "unresolved_frontier_count": getattr(self, "unresolved_frontier_count", 0),
+            "blocked_count": len(getattr(self, "_blocked_destinations", {})),
+            "retry_exhausted_count": len(
+                getattr(self, "_retry_exhausted_destinations", set())),
+            "motion_stopped": not self._has_motion_locked(),
+            "mission_goal_uuid": getattr(self, "_expected_goal_uuid", None) or "",
+            "mission_stage": self._mission_stage_for_state(self.state),
+            "mission_outcome": self._mission_outcome_for_state(),
+            "mission_reason": self.reason,
+            "blockage_confirmed": getattr(
+                self, "_mission_blockage_confirmed", False),
+            "mission_fault_class": getattr(
+                self, "_mission_fault_class", "NONE"),
         }
         for key, value in values.items():
             item = KeyValue()
@@ -290,7 +802,12 @@ class FrontierExplorer(Node):
     def _publish_status_locked(self):
         publisher = getattr(self, "status_pub", None)
         if publisher is not None:
-            publisher.publish(self._status_message_locked())
+            # Status is observational.  A diagnostics transport failure must
+            # never alter motion ownership, cancellation, or fault outcomes.
+            try:
+                publisher.publish(self._status_message_locked())
+            except Exception:  # pragma: no cover - middleware boundary
+                pass
 
     def _set_state_locked(self, state, reason, force=False):
         changed = self.state != state or self.reason != reason
@@ -384,6 +901,9 @@ class FrontierExplorer(Node):
             if terminal_state == "FAULT":
                 self.fault_requested = True
                 self.fault_latched = True
+                self._mission_fault_class = "CANCELLATION"
+            elif terminal_state == "STOPPED":
+                self._mission_fault_class = "CANCELLATION"
             if terminal_state != "FAULT" or not was_fault_latched:
                 self.reason = reason
             self._publish_status_locked()
@@ -440,11 +960,19 @@ class FrontierExplorer(Node):
     def _terminal_locked(self, state, reason):
         """Commit terminal state, publish it, then release stop waiters."""
         self._clear_readiness_episode_locked()
+        if state == "FAULT":
+            self._reset_frontier_classification_for_fault_locked()
+        elif state == "INCOMPLETE" and self.raw_frontier_count == 0:
+            self.raw_frontier_count = (
+                self._current_unresolved_frontier_count_locked())
+            self.unresolved_frontier_count = self.raw_frontier_count
         self.state = state
         self.reason = reason
         if state == "FAULT":
             self.fault_requested = True
             self.fault_latched = True
+            if getattr(self, "_mission_fault_class", "NONE") == "NONE":
+                self._mission_fault_class = "NAVIGATION_FAULT"
         # The status publication deliberately precedes the event signal.  A
         # stop caller must never observe completion without its terminal proof.
         self._publish_status_locked()
@@ -524,6 +1052,22 @@ class FrontierExplorer(Node):
             self.processed_map_version = -1
             self.blacklist.clear()
             self.failed_goal_worlds.clear()
+            getattr(self, "_blocked_destinations", {}).clear()
+            getattr(self, "_retry_exhausted_destinations", set()).clear()
+            self._recovery_goal_world = None
+            self._recovery_stationary_sample = None
+            self._recovery_stationary_samples = 0
+            self.reached_goal_count = 0
+            self.raw_frontier_count = 0
+            self.blocked_frontier_count = 0
+            self.blocked_safety_count = 0
+            self.blocked_route_count = 0
+            self.unresolved_frontier_count = 0
+            self._expected_goal_uuid = None
+            self._mission_status_by_uuid = {}
+            self._mission_status_invalid_at = None
+            self._mission_blockage_confirmed = False
+            self._mission_fault_class = "NONE"
             self.goal_failures = 0
             self.no_frontier_updates_seen = 0
             self.fault_requested = False
@@ -583,12 +1127,11 @@ class FrontierExplorer(Node):
             and bool(getattr(manipulator_status, "base_motion_allowed", False))
             and getattr(manipulator_status, "state", None) in (
                 ManipulatorStatus.STOWED_EMPTY, ManipulatorStatus.STOWED_LOADED))
-        base_fresh = (
-            base_received is not None
-            and 0.0 <= now - base_received <= self.authority_timeout)
-        manipulator_fresh = (
-            manipulator_received is not None
-            and 0.0 <= now - manipulator_received <= self.authority_timeout)
+        base_fresh = self._authority_message_is_fresh(
+            base_status, base_received, self.authority_timeout, now=now)
+        manipulator_fresh = self._authority_message_is_fresh(
+            manipulator_status, manipulator_received,
+            self.authority_timeout, now=now)
         return base_ready and manip_ready and base_fresh and manipulator_fresh
 
     def _authority_ready(self):
@@ -596,14 +1139,19 @@ class FrontierExplorer(Node):
             return self._authority_ready_locked()
 
     @staticmethod
-    def _valid_transform(transform, now_ros_ns, timeout_sec):
+    def _valid_transform(
+            transform, now_ros_ns, timeout_sec, *, future_tolerance_sec=0.0):
         """Return true only for a finite, timestamped, ROS-time-fresh TF."""
         try:
             stamp = transform.header.stamp
             stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
-            if stamp_ns <= 0 or now_ros_ns < stamp_ns:
+            future_tolerance_ns = int(future_tolerance_sec * 1_000_000_000)
+            if stamp_ns <= 0 or future_tolerance_ns < 0:
                 return False
-            if now_ros_ns - stamp_ns > int(timeout_sec * 1_000_000_000):
+            if stamp_ns > now_ros_ns:
+                if stamp_ns - now_ros_ns > future_tolerance_ns:
+                    return False
+            elif now_ros_ns - stamp_ns > int(timeout_sec * 1_000_000_000):
                 return False
             translation = transform.transform.translation
             rotation = transform.transform.rotation
@@ -619,20 +1167,61 @@ class FrontierExplorer(Node):
         except (AttributeError, TypeError, ValueError, OverflowError):
             return False
 
+    def _valid_lookup_transform(self, transform):
+        return self._valid_transform(
+            transform, self._now_ros_ns(), self.tf_timeout,
+            future_tolerance_sec=SLAM_MAP_ODOM_FUTURE_TOLERANCE_SEC)
+
     def _lookup_fresh_transform(self):
-        try:
-            query_time = self.get_clock().now()
-            if query_time.nanoseconds <= 0:
+        with self._trace_span("lookup") as trace:
+            try:
+                now = self.get_clock().now()
+                if now.nanoseconds <= 0:
+                    if trace is not None:
+                        trace["outcome"] = "zero_ros_time"
+                    return None
+                transform = self.tf_buffer.lookup_transform(
+                    "map", "base_footprint", rclpy.time.Time(),
+                    timeout=Duration(seconds=self.tf_timeout))
+            except (AttributeError, TypeError, ValueError, OverflowError,
+                    TransformException, RuntimeError) as exc:
+                if trace is not None:
+                    trace["outcome"] = "lookup_error"
+                    trace["lookup_error"] = str(exc)
                 return None
-            transform = self.tf_buffer.lookup_transform(
-                "map", "base_footprint", query_time,
-                timeout=Duration(seconds=self.tf_timeout))
-        except (AttributeError, TypeError, ValueError, OverflowError,
-                TransformException, RuntimeError):
-            return None
-        if not self._valid_transform(transform, self._now_ros_ns(), self.tf_timeout):
-            return None
-        return transform
+            if trace is not None:
+                stamp_ns = self._header_stamp_ns(transform)
+                trace["tf_stamp_ns"] = (
+                    stamp_ns if isinstance(stamp_ns, int) else None)
+                trace["tf_validation_age_sec"] = (
+                    (self._now_ros_ns() - stamp_ns) / 1_000_000_000.0
+                    if isinstance(stamp_ns, int) else None)
+            if not self._valid_lookup_transform(transform):
+                if trace is not None:
+                    trace["outcome"] = "stale_or_invalid"
+                return None
+            if trace is not None:
+                trace["outcome"] = "accepted"
+            return transform
+
+    def _wait_for_action_server(
+            self, timeout_sec, *, generation=None, raise_on_error=False):
+        with self._trace_span("action_wait", generation=generation) as trace:
+            if trace is not None:
+                trace["timeout_sec"] = timeout_sec
+            try:
+                available = self.action_client.wait_for_server(
+                    timeout_sec=timeout_sec)
+            except Exception as exc:  # pragma: no cover - middleware boundary
+                if trace is not None:
+                    trace["outcome"] = "wait_error"
+                    trace["error"] = str(exc)
+                if raise_on_error:
+                    raise
+                return False
+            if trace is not None:
+                trace["outcome"] = "available" if available else "unavailable"
+            return available
 
     def _map_fresh(self):
         return self._map_readiness()[0]
@@ -642,8 +1231,8 @@ class FrontierExplorer(Node):
         with self._lock:
             grid = self.latest_map
             received_at = self.last_map_at
-        if (grid is None or received_at is None
-                or not 0.0 <= now - received_at <= self.map_timeout):
+        if not self._message_is_fresh(
+                grid, received_at, self.map_timeout, now=now):
             return False, "fresh valid map is unavailable", None
         if occupancy_grid_geometry(grid) is None:
             return False, "fresh valid map is unavailable", None
@@ -654,8 +1243,8 @@ class FrontierExplorer(Node):
         with self._lock:
             costmap = self.latest_costmap
             received_at = self.last_costmap_at
-        if (costmap is None or received_at is None
-                or not 0.0 <= now - received_at <= self.map_timeout):
+        if not self._message_is_fresh(
+                costmap, received_at, self.map_timeout, now=now):
             return False, "fresh valid global costmap is unavailable", None
         if costmap_geometry(costmap) is None:
             return False, "fresh valid global costmap is unavailable", None
@@ -678,10 +1267,8 @@ class FrontierExplorer(Node):
             if transform is None:
                 return False, "timestamped fresh map to base_footprint TF is unavailable", None
         if require_action:
-            try:
-                available = self.action_client.wait_for_server(timeout_sec=0.2)
-            except Exception:  # pragma: no cover - middleware boundary
-                available = False
+            available = self._wait_for_action_server(
+                0.2, generation=getattr(self, "run_generation", None))
             if not available:
                 return False, "mission navigation action server is unavailable", None
         return True, "readiness gates passed", transform
@@ -760,6 +1347,12 @@ class FrontierExplorer(Node):
             self._readiness_failure(
                 run_generation, state, started_at, detail)
             return
+        if state == "RECOVERY_WAIT":
+            # Recovery is deliberately a non-dispatching state.  The next
+            # planning tick is admitted only after this helper records two
+            # separate stationary, fresh TF observations.
+            self._recovery_wait_tick(run_generation, started_at)
+            return
         if state != "SCANNING":
             return
 
@@ -782,11 +1375,59 @@ class FrontierExplorer(Node):
             self._set_state_locked("PLANNING", "planning a frontier candidate")
         self._select_frontier(run_generation)
 
+    def _apply_frontier_diagnostics_locked(self, diagnostics):
+        diagnostics = tuple(diagnostics or ())
+        blocked_safety_count = 0
+        blocked_route_count = 0
+        unresolved_count = 0
+        for diagnostic in diagnostics:
+            classification = (
+                diagnostic.get("classification")
+                if isinstance(diagnostic, dict) else None)
+            if classification == "BLOCKED_SAFETY":
+                blocked_safety_count += 1
+            elif classification == "BLOCKED_ROUTE":
+                blocked_route_count += 1
+            elif classification != "REACHABLE":
+                unresolved_count += 1
+        self.raw_frontier_count = len(diagnostics)
+        self.blocked_safety_count = blocked_safety_count
+        self.blocked_route_count = blocked_route_count
+        self.blocked_frontier_count = (
+            blocked_safety_count + blocked_route_count)
+        self.unresolved_frontier_count = unresolved_count
+
+    @staticmethod
+    def _frontier_diagnostics_are_blocked(diagnostics, has_frontiers):
+        if not has_frontiers:
+            return True
+        if not isinstance(diagnostics, (list, tuple)) or not diagnostics:
+            return False
+        return all(
+            isinstance(item, dict)
+            and item.get("classification") in FRONTIER_BLOCKED_CLASSES
+            for item in diagnostics)
+
     def _finish_without_goal(
-            self, run_generation, reason, complete=False, incomplete=False):
+            self, run_generation, reason, complete=False, incomplete=False,
+            frontier_diagnostics=None):
         with self._lock:
             if self.run_generation != run_generation or self.state != "PLANNING":
                 return
+            if frontier_diagnostics is not None:
+                self._apply_frontier_diagnostics_locked(frontier_diagnostics)
+            if complete:
+                if frontier_diagnostics is None:
+                    self.raw_frontier_count = 0
+                    self.blocked_frontier_count = 0
+                    self.blocked_safety_count = 0
+                    self.blocked_route_count = 0
+                    self.unresolved_frontier_count = 0
+            elif incomplete:
+                if frontier_diagnostics is None:
+                    self.raw_frontier_count = (
+                        self._current_unresolved_frontier_count_locked())
+                    self.unresolved_frontier_count = self.raw_frontier_count
             if incomplete:
                 self._terminal_locked("INCOMPLETE", reason)
             elif complete:
@@ -794,9 +1435,88 @@ class FrontierExplorer(Node):
             else:
                 self._set_state_locked("SCANNING", reason)
 
+    def _current_unresolved_frontier_count_locked(self):
+        try:
+            if occupancy_grid_geometry(self.latest_map) is None:
+                return 0
+            clusters = frontier_clusters(
+                self.latest_map.info.width,
+                self.latest_map.info.height,
+                self.latest_map.data)
+            return len(clusters) if clusters is not None else 0
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return 0
+
+    def _reset_frontier_classification_for_fault_locked(self):
+        raw_frontier_count = self._current_unresolved_frontier_count_locked()
+        self.raw_frontier_count = raw_frontier_count
+        self.blocked_frontier_count = 0
+        self.blocked_safety_count = 0
+        self.blocked_route_count = 0
+        self.unresolved_frontier_count = raw_frontier_count
+
     def _planning_gate_failure(self, run_generation, started_at, detail):
         self._readiness_failure(
             run_generation, "PLANNING", started_at, detail)
+
+    def _recovery_wait_tick(self, run_generation, started_at):
+        """Wait for fresh readiness and two independent stationary TF samples."""
+        ready, detail, transform = self._readiness(
+            require_action=True, require_costmap=True, require_transform=True)
+        with self._lock:
+            if not self._decision_matches_locked(
+                    run_generation=run_generation,
+                    expected_state="RECOVERY_WAIT",
+                    expected_started_at=started_at):
+                return
+            if not ready or transform is None:
+                self._recovery_stationary_sample = None
+                self._recovery_stationary_samples = 0
+                self._set_state_locked(
+                    "RECOVERY_WAIT", "recovery readiness unavailable: " + detail)
+                return
+            pose = self._transform_world_yaw(transform)
+            current_costmap = self.latest_costmap
+            geometry = costmap_geometry(current_costmap)
+            if pose is None or geometry is None:
+                self._recovery_stationary_sample = None
+                self._recovery_stationary_samples = 0
+                self._set_state_locked(
+                    "RECOVERY_WAIT", "recovery stationary proof evidence is unavailable")
+                return
+            # Store (x, y, yaw) from this timer tick.
+            current_sample = (pose[0][0], pose[0][1], pose[1])
+            previous = self._recovery_stationary_sample
+            if previous is None:
+                self._recovery_stationary_sample = current_sample
+                self._recovery_stationary_samples = 1
+                self._set_state_locked(
+                    "RECOVERY_WAIT",
+                    "recovery waiting for stationary TF proof (1/2)")
+                return
+            translation_delta = math.hypot(
+                current_sample[0] - previous[0],
+                current_sample[1] - previous[1])
+            yaw_delta = math.atan2(
+                math.sin(current_sample[2] - previous[2]),
+                math.cos(current_sample[2] - previous[2]))
+            stationary = (
+                translation_delta <= 0.5 * float(geometry[2])
+                and abs(yaw_delta) <= RECOVERY_YAW_TOLERANCE_RAD)
+            if not stationary:
+                self._recovery_stationary_sample = current_sample
+                self._recovery_stationary_samples = 1
+                self._set_state_locked(
+                    "RECOVERY_WAIT",
+                    "recovery waiting for stationary TF proof (motion observed)")
+                return
+            self._recovery_stationary_sample = current_sample
+            self._recovery_stationary_samples = 2
+            self.processed_map_version = -1
+            self._recovery_stationary_sample = None
+            self._recovery_stationary_samples = 0
+            self._set_state_locked(
+                "SCANNING", "recovery readiness and stationary TF proof passed")
 
     def _select_frontier(self, run_generation=None, transform=None):
         """Plan the current map and carry one post-cluster TF sample."""
@@ -818,7 +1538,7 @@ class FrontierExplorer(Node):
                     expected_started_at=started_at):
                 return
             grid = self.latest_map
-            map_snapshot = (grid, self.map_version, self.last_map_at)
+            map_snapshot = (deepcopy(grid), self.map_version, self.last_map_at)
         if occupancy_grid_geometry(grid) is None:
             self._planning_gate_failure(
                 run_generation, started_at, "fresh valid map is unavailable")
@@ -829,7 +1549,13 @@ class FrontierExplorer(Node):
             return
         with self._lock:
             costmap_snapshot = (
-                costmap, self.costmap_version, self.last_costmap_at)
+                deepcopy(costmap), self.costmap_version, self.last_costmap_at)
+            route_fingerprint = self._route_evidence_fingerprint(
+                map_snapshot[0], costmap_snapshot[0])
+            failed_goal_worlds = tuple(
+                list(failed_goal_worlds)
+                + list(self._blocked_worlds_for_fingerprint_locked(
+                    route_fingerprint)))
         try:
             if not any(value == 0 for value in grid.data):
                 # An all-unknown initial map is not evidence that exploration
@@ -849,20 +1575,29 @@ class FrontierExplorer(Node):
                 expected_state="PLANNING",
                 expected_started_at=started_at)
             return
-        try:
-            failed_goal_cells = set()
-            for failed_world in failed_goal_worlds:
-                failed_cell = frontier_world_cell(grid, failed_world)
-                if failed_cell is not None:
-                    failed_goal_cells.add(failed_cell)
-            clusters = frontier_clusters(grid.info.width, grid.info.height, grid.data)
-        except Exception as exc:  # pragma: no cover - algorithm boundary
-            self._fault(
-                "frontier planning failed: " + str(exc),
-                expected_run_generation=run_generation,
-                expected_state="PLANNING",
-                expected_started_at=started_at)
-            return
+        with self._trace_span("clustering", generation=run_generation) as trace:
+            try:
+                failed_goal_cells = set()
+                for failed_world in failed_goal_worlds:
+                    failed_cell = frontier_world_cell(grid, failed_world)
+                    if failed_cell is not None:
+                        failed_goal_cells.add(failed_cell)
+                clusters = frontier_clusters(
+                    grid.info.width, grid.info.height, grid.data)
+                if trace is not None:
+                    trace["cluster_count"] = (
+                        len(clusters) if clusters is not None else None)
+                    trace["outcome"] = "ok" if clusters is not None else "invalid"
+            except Exception as exc:  # pragma: no cover - algorithm boundary
+                if trace is not None:
+                    trace["outcome"] = "algorithm_error"
+                    trace["error"] = str(exc)
+                self._fault(
+                    "frontier planning failed: " + str(exc),
+                    expected_run_generation=run_generation,
+                    expected_state="PLANNING",
+                    expected_started_at=started_at)
+                return
 
         if clusters is None:
             self._planning_gate_failure(
@@ -874,50 +1609,85 @@ class FrontierExplorer(Node):
                 "fresh base/manipulator motion authority is unavailable")
             return
 
-        if transform is None:
+        transform_from_lookup = transform is None
+        if transform_from_lookup:
             transform = self._lookup_fresh_transform()
-        if not self._valid_transform(
-                transform, self._now_ros_ns(), self.tf_timeout):
+        valid_transform = (
+            self._valid_lookup_transform(transform)
+            if transform_from_lookup else self._valid_transform(
+                transform, self._now_ros_ns(), self.tf_timeout))
+        if not valid_transform:
             self._planning_gate_failure(
                 run_generation, started_at,
                 "timestamped fresh map to base_footprint TF is unavailable")
             return
 
-        robot_world = (
-            transform.transform.translation.x,
-            transform.transform.translation.y)
-        try:
-            candidates = costmap_frontier_candidates(
-                clusters, grid, costmap, failed_goal_cells,
-                robot_world=robot_world,
-                min_goal_distance=self.min_goal_distance,
-                footprint=NAVIGATION_FOOTPRINT)
-        except Exception as exc:  # pragma: no cover - algorithm boundary
-            self._fault(
-                "frontier planning failed: " + str(exc),
-                expected_run_generation=run_generation,
-                expected_state="PLANNING",
-                expected_started_at=started_at)
+        transform_pose = self._transform_world_yaw(transform)
+        if transform_pose is None:
+            self._planning_gate_failure(
+                run_generation, started_at,
+                "timestamped fresh map to base_footprint TF is unavailable")
             return
+        robot_world, robot_yaw = transform_pose
+        with self._trace_span("route_search", generation=run_generation) as trace:
+            try:
+                selection_result = costmap_frontier_candidates(
+                    clusters, grid, costmap, failed_goal_cells,
+                    robot_world=robot_world,
+                    min_goal_distance=self.min_goal_distance,
+                    footprint=NAVIGATION_FOOTPRINT,
+                    robot_yaw=robot_yaw,
+                    require_path_clear=True, return_diagnostics=True)
+                if (isinstance(selection_result, tuple)
+                        and len(selection_result) == 2):
+                    candidates, frontier_diagnostics = selection_result
+                else:
+                    # Preserve integration seams that still provide the
+                    # historical list-only selector contract.
+                    candidates = selection_result
+                    frontier_diagnostics = None
+                if trace is not None:
+                    trace["candidate_count"] = (
+                        len(candidates) if candidates is not None else None)
+                    trace["outcome"] = "ok" if candidates is not None else "invalid"
+            except Exception as exc:  # pragma: no cover - algorithm boundary
+                if trace is not None:
+                    trace["outcome"] = "algorithm_error"
+                    trace["error"] = str(exc)
+                self._fault(
+                    "frontier planning failed: " + str(exc),
+                    expected_run_generation=run_generation,
+                    expected_state="PLANNING",
+                    expected_started_at=started_at)
+                return
 
         if candidates is None:
             self._planning_gate_failure(run_generation, started_at, costmap_detail)
             return
 
         if not candidates:
-            current_map_ready, current_map_detail, current_grid = (
+            current_map_ready, current_map_detail, _ = (
                 self._map_readiness())
             if not current_map_ready:
                 self._planning_gate_failure(
                     run_generation, started_at, current_map_detail)
                 return
             with self._lock:
-                if (current_grid is not self.latest_map
-                        or self.map_version != map_snapshot[1]):
-                    self._discard_stale_plan_locked(
-                        run_generation, started_at,
-                        "frontier plan discarded because map evidence changed")
+                evidence_ok, evidence_detail = (
+                    self._content_and_freshness_matches_locked(
+                        map_snapshot, costmap_snapshot))
+                if not evidence_ok:
+                    if evidence_detail in (
+                            "frontier plan discarded because fresh valid map is unavailable",
+                            "frontier plan discarded because map evidence is stale"):
+                        self._planning_gate_failure(
+                            run_generation, started_at,
+                            "fresh valid map is unavailable")
+                    else:
+                        self._discard_stale_plan_locked(
+                            run_generation, started_at, evidence_detail)
                     return
+                self._apply_frontier_diagnostics_locked(frontier_diagnostics)
             with self._lock:
                 if not self._decision_matches_locked(
                         run_generation=run_generation,
@@ -926,9 +1696,19 @@ class FrontierExplorer(Node):
                     return
                 self.no_frontier_updates_seen += 1
                 limit_reached = self.no_frontier_updates_seen >= self.no_frontier_limit
-                incomplete = limit_reached and bool(clusters)
+                blocked_completion = (
+                    limit_reached
+                    and self._frontier_diagnostics_are_blocked(
+                        frontier_diagnostics, bool(clusters)))
+                incomplete = (
+                    limit_reached and bool(clusters)
+                    and not blocked_completion)
             if incomplete:
-                detail = "exploration incomplete: no safe costmap-valid frontier remains"
+                detail = "exploration incomplete: frontier classification is unresolved"
+            elif limit_reached and bool(clusters):
+                detail = (
+                    "exploration complete: reachable area exhausted; "
+                    "blocked frontiers remain")
             elif limit_reached:
                 detail = "exploration complete: no costmap-valid frontier remains"
             else:
@@ -936,11 +1716,76 @@ class FrontierExplorer(Node):
             self._finish_without_goal(
                 run_generation, detail,
                 complete=limit_reached and not incomplete,
-                incomplete=incomplete)
+                incomplete=incomplete,
+                frontier_diagnostics=frontier_diagnostics)
             return
 
+        gx, gy = candidates[0]
+        goal_world = frontier_cell_world(grid, (gx, gy))
+        if goal_world is None:
+            self._fault(
+                "frontier map geometry is invalid",
+                expected_run_generation=run_generation,
+                expected_state="PLANNING",
+                expected_started_at=started_at)
+            return
+
+        fresh_transform = None
+        valid_transform = (
+            self._valid_lookup_transform(transform)
+            if transform_from_lookup else self._valid_transform(
+                transform, self._now_ros_ns(), self.tf_timeout))
+        if not valid_transform:
+            # The TF lookup is intentionally outside _lock.  It may wait for
+            # middleware data while receipt callbacks continue to run.
+            with self._trace_span("refresh", generation=run_generation) as trace:
+                fresh_transform = self._lookup_fresh_transform()
+                if fresh_transform is None:
+                    if trace is not None:
+                        trace["outcome"] = "unavailable"
+                        trace["evidence_reason"] = (
+                            "frontier plan discarded because refreshed TF is unavailable")
+                    with self._lock:
+                        self._discard_stale_plan_locked(
+                            run_generation, started_at,
+                            "frontier plan discarded because refreshed TF is unavailable")
+                    return
+                if trace is not None:
+                    stamp_ns = self._header_stamp_ns(fresh_transform)
+                    trace["tf_stamp_ns"] = (
+                        stamp_ns if isinstance(stamp_ns, int) else None)
+                    trace["tf_validation_age_sec"] = (
+                        (self._now_ros_ns() - stamp_ns) / 1_000_000_000.0
+                        if isinstance(stamp_ns, int) else None)
+                fresh_pose = self._transform_world_yaw(fresh_transform)
+                costmap_snapshot_geometry = costmap_geometry(costmap_snapshot[0])
+                if (fresh_pose is None
+                        or costmap_snapshot_geometry is None
+                        or not _route_start_proof(
+                            costmap_snapshot_geometry,
+                            costmap_snapshot[0].data,
+                            NAVIGATION_FOOTPRINT,
+                            robot_world, robot_yaw,
+                            fresh_pose[0], fresh_pose[1])
+                        or not _goal_distance_is_valid(
+                            fresh_pose[0], goal_world, self.min_goal_distance)):
+                    if trace is not None:
+                        trace["outcome"] = "unsafe"
+                        trace["evidence_reason"] = (
+                            "frontier plan discarded because refreshed route "
+                            "start is unsafe")
+                    with self._lock:
+                        self._discard_stale_plan_locked(
+                            run_generation, started_at,
+                            "frontier plan discarded because refreshed route "
+                            "start is unsafe")
+                    return
+                if trace is not None:
+                    trace["outcome"] = "accepted"
+
         try:
-            if not self.action_client.wait_for_server(timeout_sec=0.2):
+            if not self._wait_for_action_server(
+                    0.2, generation=run_generation, raise_on_error=True):
                 self._planning_gate_failure(
                     run_generation, started_at,
                     "mission navigation action server is unavailable")
@@ -958,20 +1803,11 @@ class FrontierExplorer(Node):
             self._planning_gate_failure(run_generation, started_at, costmap_detail)
             return
 
-        gx, gy = candidates[0]
         pose = PoseStamped()
         pose.header.frame_id = "map"
         stamp = self._now_ros_msg()
         if stamp is not None:
             pose.header.stamp = stamp
-        goal_world = frontier_cell_world(grid, (gx, gy))
-        if goal_world is None:
-            self._fault(
-                "frontier map geometry is invalid",
-                expected_run_generation=run_generation,
-                expected_state="PLANNING",
-                expected_started_at=started_at)
-            return
         pose.pose.position.x = goal_world[0]
         pose.pose.position.y = goal_world[1]
         pose.pose.orientation.w = 1.0
@@ -980,13 +1816,62 @@ class FrontierExplorer(Node):
         self._reserve_and_send(
             goal, (gx, gy), run_generation, expected_started_at=started_at,
             map_snapshot=map_snapshot, costmap_snapshot=costmap_snapshot,
-            transform=transform, goal_world=goal_world)
+            transform=transform, fresh_transform=fresh_transform,
+            goal_world=goal_world, transform_from_lookup=transform_from_lookup,
+            fresh_transform_from_lookup=fresh_transform is not None)
 
-    def _reservation_evidence_matches_locked(
-            self, map_snapshot, costmap_snapshot, transform):
+    @staticmethod
+    def _map_content_equal(planned_map, latest_map):
         try:
-            expected_map, expected_map_version, expected_map_received_at = map_snapshot
-            expected_costmap, expected_costmap_version, expected_costmap_received_at = (
+            return (
+                planned_map.header.frame_id == latest_map.header.frame_id
+                and planned_map.info == latest_map.info
+                and list(planned_map.data) == list(latest_map.data))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _costmap_content_equal(planned_costmap, latest_costmap):
+        try:
+            planned_metadata = planned_costmap.metadata
+            latest_metadata = latest_costmap.metadata
+            field_getter = "get_fields_and_field_types"
+            planned_get_fields = getattr(planned_metadata, field_getter, None)
+            latest_get_fields = getattr(latest_metadata, field_getter, None)
+            if callable(planned_get_fields) and callable(latest_get_fields):
+                planned_fields = set(planned_get_fields().keys())
+                latest_fields = set(latest_get_fields().keys())
+            else:
+                planned_fields = set(vars(planned_metadata))
+                latest_fields = set(vars(latest_metadata))
+            if planned_fields != latest_fields:
+                return False
+            return (
+                planned_costmap.header.frame_id == latest_costmap.header.frame_id
+                and all(
+                    field == "update_time"
+                    or getattr(planned_metadata, field) == getattr(latest_metadata, field)
+                    for field in planned_fields)
+                and list(planned_costmap.data) == list(latest_costmap.data))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    def _content_and_freshness_matches_locked(
+            self, map_snapshot, costmap_snapshot):
+        with self._trace_span("evidence_check") as trace:
+            result = self._content_and_freshness_matches_impl_locked(
+                map_snapshot, costmap_snapshot)
+            if trace is not None:
+                trace["outcome"] = "accepted" if result[0] else "rejected"
+                trace["evidence_reason"] = result[1]
+            return result
+
+    def _content_and_freshness_matches_impl_locked(
+            self, map_snapshot, costmap_snapshot):
+        try:
+            expected_map, _expected_map_version, _expected_map_received_at = (
+                map_snapshot)
+            expected_costmap, _expected_costmap_version, _expected_costmap_received_at = (
                 costmap_snapshot)
         except (TypeError, ValueError):
             return False, "frontier evidence snapshot is incomplete"
@@ -994,27 +1879,62 @@ class FrontierExplorer(Node):
         if occupancy_grid_geometry(self.latest_map) is None:
             return False, "frontier plan discarded because fresh valid map is unavailable"
         now = self._monotonic()
-        if (self.last_map_at is None
-                or not 0.0 <= now - self.last_map_at <= self.map_timeout):
+        if not self._message_is_fresh(
+                self.latest_map, self.last_map_at, self.map_timeout, now=now):
             return False, "frontier plan discarded because map evidence is stale"
-        if (self.latest_map is not expected_map
-                or self.map_version != expected_map_version):
+        if not self._map_content_equal(expected_map, self.latest_map):
             return False, "frontier plan discarded because map evidence changed"
-        if self.last_map_at != expected_map_received_at:
-            return False, "frontier plan discarded because map evidence changed"
-        if (self.latest_costmap is not expected_costmap
-                or self.costmap_version != expected_costmap_version):
+        if not self._costmap_content_equal(expected_costmap, self.latest_costmap):
             return False, "frontier plan discarded because costmap evidence changed"
-        if (self.last_costmap_at != expected_costmap_received_at
-                or expected_costmap_received_at is None
-                or not 0.0 <= now - expected_costmap_received_at <= self.map_timeout
+        if (not self._message_is_fresh(
+                self.latest_costmap, self.last_costmap_at,
+                self.map_timeout, now=now)
                 or costmap_geometry(self.latest_costmap) is None):
             return False, "frontier plan discarded because costmap evidence is stale"
+        return True, ""
+
+    def _reservation_evidence_matches_locked(
+            self, map_snapshot, costmap_snapshot, transform,
+            fresh_transform=None, goal_world=None, transform_from_lookup=False,
+            fresh_transform_from_lookup=False):
+        evidence_ok, detail = self._content_and_freshness_matches_locked(
+            map_snapshot, costmap_snapshot)
+        if not evidence_ok:
+            return False, detail
+        now = self._monotonic()
         if not self._authority_ready_locked(now):
             return False, "frontier plan discarded because motion authority changed"
-        if not self._valid_transform(
-                transform, self._now_ros_ns(), self.tf_timeout):
-            return False, "frontier plan discarded because carried TF is stale"
+        if fresh_transform is None:
+            valid_transform = (
+                self._valid_lookup_transform(transform)
+                if transform_from_lookup else self._valid_transform(
+                    transform, self._now_ros_ns(), self.tf_timeout))
+            if not valid_transform:
+                return False, "frontier plan discarded because carried TF is stale"
+            return True, ""
+        valid_fresh_transform = (
+            self._valid_lookup_transform(fresh_transform)
+            if fresh_transform_from_lookup else self._valid_transform(
+                fresh_transform, self._now_ros_ns(), self.tf_timeout))
+        if not valid_fresh_transform:
+            return False, "frontier plan discarded because refreshed TF is stale"
+        expected_costmap = costmap_snapshot[0]
+        costmap_snapshot_geometry = costmap_geometry(expected_costmap)
+        old_pose = self._transform_world_yaw(transform)
+        fresh_pose = self._transform_world_yaw(fresh_transform)
+        if (old_pose is None or fresh_pose is None
+                or costmap_snapshot_geometry is None
+                or not _route_start_proof(
+                    costmap_snapshot_geometry, expected_costmap.data,
+                    NAVIGATION_FOOTPRINT,
+                    old_pose[0], old_pose[1],
+                    fresh_pose[0], fresh_pose[1])):
+            return (
+                False,
+                "frontier plan discarded because refreshed route start is unsafe")
+        if not _goal_distance_is_valid(
+                fresh_pose[0], goal_world, self.min_goal_distance):
+            return False, "frontier plan discarded because refreshed goal is too close"
         return True, ""
 
     def _discard_stale_plan_locked(self, run_generation, started_at, reason):
@@ -1028,7 +1948,34 @@ class FrontierExplorer(Node):
     def _reserve_and_send(
             self, goal, candidate, run_generation, expected_started_at=_UNSET,
             map_snapshot=None, costmap_snapshot=None, transform=None,
-            goal_world=None):
+            fresh_transform=None, goal_world=None, transform_from_lookup=False,
+            fresh_transform_from_lookup=False):
+        with self._trace_span("reservation", generation=run_generation) as trace:
+            result = self._reserve_and_send_impl(
+                goal, candidate, run_generation,
+                expected_started_at=expected_started_at,
+                map_snapshot=map_snapshot, costmap_snapshot=costmap_snapshot,
+                transform=transform, fresh_transform=fresh_transform,
+                goal_world=goal_world,
+                transform_from_lookup=transform_from_lookup,
+                fresh_transform_from_lookup=fresh_transform_from_lookup)
+            if trace is not None:
+                with self._lock:
+                    trace["state_after"] = self.state
+                    trace["reason_after"] = self.reason
+                    trace["motion_owned_after"] = self._motion_owned
+                    trace["outcome"] = (
+                        "reserved" if self.state == "GOAL_PENDING"
+                        else self.state.lower())
+                    if self.state == "SCANNING":
+                        trace["evidence_reason"] = self.reason
+            return result
+
+    def _reserve_and_send_impl(
+            self, goal, candidate, run_generation, expected_started_at=_UNSET,
+            map_snapshot=None, costmap_snapshot=None, transform=None,
+            fresh_transform=None, goal_world=None, transform_from_lookup=False,
+            fresh_transform_from_lookup=False):
         with self._lock:
             if (not self._decision_matches_locked(
                     run_generation=run_generation,
@@ -1037,7 +1984,10 @@ class FrontierExplorer(Node):
                     or self._has_motion_locked() or self.fault_latched):
                 return
             evidence_ok, detail = self._reservation_evidence_matches_locked(
-                map_snapshot, costmap_snapshot, transform)
+                map_snapshot, costmap_snapshot, transform,
+                fresh_transform=fresh_transform, goal_world=goal_world,
+                transform_from_lookup=transform_from_lookup,
+                fresh_transform_from_lookup=fresh_transform_from_lookup)
             if not evidence_ok:
                 if detail in (
                         "frontier plan discarded because fresh valid map is unavailable",
@@ -1082,6 +2032,11 @@ class FrontierExplorer(Node):
             self._cancel_future = None
             self._cancel_ack = False
             self._attempted_goal_world = attempted_goal_world
+            self._expected_goal_uuid = None
+            self._mission_status_by_uuid = {}
+            self._mission_status_invalid_at = None
+            self._mission_blockage_confirmed = False
+            self._mission_fault_class = "NONE"
             # Every cancellation owns its own event; never clear a prior
             # record that a stop caller may still be observing.
             self._detach_cancel_record_locked()
@@ -1141,6 +2096,7 @@ class FrontierExplorer(Node):
 
         stale_accepted = False
         cancel_handle = None
+        uuid_unavailable = False
         with self._lock:
             current = self._token_current_locked(run_generation, motion_generation)
             if not current:
@@ -1177,6 +2133,9 @@ class FrontierExplorer(Node):
                 self._pending_future = None
                 self.active_goal = goal_handle
                 self._active_token = (run_generation, motion_generation)
+                self._expected_goal_uuid = self._canonical_goal_uuid(
+                    getattr(goal_handle, "goal_id", None))
+                uuid_unavailable = self._expected_goal_uuid is None
                 if self.cancel_requested or self.fault_latched:
                     self._cancel_target = "accepted"
                     if not self.fault_latched:
@@ -1192,6 +2151,15 @@ class FrontierExplorer(Node):
                 goal_handle.cancel_goal_async()
             except Exception:  # pragma: no cover - middleware boundary
                 pass
+            return
+        if uuid_unavailable:
+            self._fault(
+                "accepted navigation goal UUID is unavailable",
+                expected_run_generation=run_generation,
+                expected_motion_token=(run_generation, motion_generation),
+                expected_state=self.state,
+                expected_deadline=self._motion_deadline,
+                expected_started_at=self.started_at)
             return
         if not current or not goal_handle or not getattr(goal_handle, "accepted", False):
             return
@@ -1256,15 +2224,87 @@ class FrontierExplorer(Node):
                 self._clear_motion_locked()
                 self._clear_readiness_episode_locked()
                 self.goal_failures = 0
+                self.reached_goal_count = getattr(self, "reached_goal_count", 0) + 1
+                self._mission_blockage_confirmed = False
+                self._mission_fault_class = "NONE"
                 self._set_state_locked("SCANNING", "navigation goal succeeded")
             else:
-                self._record_goal_failure_locked(
-                    "navigation goal ended with status %s" % status,
-                    candidate=candidate,
-                    attempted_goal_world=attempted_goal_world)
+                mission_record, evidence_detail = (
+                    self._matching_mission_terminal_locked())
+                confirmed_blockage = (
+                    status != GoalStatus.STATUS_CANCELED
+                    and mission_record is not None
+                    and mission_record.get("outcome") == "FAULT"
+                    and mission_record.get("fault_class") == "OBSTACLE_BLOCKAGE"
+                    and mission_record.get("blockage_confirmed") is True)
+                if confirmed_blockage:
+                    fingerprint = self._route_evidence_fingerprint(
+                        self.latest_map, self.latest_costmap)
+                    self._record_blockage_locked(
+                        attempted_goal_world, fingerprint)
+                    self._clear_motion_locked()
+                    self._clear_readiness_episode_locked()
+                    self._recovery_goal_world = attempted_goal_world
+                    self._recovery_stationary_sample = None
+                    self._recovery_stationary_samples = 0
+                    self._mission_blockage_confirmed = True
+                    self._mission_fault_class = "OBSTACLE_BLOCKAGE"
+                    self.processed_map_version = -1
+                    self._set_state_locked(
+                        "RECOVERY_WAIT",
+                        "confirmed obstacle blockage; waiting for recovery evidence")
+                elif self._is_recoverable_planner_abort(status, mission_record):
+                    fingerprint = self._route_evidence_fingerprint(
+                        self.latest_map, self.latest_costmap)
+                    if (attempted_goal_world is not None
+                            and fingerprint is not None):
+                        # A planner-result no-path is safe to defer because the
+                        # mission supervisor has already proved that no
+                        # downstream motion obligation remains.  Keep the
+                        # planner fault class visible, but do not turn a
+                        # single unreachable frontier into a run fault.
+                        self._record_blockage_locked(
+                            attempted_goal_world, fingerprint)
+                        self._clear_motion_locked()
+                        self._clear_readiness_episode_locked()
+                        self._recovery_goal_world = attempted_goal_world
+                        self._recovery_stationary_sample = None
+                        self._recovery_stationary_samples = 0
+                        self.goal_failures += 1
+                        self._mission_blockage_confirmed = False
+                        self._mission_fault_class = "PLANNER_ABORT"
+                        self.processed_map_version = -1
+                        self._set_state_locked(
+                            "RECOVERY_WAIT",
+                            "global planning failed; deferring frontier under current route evidence")
+                    else:
+                        # Missing route evidence cannot authorize deferral.
+                        detail = (
+                            "navigation goal ended with status %s; %s"
+                            % (status, evidence_detail))
+                        self._record_goal_failure_locked(
+                            detail,
+                            candidate=candidate,
+                            attempted_goal_world=attempted_goal_world,
+                            fault_class="PLANNER_ABORT")
+                else:
+                    fault_class = "NAVIGATION_FAULT"
+                    if mission_record is not None:
+                        candidate_fault_class = mission_record.get("fault_class")
+                        if candidate_fault_class:
+                            fault_class = candidate_fault_class
+                    detail = (
+                        "navigation goal ended with status %s; %s"
+                        % (status, evidence_detail))
+                    self._record_goal_failure_locked(
+                        detail,
+                        candidate=candidate,
+                        attempted_goal_world=attempted_goal_world,
+                        fault_class=fault_class)
 
     def _record_goal_failure_locked(
-            self, detail, candidate=None, attempted_goal_world=_UNSET):
+            self, detail, candidate=None, attempted_goal_world=_UNSET,
+            fault_class="NAVIGATION_FAULT"):
         if candidate is None:
             candidate = self.active_candidate
         if attempted_goal_world is _UNSET:
@@ -1274,14 +2314,9 @@ class FrontierExplorer(Node):
         self.goal_failures += 1
         if attempted_goal_world is not None:
             self.failed_goal_worlds.add(attempted_goal_world)
-        if self.goal_failures >= self.max_goal_failures:
-            self._terminal_locked("FAULT", detail + "; maximum navigation failures exceeded")
-            return
-        try:
-            self.get_logger().warning(detail)
-        except AttributeError:
-            pass
-        self._set_state_locked("SCANNING", detail)
+        self._mission_blockage_confirmed = False
+        self._mission_fault_class = fault_class or "NAVIGATION_FAULT"
+        self._terminal_locked("FAULT", detail)
 
     def _record_goal_failure(self, detail):
         with self._lock:
@@ -1436,6 +2471,9 @@ class FrontierExplorer(Node):
                 cancel_record, False, "explorer faulted during cancellation")
         self.fault_requested = True
         self.fault_latched = True
+        if getattr(self, "_mission_fault_class", "NONE") == "NONE":
+            self._mission_fault_class = "CANCELLATION"
+        self._reset_frontier_classification_for_fault_locked()
         if not already_faulted:
             self.state = "FAULT"
             if not was_fault_latched:

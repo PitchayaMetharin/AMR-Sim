@@ -39,6 +39,30 @@
 
 using namespace std::chrono_literals;
 
+TEST(MissionBehavior, MissionStatusUuidUsesCanonicalHex) {
+  rclcpp_action::GoalUUID goal_uuid{};
+  goal_uuid[0] = 0x00;
+  goal_uuid[1] = 0x01;
+  goal_uuid[2] = 0x0f;
+  goal_uuid[3] = 0xff;
+  goal_uuid[4] = 0x04;
+  goal_uuid[5] = 0x10;
+  goal_uuid[6] = 0x20;
+  goal_uuid[7] = 0x30;
+  goal_uuid[8] = 0x40;
+  goal_uuid[9] = 0x50;
+  goal_uuid[10] = 0x60;
+  goal_uuid[11] = 0x70;
+  goal_uuid[12] = 0x80;
+  goal_uuid[13] = 0x90;
+  goal_uuid[14] = 0xa0;
+  goal_uuid[15] = 0xb0;
+
+  EXPECT_EQ(
+    amr_mission::MissionSupervisorNode::canonical_goal_uuid(goal_uuid),
+    "00010fff04102030405060708090a0b0");
+}
+
 template<typename Executor, typename Predicate>
 bool spin_until(
   Executor & executor, Predicate predicate, std::chrono::milliseconds timeout)
@@ -282,6 +306,19 @@ class MissionBehaviorContext {
   ResultMode planner_result_mode{ResultMode::HOLD};
   ResultMode controller_result_mode{ResultMode::HOLD};
 };
+
+TEST(MissionSupervisorBehavior, ControllerCollisionLogPredicateIsExact) {
+  rcl_interfaces::msg::Log collision;
+  collision.name = "amr.controller_server";
+  collision.msg = "RegulatedPurePursuitController detected collision ahead!";
+  EXPECT_TRUE(amr_mission::MissionSupervisorNode::is_controller_collision_log(collision));
+
+  collision.msg = "path following failed";
+  EXPECT_FALSE(amr_mission::MissionSupervisorNode::is_controller_collision_log(collision));
+  collision.name = "amr.other_controller";
+  collision.msg = "RegulatedPurePursuitController detected collision ahead!";
+  EXPECT_FALSE(amr_mission::MissionSupervisorNode::is_controller_collision_log(collision));
+}
 
 static nav2_msgs::action::NavigateToPose::Goal valid_goal() {
   nav2_msgs::action::NavigateToPose::Goal goal;

@@ -1,16 +1,22 @@
 #include <chrono>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
 
 #include "amr_mission/goal_validation.hpp"
+#include "diagnostic_msgs/msg/diagnostic_array.hpp"
+#include "diagnostic_msgs/msg/diagnostic_status.hpp"
+#include "diagnostic_msgs/msg/key_value.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "rcl_interfaces/msg/log.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 #include "nav2_msgs/action/compute_path_to_pose.hpp"
 #include "nav2_msgs/action/follow_path.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 #include "nav2_msgs/action/smooth_path.hpp"
 #include "nav_msgs/msg/path.hpp"
+#include "rclcpp/create_publisher.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
@@ -52,6 +58,32 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     ABORTED,
   };
 
+  enum class StatusStage {
+    PLANNING,
+    SMOOTHING,
+    FOLLOWING,
+    CANCELING,
+    TERMINAL,
+  };
+
+  enum class StatusOutcome {
+    PENDING,
+    SUCCEEDED,
+    CANCELED,
+    ABORTED,
+    FAULT,
+  };
+
+  enum class FaultClass {
+    NONE,
+    OBSTACLE_BLOCKAGE,
+    PLANNER_ABORT,
+    SMOOTHER_ABORT,
+    CONTROLLER_ABORT,
+    CANCELLATION,
+    NAVIGATION_FAULT,
+  };
+
   MissionSupervisorNode()
   : LifecycleNode("mission_supervisor_node"), tf_buffer_(get_clock())
   {
@@ -69,6 +101,21 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       this, "/amr/follow_path");
     smoother_client_ = rclcpp_action::create_client<nav2_msgs::action::SmoothPath>(
       this, "/amr/smooth_path");
+    if (!status_publisher_) {
+      try {
+        status_publisher_ = rclcpp::create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+          *this, "/amr/mission/status", rclcpp::QoS(10));
+      } catch (const std::exception & exception) {
+        RCLCPP_ERROR(get_logger(), "Mission status publisher unavailable: %s", exception.what());
+      } catch (...) {
+        RCLCPP_ERROR(get_logger(), "Mission status publisher unavailable");
+      }
+    }
+    controller_log_subscription_ = create_subscription<rcl_interfaces::msg::Log>(
+      "/rosout", rclcpp::QoS(100),
+      [this](const rcl_interfaces::msg::Log::SharedPtr message) {
+        controller_log_callback(message);
+      });
     server_ = create_mission_server(
       "/amr/mission/navigate_to_pose", "goal_checker", "FollowPath");
     precise_server_ = create_mission_server(
@@ -88,7 +135,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       std::lock_guard<std::mutex> lock(mutex_);
       mission = mission_goal_;
     }
-    const auto targets = mark_cancel(mission, true);
+    const auto targets = mark_cancel(mission, true, "lifecycle deactivation requested");
     if (!targets.mission) {
       return CallbackReturn::SUCCESS;
     }
@@ -109,6 +156,140 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     std::shared_ptr<FollowGoalHandle> controller;
     bool pending_acceptance{false};
   };
+
+  static const char * status_stage_name(StatusStage stage) {
+    switch (stage) {
+      case StatusStage::PLANNING: return "PLANNING";
+      case StatusStage::SMOOTHING: return "SMOOTHING";
+      case StatusStage::FOLLOWING: return "FOLLOWING";
+      case StatusStage::CANCELING: return "CANCELING";
+      case StatusStage::TERMINAL: return "TERMINAL";
+    }
+    return "TERMINAL";
+  }
+
+  static const char * status_outcome_name(StatusOutcome outcome) {
+    switch (outcome) {
+      case StatusOutcome::PENDING: return "PENDING";
+      case StatusOutcome::SUCCEEDED: return "SUCCEEDED";
+      case StatusOutcome::CANCELED: return "CANCELED";
+      case StatusOutcome::ABORTED: return "ABORTED";
+      case StatusOutcome::FAULT: return "FAULT";
+    }
+    return "FAULT";
+  }
+
+  static const char * fault_class_name(FaultClass fault_class) {
+    switch (fault_class) {
+      case FaultClass::NONE: return "NONE";
+      case FaultClass::OBSTACLE_BLOCKAGE: return "OBSTACLE_BLOCKAGE";
+      case FaultClass::PLANNER_ABORT: return "PLANNER_ABORT";
+      case FaultClass::SMOOTHER_ABORT: return "SMOOTHER_ABORT";
+      case FaultClass::CONTROLLER_ABORT: return "CONTROLLER_ABORT";
+      case FaultClass::CANCELLATION: return "CANCELLATION";
+      case FaultClass::NAVIGATION_FAULT: return "NAVIGATION_FAULT";
+    }
+    return "NAVIGATION_FAULT";
+  }
+
+  static std::string canonical_goal_uuid(const rclcpp_action::GoalUUID & goal_id) {
+    static constexpr char hexadecimal[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(32);
+    for (const auto byte : goal_id) {
+      const auto value = static_cast<uint8_t>(byte);
+      result.push_back(hexadecimal[(value >> 4U) & 0x0FU]);
+      result.push_back(hexadecimal[value & 0x0FU]);
+    }
+    return result;
+  }
+
+  static std::string mission_uuid(const std::shared_ptr<MissionGoalHandle> & mission) {
+    return mission ? canonical_goal_uuid(mission->get_goal_id()) : std::string();
+  }
+
+  static bool is_controller_collision_log(const rcl_interfaces::msg::Log & message) {
+    return message.name == "amr.controller_server" &&
+      message.msg == "RegulatedPurePursuitController detected collision ahead!";
+  }
+
+  void controller_log_callback(const rcl_interfaces::msg::Log::SharedPtr & message) {
+    if (!message || !is_controller_collision_log(*message)) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The log is evidence for this mission only while its accepted controller
+    // goal is active.  A stale or unrelated rosout message must never
+    // reclassify a later controller result as an obstacle blockage.
+    if (mission_goal_ && !terminal_reported_ && state_ == MissionState::CONTROLLER_ACTIVE) {
+      controller_collision_observed_ = true;
+    }
+  }
+
+  void publish_status(
+    const std::shared_ptr<MissionGoalHandle> & mission,
+    StatusStage stage,
+    StatusOutcome outcome,
+    const std::string & reason,
+    FaultClass fault_class,
+    bool blockage_confirmed)
+  {
+    publish_status(
+      mission_uuid(mission), stage, outcome, reason, fault_class, blockage_confirmed);
+  }
+
+  void publish_status(
+    const std::string & goal_uuid,
+    StatusStage stage,
+    StatusOutcome outcome,
+    const std::string & reason,
+    FaultClass fault_class,
+    bool blockage_confirmed)
+  {
+    auto publisher = status_publisher_;
+    if (!publisher || goal_uuid.empty()) {
+      if (goal_uuid.empty()) {
+        RCLCPP_ERROR(get_logger(), "Unable to publish mission status without a goal UUID");
+      }
+      return;
+    }
+
+    diagnostic_msgs::msg::DiagnosticArray message;
+    message.header.stamp = get_clock()->now();
+    diagnostic_msgs::msg::DiagnosticStatus status;
+    status.name = "amr_mission/mission_supervisor";
+    status.message = reason;
+    status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+    if (outcome == StatusOutcome::CANCELED) {
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+    } else if (outcome == StatusOutcome::FAULT ||
+      outcome == StatusOutcome::ABORTED || fault_class != FaultClass::NONE)
+    {
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+    }
+
+    auto add_value = [&status](const char * key, const std::string & value) {
+        diagnostic_msgs::msg::KeyValue field;
+        field.key = key;
+        field.value = value;
+        status.values.push_back(field);
+      };
+    add_value("goal_uuid", goal_uuid);
+    add_value("stage", status_stage_name(stage));
+    add_value("outcome", status_outcome_name(outcome));
+    add_value("reason", reason);
+    add_value("blockage_confirmed", blockage_confirmed ? "true" : "false");
+    add_value("fault_class", fault_class_name(fault_class));
+    message.status.push_back(status);
+
+    // Status is observation-only. A failed publication must never alter the
+    // action result, cancellation proof, or any safety decision.
+    try {
+      publisher->publish(message);
+    } catch (const std::exception & exception) {
+      RCLCPP_WARN(get_logger(), "Mission status publication failed: %s", exception.what());
+    } catch (...) {
+      RCLCPP_WARN(get_logger(), "Mission status publication failed with an unknown error");
+    }
+  }
 
   rclcpp_action::Server<NavigateToPose>::SharedPtr create_mission_server(
     const std::string & endpoint,
@@ -156,7 +337,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   rclcpp_action::CancelResponse handle_cancel(
     const std::shared_ptr<MissionGoalHandle> & goal_handle)
   {
-    const auto targets = mark_cancel(goal_handle, false);
+    const auto targets = mark_cancel(goal_handle, false, "mission cancellation requested");
     if (!targets.mission) {
       return rclcpp_action::CancelResponse::REJECT;
     }
@@ -171,9 +352,13 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
 
   CancelTargets mark_cancel(
     const std::shared_ptr<MissionGoalHandle> & mission,
-    bool abort_on_stop)
+    bool abort_on_stop,
+    const char * reason)
   {
     CancelTargets targets;
+    bool publish_transition = false;
+    bool lifecycle_stop = false;
+    std::string transition_reason;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!mission || mission != mission_goal_ || terminal_reported_ ||
@@ -185,7 +370,24 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       targets.pending_acceptance = downstream_acceptance_pending_;
       cancel_requested_ = true;
       abort_on_stop_ = abort_on_stop_ || abort_on_stop;
+      lifecycle_stop = abort_on_stop_;
+      if (reason && (abort_on_stop || cancel_reason_.empty())) {
+        cancel_reason_ = reason;
+      }
+      if (state_ != MissionState::CANCELING) {
+        publish_transition = true;
+      }
+      transition_reason = cancel_reason_.empty() ?
+        (lifecycle_stop ? "lifecycle deactivation requested" :
+        "mission cancellation requested") : cancel_reason_;
       state_ = MissionState::CANCELING;
+      if (publish_transition) {
+        publish_status(
+          mission, StatusStage::CANCELING, StatusOutcome::PENDING,
+          transition_reason,
+          lifecycle_stop ? FaultClass::NAVIGATION_FAULT : FaultClass::CANCELLATION,
+          false);
+      }
       // Retain every accepted handle until its terminal result callback. The
       // cancel-sent flags make repeated cancellation requests idempotent while
       // preserving the obligation that a result callback must provide proof.
@@ -230,8 +432,12 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       planner_cancel_sent_ = false;
       smoother_cancel_sent_ = false;
       controller_cancel_sent_ = false;
+      controller_collision_observed_ = false;
       mission_start_ = get_clock()->now();
       last_ros_time_ = mission_start_;
+      publish_status(
+        mission, StatusStage::PLANNING, StatusOutcome::PENDING,
+        "mission planning started", FaultClass::NONE, false);
     }
 
     // Fail closed when either required downstream server is unavailable.
@@ -250,7 +456,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       if (canceled) {
         complete_after_stop(mission);
       } else {
-        abort(mission, "planner or controller action is unavailable");
+        abort(mission, "planner or controller action is unavailable", FaultClass::PLANNER_ABORT);
       }
       return;
     }
@@ -299,7 +505,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           if (is_canceling(mission)) {
             complete_after_stop(mission);
           } else {
-            abort(mission, "planner rejected the mission goal");
+            abort(mission, "planner rejected the mission goal", FaultClass::PLANNER_ABORT);
           }
         }
       };
@@ -325,6 +531,9 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           {
             state_ = MissionState::SMOOTHER_PENDING;
             path = result.result->path;
+            publish_status(
+              mission, StatusStage::SMOOTHING, StatusOutcome::PENDING,
+              "global planning succeeded; path smoothing started", FaultClass::NONE, false);
           }
         }
         if (!process) return;
@@ -334,7 +543,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         }
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
             !result.result || result.result->path.poses.empty()) {
-          abort(mission, "global planning failed");
+          abort(mission, "global planning failed", FaultClass::PLANNER_ABORT);
           return;
         }
         start_smoothing(mission, path);
@@ -406,7 +615,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           if (is_canceling(mission)) {
             complete_after_stop(mission);
           } else {
-            abort(mission, "smoother rejected the planned path");
+            abort(mission, "smoother rejected the planned path", FaultClass::SMOOTHER_ABORT);
           }
         }
       };
@@ -431,6 +640,9 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           {
             state_ = MissionState::CONTROLLER_PENDING;
             smoothed_path = result.result->path;
+            publish_status(
+              mission, StatusStage::FOLLOWING, StatusOutcome::PENDING,
+              "path smoothing succeeded; path following started", FaultClass::NONE, false);
           }
         }
         if (!process) return;
@@ -441,7 +653,21 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
             !result.result || !result.result->was_completed ||
             result.result->path.poses.empty()) {
-          abort(mission, "path smoothing failed or was incomplete");
+          // In the installed Humble smoother action, collision checking runs
+          // after a completed smoother returns its non-empty path.  The
+          // action is then aborted by the collision exception, so the
+          // collision proof is a non-success result with a completed path;
+          // a timeout/incomplete smoother has was_completed == false.
+          const bool blockage_confirmed =
+            result.code == rclcpp_action::ResultCode::ABORTED && result.result &&
+            result.result->was_completed && !result.result->path.poses.empty();
+          abort(
+            mission,
+            blockage_confirmed ?
+            "path smoothing reached a collision boundary" :
+            "path smoothing failed or was incomplete",
+            blockage_confirmed ? FaultClass::OBSTACLE_BLOCKAGE : FaultClass::SMOOTHER_ABORT,
+            blockage_confirmed);
           return;
         }
         start_following(mission, smoothed_path);
@@ -517,7 +743,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           if (is_canceling(mission)) {
             complete_after_stop(mission);
           } else {
-            abort(mission, "controller rejected the planned path");
+            abort(mission, "controller rejected the planned path", FaultClass::CONTROLLER_ABORT);
           }
         }
       };
@@ -528,11 +754,12 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       {
         process_feedback(mission, feedback);
       };
-    options.result_callback =
+      options.result_callback =
       [this, mission](const FollowGoalHandle::WrappedResult & result) {
         bool current = false;
         bool canceled = false;
         bool abort_requested = false;
+        bool controller_collision = false;
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (mission != mission_goal_ || terminal_reported_) return;
@@ -546,16 +773,28 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           canceled = cancel_requested_ ||
             result.code == rclcpp_action::ResultCode::CANCELED;
           abort_requested = abort_on_stop_;
+          controller_collision = controller_collision_observed_;
           state_ = canceled ? MissionState::CANCELING : MissionState::IDLE;
         }
         if (!current) return;
         if (canceled) {
-          complete_public(mission, abort_requested ? Completion::ABORTED :
-            Completion::CANCELED);
+          complete_public(
+            mission, abort_requested ? Completion::ABORTED : Completion::CANCELED,
+            abort_requested ? "mission stopped by lifecycle deactivation" :
+            "mission canceled",
+            abort_requested ? FaultClass::NAVIGATION_FAULT : FaultClass::CANCELLATION,
+            false);
         } else if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-          complete_public(mission, Completion::SUCCEEDED);
+          complete_public(
+            mission, Completion::SUCCEEDED, "mission completed", FaultClass::NONE, false);
         } else {
-          abort(mission, "path following failed");
+          abort(
+            mission,
+            controller_collision ? "controller collision boundary reached" :
+            "path following failed",
+            controller_collision ? FaultClass::OBSTACLE_BLOCKAGE :
+            FaultClass::CONTROLLER_ABORT,
+            controller_collision);
         }
       };
     controller_client_->async_send_goal(goal, options);
@@ -626,7 +865,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     const char * reason)
   {
     RCLCPP_WARN(get_logger(), "Mission cancellation requested: %s", reason);
-    const auto targets = mark_cancel(mission, false);
+    const auto targets = mark_cancel(mission, false, reason);
     if (!targets.mission) return;
     cancel_downstream(
       targets.mission, targets.planner, targets.smoother, targets.controller);
@@ -638,7 +877,9 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
 
   void abort(
     const std::shared_ptr<MissionGoalHandle> & mission,
-    const char * reason)
+    const char * reason,
+    FaultClass fault_class,
+    bool blockage_confirmed = false)
   {
     RCLCPP_WARN(get_logger(), "Mission aborted: %s", reason);
     bool can_complete = false;
@@ -655,11 +896,16 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         can_complete = true;
       }
     }
-    if (can_complete) complete_public(mission, Completion::ABORTED);
+    if (can_complete) {
+      complete_public(
+        mission, Completion::ABORTED, reason, fault_class, blockage_confirmed);
+    }
   }
 
   void complete_after_stop(const std::shared_ptr<MissionGoalHandle> & mission) {
     Completion completion = Completion::CANCELED;
+    FaultClass fault_class = FaultClass::CANCELLATION;
+    std::string reason = "mission canceled";
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (mission != mission_goal_ || terminal_reported_) return;
@@ -671,19 +917,44 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       {
         return;
       }
-      completion = abort_on_stop_ ? Completion::ABORTED : Completion::CANCELED;
+      if (abort_on_stop_) {
+        completion = Completion::ABORTED;
+        fault_class = FaultClass::NAVIGATION_FAULT;
+        reason = cancel_reason_.empty() ?
+          "mission stopped by lifecycle deactivation" : cancel_reason_;
+      } else {
+        reason = cancel_reason_.empty() ? "mission canceled" : cancel_reason_;
+      }
     }
-    complete_public(mission, completion);
+    complete_public(mission, completion, reason, fault_class, false);
   }
 
   void complete_public(
     const std::shared_ptr<MissionGoalHandle> & mission,
-    Completion completion)
+    Completion completion,
+    const std::string & reason,
+    FaultClass fault_class,
+    bool blockage_confirmed)
   {
     bool complete = false;
+    std::string goal_uuid;
+    StatusOutcome status_outcome = StatusOutcome::FAULT;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (mission != mission_goal_ || terminal_reported_) return;
+      goal_uuid = mission_uuid(mission);
+      switch (completion) {
+        case Completion::SUCCEEDED:
+          status_outcome = StatusOutcome::SUCCEEDED;
+          break;
+        case Completion::CANCELED:
+          status_outcome = StatusOutcome::CANCELED;
+          break;
+        case Completion::ABORTED:
+          status_outcome = fault_class == FaultClass::NAVIGATION_FAULT ?
+            StatusOutcome::ABORTED : StatusOutcome::FAULT;
+          break;
+      }
       terminal_reported_ = true;
       state_ = MissionState::IDLE;
       goal_reserved_ = false;
@@ -700,7 +971,13 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       smoother_cancel_sent_ = false;
       controller_goal_.reset();
       controller_cancel_sent_ = false;
+      controller_collision_observed_ = false;
+      abort_on_stop_ = false;
+      cancel_reason_.clear();
       complete = true;
+      publish_status(
+        goal_uuid, StatusStage::TERMINAL, status_outcome, reason, fault_class,
+        blockage_confirmed);
     }
     if (!complete || !mission->is_active()) return;
     auto result = std::make_shared<NavigateToPose::Result>();
@@ -783,6 +1060,8 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   rclcpp_action::Server<NavigateToPose>::SharedPtr server_;
   rclcpp_action::Server<NavigateToPose>::SharedPtr precise_server_;
   rclcpp_action::Server<NavigateToPose>::SharedPtr retreat_server_;
+  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr status_publisher_;
+  rclcpp::Subscription<rcl_interfaces::msg::Log>::SharedPtr controller_log_subscription_;
   rclcpp_action::Client<ComputePath>::SharedPtr planner_client_;
   rclcpp_action::Client<FollowPath>::SharedPtr controller_client_;
   mutable std::mutex mutex_;
@@ -795,6 +1074,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   bool planner_cancel_sent_{false};
   bool smoother_cancel_sent_{false};
   bool controller_cancel_sent_{false};
+  std::string cancel_reason_;
   std::string reserved_goal_checker_id_;
   std::string reserved_controller_id_;
   std::string mission_goal_checker_id_;
@@ -804,6 +1084,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   rclcpp_action::Client<nav2_msgs::action::SmoothPath>::SharedPtr smoother_client_;
   SmootherGoalHandle::SharedPtr smoother_goal_;
   FollowGoalHandle::SharedPtr controller_goal_;
+  bool controller_collision_observed_{false};
   rclcpp::Time mission_start_;
   rclcpp::Time last_ros_time_;
   tf2_ros::Buffer tf_buffer_;

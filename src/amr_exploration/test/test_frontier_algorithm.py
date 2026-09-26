@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import frontier_algorithm as frontier_algorithm_module  # noqa: E402
 from frontier_algorithm import (  # noqa: E402
-    NAVIGATION_FOOTPRINT, available_candidates, costmap_frontier_candidates,
+    NAVIGATION_FOOTPRINT, _first_step_headings, _goal_distance_is_valid,
+    _reachable_costmap_cells, _route_start_proof, available_candidates,
+    costmap_frontier_candidates,
     frontier_cell_world, frontier_clusters, frontier_world_cell,
     occupancy_grid_geometry)
 
@@ -165,10 +167,48 @@ def test_endpoint_costs_at_or_above_collision_threshold_are_rejected(cost):
         clusters, _grid(3, 3), _costmap(3, 3, data)) == []
 
 
+def test_frontier_diagnostics_distinguish_safety_and_route_blocks():
+    clusters = [
+        ((1, 0), ((1, 0),)),
+        ((4, 0), ((4, 0),)),
+    ]
+    result = costmap_frontier_candidates(
+        clusters, _grid(5, 1),
+        _costmap(5, 1, [0, 254, 254, 0, 0]),
+        robot_world=(0.5, 0.5), footprint=None,
+        require_path_clear=True, return_diagnostics=True)
+
+    candidates, diagnostics = result
+    assert candidates == []
+    assert [item["classification"] for item in diagnostics] == [
+        "BLOCKED_SAFETY", "BLOCKED_ROUTE"]
+    assert diagnostics[0]["safe_endpoint_count"] == 0
+    assert diagnostics[1]["safe_endpoint_count"] == 1
+    assert all(
+        item["reachable_endpoint_count"] == 0 for item in diagnostics)
+
+
+def test_frontier_diagnostics_preserve_reachable_candidate():
+    result = costmap_frontier_candidates(
+        [((1, 0), ((1, 0),))], _grid(3, 1),
+        _costmap(3, 1, [0, 0, 0]),
+        robot_world=(0.5, 0.5), footprint=None,
+        require_path_clear=True, return_diagnostics=True)
+
+    candidates, diagnostics = result
+    assert candidates == [(1, 0)]
+    assert diagnostics == [{
+        "cluster_index": 0,
+        "classification": "REACHABLE",
+        "safe_endpoint_count": 1,
+        "reachable_endpoint_count": 1,
+    }]
+
+
 def test_footprint_intersection_rejects_free_center_and_selects_clear_sibling():
     width = height = 50
     data = [0] * (width * height)
-    data[20 * width + 25] = 253
+    data[20 * width + 25] = 254
     grid = _grid(width, height, resolution=0.1)
     clusters = [((20, 20), ((20, 20), (15, 20)))]
 
@@ -184,7 +224,7 @@ def test_footprint_gate_respects_translated_rotated_costmap_geometry():
     width = height = 4
     lethal_cell = (1, 1)
     data = [0] * (width * height)
-    data[lethal_cell[1] * width + lethal_cell[0]] = 253
+    data[lethal_cell[1] * width + lethal_cell[0]] = 254
     grid = _grid(3, 3)
     costmap = _costmap(
         width, height, data, origin_x=2.2, origin_y=0.0,
@@ -203,11 +243,11 @@ def test_footprint_gate_respects_translated_rotated_costmap_geometry():
 
 @pytest.mark.parametrize("cost,expected", [
     (252, [(20, 20)]),
-    (253, []),
+    (253, [(20, 20)]),
     (254, []),
     (255, []),
 ])
-def test_footprint_gate_rejects_lethal_overlap_costs_but_allows_252(
+def test_footprint_gate_allows_253_but_rejects_254_and_255_overlap(
         cost, expected):
     width = height = 50
     data = [0] * (width * height)
@@ -282,7 +322,7 @@ def test_recorded_collision_candidates_are_rejected_by_footprint_gate(
         candidate, lethal_cell):
     width, height = 180, 170
     data = [0] * (width * height)
-    data[lethal_cell[1] * width + lethal_cell[0]] = 253
+    data[lethal_cell[1] * width + lethal_cell[0]] = 254
 
     assert costmap_frontier_candidates(
         [(candidate, (candidate,))],
@@ -294,7 +334,7 @@ def test_recorded_collision_candidates_are_rejected_by_footprint_gate(
 def test_footprint_contact_and_costmap_boundary_are_inadmissible():
     width = height = 50
     data = [0] * (width * height)
-    data[20 * width + 25] = 253
+    data[20 * width + 25] = 254
     grid = _grid(width, height, resolution=0.1)
 
     assert costmap_frontier_candidates(
@@ -359,3 +399,85 @@ def test_malformed_costmap_geometry_fails_closed(case):
 
     assert costmap_frontier_candidates(
         clusters, _grid(1, 1), costmap) is None
+
+
+def test_route_start_proof_preserves_first_step_legality_on_same_cell_refresh():
+    width = height = 7
+    data = [0] * (width * height)
+    data[3 * width + 5] = 255
+    geometry = frontier_algorithm_module.costmap_geometry(
+        _costmap(width, height, data))
+    old_world = (3.1, 3.5)
+    fresh_world = (3.45, 3.5)
+
+    old_headings = _first_step_headings(
+        geometry, data, old_world, NAVIGATION_FOOTPRINT)
+    assert old_headings
+    assert _route_start_proof(
+        geometry, data, NAVIGATION_FOOTPRINT,
+        old_world, 0.0, (3.1, 3.5), 0.0)
+    assert not _route_start_proof(
+        geometry, data, NAVIGATION_FOOTPRINT,
+        old_world, 0.0, (4.1, 3.5), 0.0)
+
+    blocked = list(data)
+    blocked[3 * width + 4] = 254
+    assert not _route_start_proof(
+        geometry, blocked, NAVIGATION_FOOTPRINT,
+        old_world, 0.0, fresh_world, 0.0)
+
+
+def test_refreshed_goal_distance_uses_the_same_inclusive_gate():
+    assert _goal_distance_is_valid((0.0, 0.0), (0.3, 0.0), 0.3)
+    assert not _goal_distance_is_valid((0.0, 0.0), (0.299, 0.0), 0.3)
+
+
+def test_heading_masks_cover_intermediate_collision_orientation():
+    width = height = 30
+    data = [0] * (width * height)
+    data[5 * width + 5] = 254
+    costmap = _costmap(width, height, data, resolution=0.05)
+    geometry = frontier_algorithm_module.costmap_geometry(costmap)
+    robot_world = frontier_cell_world(_grid(
+        width, height, resolution=0.05), (15, 15))
+
+    frontier_algorithm_module._FOOTPRINT_MASK_CACHE = None
+    _reachable_costmap_cells(
+        geometry, data, robot_world, 0.0, [(16, 16)], NAVIGATION_FOOTPRINT,
+        stop_after_first=True)
+
+    heading_masks = frontier_algorithm_module._FOOTPRINT_MASK_CACHE[2]
+    assert len(heading_masks) == 32
+
+    def blocked(index):
+        return bool(heading_masks[index][15] & (1 << 15))
+
+    assert not blocked(4)  # 45 degrees
+    assert blocked(5)      # 56.25 degrees, between 45 and 67.5
+    assert not blocked(6)  # 67.5 degrees
+
+    first_step_headings = _first_step_headings(
+        geometry, data, robot_world, NAVIGATION_FOOTPRINT, robot_yaw=0.0)
+    assert 1 not in first_step_headings
+    assert _reachable_costmap_cells(
+        geometry, data, robot_world, 0.0, [(16, 16)], NAVIGATION_FOOTPRINT,
+        stop_after_first=True) == set()
+
+
+def test_initial_turn_sweep_allows_clear_diagonal_and_preserves_253_overlap():
+    width = height = 60
+    clear_data = [0] * (width * height)
+    costmap = _costmap(width, height, clear_data, resolution=0.05)
+    geometry = frontier_algorithm_module.costmap_geometry(costmap)
+    robot_world = frontier_cell_world(
+        _grid(width, height, resolution=0.05), (30, 30))
+
+    assert _reachable_costmap_cells(
+        geometry, clear_data, robot_world, 0.0, [(31, 31)],
+        NAVIGATION_FOOTPRINT, stop_after_first=True) == {(31, 31)}
+
+    overlap_data = list(clear_data)
+    overlap_data[20 * width + 20] = 253
+    assert _first_step_headings(
+        geometry, overlap_data, robot_world, NAVIGATION_FOOTPRINT,
+        robot_yaw=0.0)

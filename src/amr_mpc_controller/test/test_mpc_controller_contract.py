@@ -124,6 +124,9 @@ def test_local_costmap_uses_local_state_and_both_perception_clouds():
 def test_controller_output_is_internal_to_arbitration():
     launch = (ROOT / "launch" / "amr_mpc_controller.launch.py").read_text()
     assert '("cmd_vel", "/amr/mpc/cmd_vel")' in launch
+    assert 'DeclareLaunchArgument("controller_frequency", default_value="20.0")' in launch
+    assert '"controller_frequency": ParameterValue(' in launch
+    assert 'LaunchConfiguration("controller_frequency"), value_type=float' in launch
 
 
 def test_lifecycle_manager_starts_after_controller_construction_barrier():

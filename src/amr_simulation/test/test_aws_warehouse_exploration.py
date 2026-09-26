@@ -19,10 +19,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORLD_PATH = ROOT / "worlds" / "aws_warehouse.sdf"
 AWS_LAUNCH_PATH = ROOT / "launch" / "aws_warehouse_exploration.launch.py"
+AWS_LOCALIZATION_LAUNCH_PATH = ROOT / "launch" / "aws_warehouse_localization.launch.py"
 PORTABLE_LAUNCH_PATH = ROOT / "launch" / "portable_exploration.launch.py"
 RVIZ_PATH = ROOT / "rviz" / "aws_warehouse_exploration.rviz"
 ATTRIBUTION_PATH = ROOT / "assets" / "AWS_WAREHOUSE_FUEL_ATTRIBUTION.md"
-EXPECTED_WORLD_SHA256 = "1c1eae5f61e9ec486f9435bdb12c2a6210d50f2da9a001829117bae3bd5623f5"
+EXPECTED_WORLD_SHA256 = "41d9685cf8104a5e76ea832fa5330eadcbc4f7952c3ed2115f38a352d695fbb8"
 EXPECTED_SOURCE_SHA256 = "a80de9f6d76e6b589a8b080ccdbce87bd1b88cce9b88cf9de6c81af10602c161"
 FUEL_PREFIX = "https://fuel.gazebosim.org/1.0/OpenRobotics/models/"
 MODEL_REVISIONS = {
@@ -95,7 +96,7 @@ def test_aws_world_asset_exists_before_any_contract_is_claimed():
 
 def test_aws_world_matches_canonical_transform_and_production_validation():
     portable = _load_module(PORTABLE_LAUNCH_PATH, "portable_launch_for_aws")
-    assert WORLD_PATH.stat().st_size == 7954
+    assert WORLD_PATH.stat().st_size == 7950
     assert hashlib.sha256(WORLD_PATH.read_bytes()).hexdigest() == EXPECTED_WORLD_SHA256
 
     parsed = portable.validate_world(str(WORLD_PATH), "")
@@ -154,9 +155,14 @@ def test_aws_include_is_thin_and_forwards_only_the_portable_public_contract():
     declarations = [action for action in actions if isinstance(action, DeclareLaunchArgument)]
     assert [action.name for action in declarations] == [
         "headless",
+        "software_rendering",
         "rviz",
         "auto_start_exploration",
+        "simulation_diagnostics",
     ]
+    diagnostics_declaration = declarations[-1]
+    assert diagnostics_declaration.default_value[0].perform(LaunchContext()) == "false"
+    assert diagnostics_declaration.choices == ["true", "false"]
 
     includes = [action for action in actions if isinstance(action, IncludeLaunchDescription)]
     assert len(includes) == 1
@@ -174,8 +180,10 @@ def test_aws_include_is_thin_and_forwards_only_the_portable_public_contract():
         "initial_yaw",
         "resource_paths",
         "headless",
+        "software_rendering",
         "rviz",
         "auto_start_exploration",
+        "simulation_diagnostics",
         "rviz_config",
     }
     assert Path(arguments["world"]).parts[-2:] == ("worlds", WORLD_PATH.name)
@@ -184,7 +192,13 @@ def test_aws_include_is_thin_and_forwards_only_the_portable_public_contract():
     assert arguments["initial_z"] == "0.12"
     assert arguments["initial_yaw"] == "0.0"
     assert arguments["resource_paths"] == ""
-    for name in ("headless", "rviz", "auto_start_exploration"):
+    for name in (
+        "headless",
+        "software_rendering",
+        "rviz",
+        "auto_start_exploration",
+        "simulation_diagnostics",
+    ):
         assert _substitution_name(arguments[name]) == name
     assert Path(arguments["rviz_config"]).parts[-2:] == ("rviz", RVIZ_PATH.name)
 
@@ -201,6 +215,7 @@ def test_portable_rviz_configuration_has_an_internal_default_seam():
     context = LaunchContext()
     context.launch_configurations.update({
         "headless": "false",
+        "software_rendering": "auto",
         "rviz": "true",
         "auto_start_exploration": "true",
     })
@@ -323,8 +338,18 @@ def test_aws_assets_and_installed_runtime_have_no_preview_or_localization_owners
         assert "amcl" not in text
         assert "map_server" not in text
         assert "/tmp/amr-aws-exploration-preview" not in text
-    assert "amcl" not in PORTABLE_LAUNCH_PATH.read_text().lower()
-    assert "map_server" not in PORTABLE_LAUNCH_PATH.read_text().lower()
+    assert '"localization_mode": "amcl"' not in AWS_LAUNCH_PATH.read_text()
+
+
+def test_aws_static_localization_preset_reuses_the_world_and_requires_the_saved_map():
+    text = AWS_LOCALIZATION_LAUNCH_PATH.read_text()
+    assert '"world": str(world)' in text
+    assert '"localization_mode": "amcl"' in text
+    assert '"map_yaml": LaunchConfiguration("map_yaml")' in text
+    assert '"auto_start_exploration": "false"' in text
+    assert 'DeclareLaunchArgument(\n            "map_yaml"' in text
+    assert '"aws_warehouse_exploration.rviz"' in text
+    assert "amr_slam" not in text
 
 
 def test_attribution_records_source_fuel_provenance_and_remote_cache_limits():

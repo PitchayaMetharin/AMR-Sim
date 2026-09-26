@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_package(gz-msgs10 REQUIRED)
 find_package(gz-sim8 REQUIRED)
 find_package(gz-transport13 REQUIRED)
+find_package(rclcpp REQUIRED)
 
 add_library(
   amr-command-watchdog-system SHARED
@@ -21,10 +22,31 @@ target_link_libraries(
   gz-sim8::gz-sim8
   gz-transport13::gz-transport13)
 install(TARGETS amr-command-watchdog-system DESTINATION lib)
+add_library(
+  amr-exploration-evidence-system SHARED
+  src/exploration_evidence_system.cpp)
+target_link_libraries(
+  amr-exploration-evidence-system
+  gz-msgs10::gz-msgs10
+  gz-sim8::gz-sim8
+  gz-transport13::gz-transport13)
+install(TARGETS amr-exploration-evidence-system DESTINATION lib)
+add_executable(portable_robot_inserter src/portable_robot_inserter.cpp)
+ament_target_dependencies(portable_robot_inserter rclcpp)
+target_link_libraries(
+  portable_robot_inserter
+  gz-msgs10::gz-msgs10
+  gz-transport13::gz-transport13)
+install(TARGETS portable_robot_inserter DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch rviz worlds DESTINATION share/${PROJECT_NAME})
 install(FILES assets/AWS_WAREHOUSE_FUEL_ATTRIBUTION.md
   DESTINATION share/${PROJECT_NAME}/assets)
 install(PROGRAMS
+  scripts/aws_exploration_runner.py
+  scripts/aws_exploration_monitor.py
+  scripts/aws_exploration_diagnostics.py
+  scripts/aws_exploration_diagnostics_run.py
+  scripts/portable_controller_spawner.py
   scripts/portable_stow_authority.py
   scripts/portable_exploration_readiness.py
   DESTINATION lib/${PROJECT_NAME})
@@ -36,9 +58,33 @@ if(BUILD_TESTING)
   ament_add_gtest(
     test_command_watchdog test/test_command_watchdog.cpp)
   target_include_directories(test_command_watchdog PRIVATE include)
+  ament_add_gtest(
+    test_exploration_evidence_system test/test_exploration_evidence_system.cpp)
+  target_link_libraries(
+    test_exploration_evidence_system
+    gz-msgs10::gz-msgs10
+    gz-sim8::gz-sim8
+    gz-transport13::gz-transport13)
   ament_add_pytest_test(simulation_contract_test test/test_simulation_contract.py)
   ament_add_pytest_test(
     portable_exploration_launch_test test/test_portable_exploration_launch.py)
+  ament_add_pytest_test(
+    aws_exploration_runner_test test/test_aws_exploration_runner.py)
+  ament_add_pytest_test(
+    aws_exploration_monitor_test test/test_aws_exploration_monitor.py)
+  ament_add_pytest_test(
+    aws_exploration_diagnostics_test test/test_aws_exploration_diagnostics.py)
+  ament_add_pytest_test(
+    portable_controller_spawner_test test/test_portable_controller_spawner.py)
+  ament_add_gtest(
+    test_portable_robot_inserter test/test_portable_robot_inserter.cpp)
+  target_compile_definitions(
+    test_portable_robot_inserter PRIVATE PORTABLE_ROBOT_INSERTER_TEST)
+  ament_target_dependencies(test_portable_robot_inserter rclcpp)
+  target_link_libraries(
+    test_portable_robot_inserter
+    gz-msgs10::gz-msgs10
+    gz-transport13::gz-transport13)
   ament_add_pytest_test(
     portable_stow_authority_test test/test_portable_stow_authority.py)
   ament_add_pytest_test(

@@ -51,6 +51,8 @@ def test_stow_constants_and_qos_contract_are_explicit():
     ]
     assert list(module.STOW_POSITION.values()) == [0.0, -1.5708, 1.5708, 0.0, 0.0, 0.0]
     assert module.STOW_TOLERANCE_RAD == pytest.approx(0.01)
+    assert module.BASE_STATUS_MAX_AGE_S == pytest.approx(0.2)
+    assert module.JOINT_STATUS_MAX_AGE_S == pytest.approx(2.0)
     authority = module.authority_qos()
     assert authority.depth == 1
     assert authority.reliability.value == 1  # RELIABLE
@@ -166,6 +168,10 @@ def _bare_authority():
     authority._last_base_boot = 0
     authority._last_base_sequence = 0
     authority._goal_handle = None
+    authority._result_query_future = None
+    authority._result_query_sent_at = 0.0
+    authority._result_query_is_recovery = False
+    authority._result_recovery_next_at = 0.0
     authority._logger = _Logger()
     authority._status_pub = _Publisher()
     authority._boot_id = 77
@@ -220,6 +226,7 @@ def test_one_send_is_rejected_or_failed_without_retry_and_success_needs_proof():
     [
         SimpleNamespace(status=GoalStatus.STATUS_CANCELED, result=SimpleNamespace(error_code=0)),
         SimpleNamespace(status=GoalStatus.STATUS_ABORTED, result=SimpleNamespace(error_code=0)),
+        SimpleNamespace(status=GoalStatus.STATUS_UNKNOWN, result=SimpleNamespace(error_code=0)),
         SimpleNamespace(status=GoalStatus.STATUS_SUCCEEDED, result=SimpleNamespace(error_code=1)),
     ],
 )
@@ -228,6 +235,44 @@ def test_cancel_abort_and_non_success_result_latch_fault(result):
     authority._result_callback(_Future(result))
     assert authority._fault_latched
     assert authority._state == ManipulatorStatus.FAULT
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        GoalStatus.STATUS_ACCEPTED,
+        GoalStatus.STATUS_EXECUTING,
+        GoalStatus.STATUS_CANCELING,
+    ],
+)
+def test_non_terminal_recovery_result_waits_without_opening_motion(status):
+    module = _load()
+    authority = _bare_authority()
+    authority._result_query_is_recovery = True
+    future = _Future(SimpleNamespace(status=status, result=SimpleNamespace(error_code=0)))
+    authority._result_query_future = future
+
+    with patch.object(module.time, "monotonic", return_value=10.0):
+        authority._result_callback(future)
+
+    assert not authority._fault_latched
+    assert authority._state == ManipulatorStatus.STARTING
+    assert not authority._trajectory_succeeded
+    assert "awaiting terminal result" in authority._detail
+    assert authority._result_recovery_next_at == pytest.approx(
+        10.0 + module.RESULT_QUERY_TIMEOUT_S
+    )
+
+
+def test_recovery_poll_is_throttled_after_non_terminal_result():
+    authority = _bare_authority()
+    authority._goal_response_future = SimpleNamespace(done=lambda: False)
+    authority._goal_response_sent_at = 0.0
+    authority._result_recovery_next_at = 10.0
+
+    authority._recover_unacknowledged_goal(9.9)
+
+    assert authority._result_query_future is None
 
 
 def test_stale_drift_and_replayed_proof_revoke_to_starting_and_recover():
@@ -258,6 +303,30 @@ def test_stale_drift_and_replayed_proof_revoke_to_starting_and_recover():
         authority._joint_state_callback(_joints())
     authority._refresh_state(10.3)
     assert authority._state == ManipulatorStatus.STOWED_EMPTY
+
+
+def test_complete_post_trajectory_joint_proof_stays_fresh_for_two_seconds():
+    module = _load()
+    authority = _bare_authority()
+    authority._trajectory_sent = True
+    authority._trajectory_succeeded = True
+    authority._trajectory_sent_at = 9.0
+
+    with patch.object(module.time, "monotonic", return_value=10.0):
+        authority._base_status_callback(_base(boot=1, sequence=1))
+        authority._joint_state_callback(_joints())
+
+    with patch.object(module.time, "monotonic", return_value=11.5):
+        authority._base_status_callback(_base(boot=1, sequence=2))
+    assert authority._proof_is_fresh(11.5)
+
+    with patch.object(module.time, "monotonic", return_value=12.0):
+        authority._base_status_callback(_base(boot=1, sequence=3))
+    assert authority._proof_is_fresh(12.0)
+
+    with patch.object(module.time, "monotonic", return_value=12.000001):
+        authority._base_status_callback(_base(boot=1, sequence=4))
+    assert not authority._proof_is_fresh(12.000001)
 
 
 def test_status_sequence_is_strictly_increasing_on_one_boot():

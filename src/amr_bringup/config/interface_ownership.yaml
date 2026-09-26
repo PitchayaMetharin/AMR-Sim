@@ -93,6 +93,10 @@
       "type": "diagnostic_msgs/msg/DiagnosticArray",
       "publisher": "amr_exploration/frontier_explorer"
     },
+    "/amr/mission/status": {
+      "type": "diagnostic_msgs/msg/DiagnosticArray",
+      "publisher": "amr_mission/mission_supervisor_node"
+    },
     "/tf:odom->base_footprint": {
       "type": "tf2_msgs/msg/TFMessage",
       "publisher": "robot_localization/ekf_filter_node"

@@ -12,9 +12,11 @@
 
 #include "amr_interfaces/qos_profiles.hpp"
 
+#define private public
 #define main command_arbitration_main
 #include "../src/command_arbitration_node.cpp"
 #undef main
+#undef private
 
 using namespace std::chrono_literals;
 
@@ -106,6 +108,43 @@ TEST(ControlBehavior, ArbitrationExpiresTheSourceCommandToZero) {
 
   executor.remove_node(peer);
   executor.remove_node(arbitration->get_node_base_interface());
+}
+
+TEST(ControlBehavior, ExplicitZeroSourceCommandStopsWithoutSlew) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("source_timeout_ms", 500),
+      rclcpp::Parameter("output_frequency", 20.0),
+      rclcpp::Parameter("max_linear_acceleration", 0.5),
+      rclcpp::Parameter("max_angular_acceleration", 0.4),
+  });
+  auto arbitration =
+      std::make_shared<amr_control::CommandArbitrationNode>(options);
+  ASSERT_EQ(
+      arbitration->trigger_transition(
+          lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE).id(),
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(
+      arbitration->trigger_transition(
+          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE).id(),
+      lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+
+  geometry_msgs::msg::Twist moving_command;
+  moving_command.linear.x = 0.25;
+  moving_command.angular.z = 0.20;
+  arbitration->receive_source(moving_command);
+  arbitration->last_output_ = std::chrono::steady_clock::now() - 1s;
+  arbitration->tick();
+  ASSERT_GT(arbitration->last_linear_, 0.0);
+  ASSERT_GT(arbitration->last_angular_, 0.0);
+
+  geometry_msgs::msg::Twist stop_command;
+  arbitration->receive_source(stop_command);
+  arbitration->last_output_ = std::chrono::steady_clock::now() - 1s;
+  arbitration->tick();
+
+  EXPECT_DOUBLE_EQ(arbitration->last_linear_, 0.0);
+  EXPECT_DOUBLE_EQ(arbitration->last_angular_, 0.0);
 }
 
 TEST(ControlBehavior, ManipulatorInterlockIsFailClosedAndRecoverable) {

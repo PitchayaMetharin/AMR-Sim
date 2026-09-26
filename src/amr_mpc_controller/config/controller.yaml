@@ -101,6 +101,7 @@
     height: 5
     resolution: 0.05
     footprint: "[[0.6, 0.4], [0.6, -0.4], [-0.6, -0.4], [-0.6, 0.4]]"
+    footprint_padding: 0.01
     plugins: [obstacle_layer, inflation_layer]
     obstacle_layer:
       plugin: nav2_costmap_2d::ObstacleLayer
@@ -126,7 +127,9 @@
         raytrace_max_range: 12.0
     inflation_layer:
       plugin: nav2_costmap_2d::InflationLayer
-      inflation_radius: 0.55
+      # Keep the local costmap's potential field aligned with the padded
+      # rectangular footprint used by the planner and smoother.
+      inflation_radius: 0.75
       cost_scaling_factor: 3.0
     always_send_full_costmap: true
 

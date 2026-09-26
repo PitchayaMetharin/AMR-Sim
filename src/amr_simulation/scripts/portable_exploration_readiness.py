@@ -25,6 +25,7 @@ from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
+from rclpy.action.server import RCLError
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -71,6 +72,7 @@ STATUS_MAX_AGE_S = 0.2
 TF_MAX_AGE_S = 1.0
 SLAM_TF_FUTURE_TOLERANCE_S = 1.0
 COSTMAP_MAX_AGE_S = 2.0
+LIFECYCLE_QUERY_TIMEOUT_S = 5.0
 
 ADAPTER_NODES = (
     "base_adapter_node",
@@ -235,7 +237,7 @@ class PortableExplorationReadiness(Node):
         self._unmet: Tuple[str, ...] = ("waiting for local graph",)
         self._seen_processes = set()
         self._lifecycle_state: Dict[str, int] = {}
-        self._lifecycle_pending: Dict[str, object] = {}
+        self._lifecycle_pending: Dict[str, Tuple[object, float]] = {}
 
         self._front_scan_at = 0.0
         self._map_at = 0.0
@@ -432,18 +434,41 @@ class PortableExplorationReadiness(Node):
             key = (f"{name}", "/amr")
             if key in graph:
                 self._seen_processes.add(name)
-                if client.service_is_ready() and name not in self._lifecycle_pending:
+                pending = self._lifecycle_pending.get(name)
+                if pending is not None:
+                    future, issued_at = pending
+                    if (not future.done()
+                            and time.monotonic() - issued_at >= LIFECYCLE_QUERY_TIMEOUT_S):
+                        try:
+                            client.remove_pending_request(future)
+                        except Exception as error:
+                            self._fault_reason = (
+                                f"lifecycle state query retirement failed for {name}: {error}")
+                        else:
+                            if self._lifecycle_pending.get(name) == pending:
+                                self._lifecycle_pending.pop(name, None)
+                                self._lifecycle_state.pop(name, None)
+                                self.get_logger().warning(
+                                    f"lifecycle state query timed out for {name}; retrying")
+                    if name in self._lifecycle_pending:
+                        continue
+                if client.service_is_ready():
                     try:
                         future = client.call_async(GetState.Request())
-                        self._lifecycle_pending[name] = future
+                        pending = (future, time.monotonic())
+                        self._lifecycle_pending[name] = pending
                         future.add_done_callback(
-                            lambda result, node_name=name: self._lifecycle_done(node_name, result))
+                            lambda result, node_name=name, query=future:
+                            self._lifecycle_done(node_name, query, result))
                     except Exception as error:
                         self._fault_reason = f"lifecycle state query failed for {name}: {error}"
             elif name in self._seen_processes:
                 self._fault_reason = f"required lifecycle process exited: {name}"
 
-    def _lifecycle_done(self, name: str, future) -> None:
+    def _lifecycle_done(self, name: str, query, future) -> None:
+        pending = self._lifecycle_pending.get(name)
+        if pending is None or pending[0] is not query:
+            return
         self._lifecycle_pending.pop(name, None)
         try:
             response = future.result()
@@ -682,7 +707,7 @@ def main() -> int:
     executor.add_node(node)
     try:
         executor.spin()
-    except (ExternalShutdownException, KeyboardInterrupt):
+    except (ExternalShutdownException, KeyboardInterrupt, RCLError):
         if not node._ready and not node._fault_reason:
             node._fault_reason = "readiness shutdown or user stop"
     finally:

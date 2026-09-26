@@ -71,3 +71,30 @@ def test_mission_uses_explicit_race_safe_lifecycle():
 def test_mission_has_no_direct_motion_or_permission_authority():
     source = (ROOT / "src" / "mission_supervisor_node.cpp").read_text()
     assert "cmd_vel" not in source
+
+
+def test_mission_status_is_uuid_correlated_and_observation_only():
+    source = (ROOT / "src" / "mission_supervisor_node.cpp").read_text()
+    assert '"/amr/mission/status"' in source
+    assert '"amr_mission/mission_supervisor"' in source
+    assert "canonical_goal_uuid" in source
+    assert "result.reserve(32)" in source
+    assert "hexadecimal[(value >> 4U) & 0x0FU]" in source
+    for field in (
+            '"goal_uuid"', '"stage"', '"outcome"', '"reason"',
+            '"blockage_confirmed"', '"fault_class"'):
+        assert field in source
+    for stage in ("PLANNING", "SMOOTHING", "FOLLOWING", "CANCELING", "TERMINAL"):
+        assert stage in source
+    for outcome in ("PENDING", "SUCCEEDED", "CANCELED", "ABORTED", "FAULT"):
+        assert outcome in source
+    for fault_class in (
+            "NONE", "OBSTACLE_BLOCKAGE", "PLANNER_ABORT", "SMOOTHER_ABORT",
+            "CONTROLLER_ABORT", "CANCELLATION", "NAVIGATION_FAULT"):
+        assert fault_class in source
+    assert "path smoothing reached a collision boundary" in source
+    assert "result.result->was_completed && !result.result->path.poses.empty()" in source
+    assert '"RegulatedPurePursuitController detected collision ahead!"' in source
+    assert "controller collision boundary reached" in source
+    assert "path following failed" in source
+    assert "publication failed" in source

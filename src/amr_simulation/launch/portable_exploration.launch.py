@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shlex
+import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -78,6 +79,7 @@ PORTABLE_READINESS_STAGES = (
     "controller",
     "mission_final",
 )
+PORTABLE_LOCALIZATION_MODES = ("slam", "amcl")
 PORTABLE_INCLUDED_LAUNCH_PACKAGES = (
     "amr_slam",
     "amr_navigation",
@@ -86,7 +88,23 @@ PORTABLE_INCLUDED_LAUNCH_PACKAGES = (
     "amr_mission",
 )
 PORTABLE_ADAPTER_CONFIGURE_DELAY_S = 8.0
-PORTABLE_CONTROL_ARGUMENTS = {"require_manipulator_stowed": "true"}
+PORTABLE_CONTROLLER_FREQUENCY = 5.0
+PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC = 60.0
+PORTABLE_BASE_INPUT_TIMEOUT_MS = 3500
+PORTABLE_BASE_GATED_COMMAND_TIMEOUT_MS = 1500
+PORTABLE_MAP_TIMEOUT_SEC = 12.0
+PORTABLE_GOAL_TIMEOUT_SEC = 600.0
+PORTABLE_STARTUP_GRACE_SEC = 30.0
+PORTABLE_AUTHORITY_TIMEOUT_SEC = 3.0
+PORTABLE_TF_TIMEOUT_SEC = 1.5
+PORTABLE_CONTROL_SOURCE_TIMEOUT_MS = 1500
+PORTABLE_MANIPULATOR_STATUS_TIMEOUT_MS = 2000
+PORTABLE_CONTROL_ARGUMENTS = {
+    "require_manipulator_stowed": "true",
+    "source_timeout_ms": str(PORTABLE_CONTROL_SOURCE_TIMEOUT_MS),
+    "manipulator_status_timeout_ms": str(PORTABLE_MANIPULATOR_STATUS_TIMEOUT_MS),
+    "configure_delay_sec": str(PORTABLE_ADAPTER_CONFIGURE_DELAY_S),
+}
 _PORTABLE_STAGE_SUCCESSORS = (
     ("right_gripper_controller", "adapters_authority"),
     ("adapters_authority", "slam_map"),
@@ -458,12 +476,45 @@ def validate_spawn_pose(values: Iterable[str | float]) -> Tuple[float, float, fl
     return parsed  # type: ignore[return-value]
 
 
-def bridge_arguments(world_name: str) -> List[str]:
+def validate_localization_mode(value: str) -> str:
+    """Validate the mutually exclusive global localization authority."""
+
+    mode = str(value).strip().lower()
+    if mode not in PORTABLE_LOCALIZATION_MODES:
+        raise WorldValidationError(
+            "localization_mode must be one of: slam, amcl")
+    return mode
+
+
+def validate_map_yaml(value: str) -> Path:
+    """Validate the saved static-map YAML before starting any process."""
+
+    raw = str(value).strip()
+    if not raw:
+        raise WorldValidationError(
+            "map_yaml is required when localization_mode is amcl")
+    if "://" in raw or urllib.parse.urlsplit(raw).scheme:
+        raise WorldValidationError("map_yaml must be a local absolute path")
+    path = Path(raw)
+    if not path.is_absolute() or path.suffix.lower() not in {".yaml", ".yml"}:
+        raise WorldValidationError(
+            "map_yaml must be an absolute .yaml or .yml path")
+    if not path.is_file():
+        raise WorldValidationError(
+            "map_yaml must be an existing regular file")
+    return path.resolve()
+
+
+def bridge_arguments(
+    world_name: str,
+    *,
+    simulation_diagnostics: bool = False,
+) -> List[str]:
     """Return the stable bridge contract with only the world edge dynamic."""
 
     if not world_name or WORLD_NAME_RE.fullmatch(world_name) is None:
         raise WorldValidationError("bridge world name is not topic-safe")
-    return [
+    arguments = [
         "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
         "/model/amr/cmd_vel@geometry_msgs/msg/TwistStamped]gz.msgs.Twist",
         "/model/amr/odometry@nav_msgs/msg/Odometry[gz.msgs.Odometry",
@@ -478,6 +529,49 @@ def bridge_arguments(world_name: str) -> List[str]:
         "/amr/simulation/sensors/product_camera/depth_image@sensor_msgs/msg/Image[gz.msgs.Image",
         "/amr/simulation/sensors/product_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
     ]
+    if simulation_diagnostics:
+        arguments.extend([
+            "/amr/simulation/diagnostics/contacts@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts",
+            "/amr/simulation/diagnostics/delivered_cmd_vel@geometry_msgs/msg/TwistStamped[gz.msgs.Twist",
+            "/amr/simulation/diagnostics/contact_coverage@std_msgs/msg/String[gz.msgs.StringMsg",
+        ])
+    return arguments
+
+
+def robot_xml_with_simulation_diagnostics(robot_xml: str, *, enabled: bool) -> str:
+    """Append observation-only model diagnostics to expanded robot XML."""
+
+    if not enabled:
+        return robot_xml
+    try:
+        root = ET.fromstring(robot_xml)
+    except ET.ParseError as error:
+        raise WorldValidationError(
+            f"expanded robot XML is malformed: {error}") from error
+    if root.tag.rsplit("}", 1)[-1] != "robot":
+        raise WorldValidationError("expanded robot XML root is not <robot>")
+    closing_tag = "</robot>"
+    closing_index = robot_xml.rfind(closing_tag)
+    if closing_index < 0:
+        raise WorldValidationError("expanded robot XML has no closing </robot>")
+
+    gazebo = ET.Element("gazebo")
+    plugin = ET.SubElement(gazebo, "plugin", {
+        "filename": "amr-exploration-evidence-system",
+        "name": "amr_simulation::ExplorationEvidenceSystem",
+    })
+    for name, value in (
+        ("command_topic", "/model/amr/cmd_vel"),
+        ("contacts_topic", "/amr/simulation/diagnostics/contacts"),
+        (
+            "delivered_command_topic",
+            "/amr/simulation/diagnostics/delivered_cmd_vel",
+        ),
+        ("coverage_topic", "/amr/simulation/diagnostics/contact_coverage"),
+    ):
+        ET.SubElement(plugin, name).text = value
+    diagnostic_xml = ET.tostring(gazebo, encoding="unicode")
+    return robot_xml[:closing_index] + diagnostic_xml + robot_xml[closing_index:]
 
 
 def _managed_node(
@@ -573,8 +667,108 @@ def _shutdown_on_required_process_exit(expected_one_shots: set[object]) -> Regis
     return RegisterEventHandler(OnProcessExit(on_exit=on_exit))
 
 
+def accessible_render_devices(dri_path: str | os.PathLike[str] = "/dev/dri") -> Tuple[str, ...]:
+    """Return readable and writable DRM render nodes available to this run."""
+
+    path = Path(dri_path)
+    if not path.is_dir():
+        return ()
+    try:
+        names = sorted(path.iterdir())
+    except OSError:
+        return ()
+    return tuple(
+        str(entry)
+        for entry in names
+        if entry.name.startswith("renderD") and os.access(entry, os.R_OK | os.W_OK)
+    )
+
+
+def software_rendering_enabled(
+    mode: str,
+    *,
+    dri_path: str | os.PathLike[str] = "/dev/dri",
+) -> bool:
+    """Resolve explicit or automatic software rendering for portable Gazebo."""
+
+    normalized = mode.strip().lower()
+    if normalized not in {"auto", "true", "false"}:
+        raise WorldValidationError(
+            "software_rendering must be one of: auto, true, false")
+    return normalized == "true" or (
+        normalized == "auto" and not accessible_render_devices(dri_path))
+
+
+def _gazebo_runtime_actions(
+    validated: ValidatedWorld,
+    *,
+    headless: bool,
+    resource_value: str,
+    use_software_rendering: bool,
+) -> List[object]:
+    """Start a server and an explicitly configured GUI with run-local state."""
+
+    log_root = os.environ.get("ROS_LOG_DIR")
+    if log_root:
+        runtime_root = Path(os.path.abspath(log_root)) / "gazebo_runtime"
+    else:
+        runtime_root = Path(tempfile.gettempdir()) / f"amr_gazebo_{os.getuid()}"
+    cache_dir = runtime_root / "cache"
+    config_dir = runtime_root / "config"
+    runtime_dir = runtime_root / "runtime"
+    gazebo_log_dir = runtime_root / "logs"
+    for path in (cache_dir, config_dir, runtime_dir, gazebo_log_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    runtime_dir.chmod(0o700)
+
+    gazebo_launch = PythonLaunchDescriptionSource(
+        str(Path(get_package_share_directory("ros_gz_sim")) / "launch" / "gz_sim.launch.py")
+    )
+    server_args = "-r -s -v 2 " + shlex.quote(str(validated.path))
+    actions: List[object] = [
+        SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", resource_value),
+        SetEnvironmentVariable("XDG_CACHE_HOME", str(cache_dir)),
+        SetEnvironmentVariable("XDG_CONFIG_HOME", str(config_dir)),
+        SetEnvironmentVariable("XDG_RUNTIME_DIR", str(runtime_dir)),
+        SetEnvironmentVariable("GZ_LOG_PATH", str(gazebo_log_dir)),
+    ]
+    if not headless:
+        actions.append(SetEnvironmentVariable("QT_X11_NO_MITSHM", "1"))
+    if use_software_rendering:
+        actions.extend([
+            SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1"),
+            SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe"),
+        ])
+    actions.append(IncludeLaunchDescription(
+        gazebo_launch,
+        launch_arguments={
+            "gz_args": server_args,
+            "on_exit_shutdown": "true",
+        }.items(),
+    ))
+    if not headless:
+        actions.append(TimerAction(
+            period=2.0,
+            actions=[IncludeLaunchDescription(
+                gazebo_launch,
+                launch_arguments={
+                    "gz_args": "-g --render-engine-gui ogre2 --render-engine-gui-api-backend opengl",
+                    "on_exit_shutdown": "true",
+                }.items(),
+            )],
+        ))
+    return actions
+
+
 def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, float, float, float]):
     """Build the portable graph as causal one-shot and readiness stages."""
+
+    localization_mode = validate_localization_mode(
+        LaunchConfiguration("localization_mode", default="slam").perform(context))
+    map_yaml = None
+    if localization_mode == "amcl":
+        map_yaml = validate_map_yaml(
+            LaunchConfiguration("map_yaml", default="").perform(context))
 
     simulation = Path(get_package_share_directory("amr_simulation"))
     description = Path(get_package_share_directory("amr_description"))
@@ -591,6 +785,13 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
             "joint_state_topic": joint_state_topic,
         },
     ).toxml()
+    simulation_diagnostics = (
+        LaunchConfiguration(
+            "simulation_diagnostics", default="false").perform(context).lower()
+        == "true"
+    )
+    robot_xml = robot_xml_with_simulation_diagnostics(
+        robot_xml, enabled=simulation_diagnostics)
     robot_description = {"robot_description": robot_xml, "use_sim_time": True}
 
     resource_roots = [validated.path.parent, *validated.resource_paths]
@@ -599,13 +800,12 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
             resource_roots.append(root)
     resource_value = os.pathsep.join(str(path) for path in dict.fromkeys(resource_roots))
     headless = LaunchConfiguration("headless").perform(context).lower() == "true"
-    gz_args = "-r " + ("-s " if headless else "") + f"-v 2 {shlex.quote(str(validated.path))}"
-
-    gazebo = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            str(Path(get_package_share_directory("ros_gz_sim")) / "launch" / "gz_sim.launch.py")
-        ),
-        launch_arguments={"gz_args": gz_args, "on_exit_shutdown": "true"}.items(),
+    software_rendering = LaunchConfiguration("software_rendering").perform(context)
+    gazebo_actions = _gazebo_runtime_actions(
+        validated,
+        headless=headless,
+        resource_value=resource_value,
+        use_software_rendering=software_rendering_enabled(software_rendering),
     )
     state_publisher = Node(
         package="robot_state_publisher",
@@ -616,7 +816,10 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
     bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
-        arguments=bridge_arguments(validated.name),
+        arguments=bridge_arguments(
+            validated.name,
+            simulation_diagnostics=simulation_diagnostics,
+        ),
         remappings=[
             ("/model/amr/cmd_vel", "/amr/simulation/base/cmd_vel"),
             ("/model/amr/odometry", "/amr/simulation/base/odometry"),
@@ -629,48 +832,70 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
     )
 
     spawn = Node(
-        package="ros_gz_sim",
-        executable="create",
+        package="amr_simulation",
+        executable="portable_robot_inserter",
+        name="portable_robot_inserter",
         arguments=[
-            "-world", validated.name,
-            "-name", "amr",
-            "-param", "robot_description",
-            "-x", str(pose[0]),
-            "-y", str(pose[1]),
-            "-z", str(pose[2]),
-            "-Y", str(pose[3]),
+            "--world", validated.name,
+            "--name", "amr",
+            "--x", str(pose[0]),
+            "--y", str(pose[1]),
+            "--z", str(pose[2]),
+            "--yaw", str(pose[3]),
         ],
         parameters=[robot_description],
         output="screen",
     )
     joint_broadcaster = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["joint_state_broadcaster", "--controller-manager-timeout", "30"],
+        package="amr_simulation",
+        executable="portable_controller_spawner.py",
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout", "30",
+            "--service-call-timeout", str(PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC),
+        ],
         output="screen",
     )
     arm_controller = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["arm_controller", "--controller-manager-timeout", "30"],
+        package="amr_simulation",
+        executable="portable_controller_spawner.py",
+        arguments=[
+            "arm_controller",
+            "--controller-manager-timeout", "30",
+            "--service-call-timeout", str(PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC),
+        ],
         output="screen",
     )
     left_gripper = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["gripper_controller", "--controller-manager-timeout", "30"],
+        package="amr_simulation",
+        executable="portable_controller_spawner.py",
+        arguments=[
+            "gripper_controller",
+            "--controller-manager-timeout", "30",
+            "--service-call-timeout", str(PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC),
+        ],
         output="screen",
     )
     right_gripper = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["gripper_right_controller", "--controller-manager-timeout", "30"],
+        package="amr_simulation",
+        executable="portable_controller_spawner.py",
+        arguments=[
+            "gripper_right_controller",
+            "--controller-manager-timeout", "30",
+            "--service-call-timeout", str(PORTABLE_CONTROLLER_SERVICE_TIMEOUT_SEC),
+        ],
         output="screen",
     )
 
     # Register every adapter handler before the delayed base configure event.
     base, (base_activate, base_configure) = _managed_node(
-        "amr_base_adapter", "base_adapter_node")
+        "amr_base_adapter",
+        "base_adapter_node",
+        parameters=[{
+            "input_timeout_ms": PORTABLE_BASE_INPUT_TIMEOUT_MS,
+            "gated_command_timeout_ms": PORTABLE_BASE_GATED_COMMAND_TIMEOUT_MS,
+        }],
+    )
     front, (front_activate, front_configure) = _managed_node(
         "amr_sensor_adapters", "front_lidar_adapter_node")
     rear, (rear_activate, rear_configure) = _managed_node(
@@ -752,23 +977,33 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
         front_perception, front_perception_activate,
         rear_perception, rear_perception_activate,
         health, health_activate,
-        wheel_configure, front_perception_configure,
-        rear_perception_configure, health_configure,
+        TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S,
+            actions=[wheel_configure],
+        ),
+        TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 1.0,
+            actions=[front_perception_configure],
+        ),
+        TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 2.0,
+            actions=[rear_perception_configure],
+        ),
+        TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 3.0,
+            actions=[health_configure],
+        ),
         ekf,
         control_include,
         stow,
-        readiness_initial,
     ]
-    adapter_initial.append(RegisterEventHandler(OnStateTransition(
-        target_lifecycle_node=product_camera,
-        goal_state="active",
-        entities=adapter_tail,
-    )))
-
     # Keep the existing package barriers/timers for each later causal stage.
     slam_include = _package_launch_include("amr_slam")
     navigation_include = _package_launch_include("amr_navigation")
-    mpc_include = _package_launch_include("amr_mpc_controller")
+    mpc_include = _package_launch_include(
+        "amr_mpc_controller",
+        arguments={"controller_frequency": str(PORTABLE_CONTROLLER_FREQUENCY)},
+    )
     mission_include = _package_launch_include("amr_mission")
 
     explorer_config = str(Path(get_package_share_directory("amr_exploration")) / "config" / "frontier_explorer.yaml")
@@ -779,6 +1014,11 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
         namespace="/amr",
         parameters=[
             explorer_config,
+            {"map_timeout_sec": PORTABLE_MAP_TIMEOUT_SEC},
+            {"goal_timeout_sec": PORTABLE_GOAL_TIMEOUT_SEC},
+            {"startup_grace_sec": PORTABLE_STARTUP_GRACE_SEC},
+            {"authority_timeout_sec": PORTABLE_AUTHORITY_TIMEOUT_SEC},
+            {"tf_timeout_sec": PORTABLE_TF_TIMEOUT_SEC},
             {"autostart": ParameterValue(LaunchConfiguration("auto_start_exploration"), value_type=bool)},
         ],
         output="screen",
@@ -797,21 +1037,110 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
         output="screen",
     )
 
-    readiness_stage_actions = {
-        "adapters_authority": [slam_include, readiness_nodes["slam_map"]],
-        "slam_map": [navigation_include, readiness_nodes["planner_smoother"]],
-        "planner_smoother": [mpc_include, readiness_nodes["controller"]],
-        "controller": [mission_include, readiness_nodes["mission_final"]],
-        "mission_final": [explorer, rviz],
-    }
-    readiness_release_handlers = [
-        RegisterEventHandler(OnProcessExit(
-            target_action=readiness_nodes[stage],
-            on_exit=_release_one_shot(
-                readiness_stage_actions[stage], f"{stage} readiness"),
-        ))
-        for stage in PORTABLE_READINESS_STAGES
-    ]
+    static_release_handlers: List[object] = []
+    if localization_mode == "slam":
+        adapter_tail.append(readiness_initial)
+        readiness_stage_actions = {
+            "adapters_authority": [slam_include, readiness_nodes["slam_map"]],
+            "slam_map": [navigation_include, readiness_nodes["planner_smoother"]],
+            "planner_smoother": [mpc_include, readiness_nodes["controller"]],
+            "controller": [mission_include, readiness_nodes["mission_final"]],
+            "mission_final": [explorer, rviz],
+        }
+        readiness_release_handlers = [
+            RegisterEventHandler(OnProcessExit(
+                target_action=readiness_nodes[stage],
+                on_exit=_release_one_shot(
+                    readiness_stage_actions[stage], f"{stage} readiness"),
+            ))
+            for stage in PORTABLE_READINESS_STAGES
+        ]
+    else:
+        assert map_yaml is not None
+        amcl_parameters = {
+            "use_sim_time": True,
+            "alpha1": 0.0,
+            "alpha2": 0.0,
+            "alpha3": 0.0,
+            "alpha4": 0.0,
+            "alpha5": 0.0,
+            "base_frame_id": "base_footprint",
+            "global_frame_id": "map",
+            "odom_frame_id": "odom",
+            "scan_topic": "/amr/sensors/front_lidar/scan",
+            "min_particles": 500,
+            "max_particles": 2000,
+            "max_beams": 60,
+            "laser_min_range": 0.1,
+            "laser_max_range": 20.0,
+            "update_min_d": 0.05,
+            "update_min_a": 0.05,
+            "transform_tolerance": 0.2,
+            "set_initial_pose": True,
+            "initial_pose": {
+                "x": pose[0],
+                "y": pose[1],
+                "z": 0.0,
+                "yaw": pose[3],
+            },
+        }
+        map_server = LifecycleNode(
+            package="nav2_map_server",
+            executable="map_server",
+            name="map_server",
+            namespace="/amr",
+            parameters=[{"use_sim_time": True, "yaml_filename": str(map_yaml)}],
+            remappings=[("map", "/map"), ("map_metadata", "/map_metadata")],
+            output="screen",
+        )
+        amcl = LifecycleNode(
+            package="nav2_amcl",
+            executable="amcl",
+            name="amcl",
+            namespace="/amr",
+            parameters=[amcl_parameters],
+            remappings=[("map", "/map"), ("scan", "/amr/sensors/front_lidar/scan")],
+            output="screen",
+        )
+        localization_manager = Node(
+            package="nav2_lifecycle_manager",
+            executable="lifecycle_manager",
+            name="lifecycle_manager_static_localization",
+            namespace="/amr",
+            parameters=[{
+                "use_sim_time": True,
+                "autostart": True,
+                "node_names": ["map_server", "amcl"],
+            }],
+            output="screen",
+        )
+        static_localization_actions = [
+            map_server,
+            amcl,
+            TimerAction(period=1.0, actions=[localization_manager]),
+        ]
+        adapter_tail.append(RegisterEventHandler(OnStateTransition(
+            target_lifecycle_node=wheel,
+            goal_state="active",
+            entities=static_localization_actions,
+        )))
+        readiness_release_handlers = []
+        static_release_handlers.append(RegisterEventHandler(OnStateTransition(
+            target_lifecycle_node=amcl,
+            goal_state="active",
+            entities=[
+                navigation_include,
+                TimerAction(period=5.0, actions=[mpc_include]),
+                TimerAction(period=8.0, actions=[mission_include]),
+                rviz,
+            ],
+        )))
+
+    adapter_initial.append(RegisterEventHandler(OnStateTransition(
+        target_lifecycle_node=product_camera,
+        goal_state="active",
+        entities=adapter_tail,
+    )))
 
     expected_one_shots = {
         spawn,
@@ -819,15 +1148,16 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
         arm_controller,
         left_gripper,
         right_gripper,
-        *readiness_nodes.values(),
     }
+    if localization_mode == "slam":
+        expected_one_shots.update(readiness_nodes.values())
     return [
         _shutdown_on_required_process_exit(expected_one_shots),
-        SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", resource_value),
-        gazebo,
+        *gazebo_actions,
         state_publisher,
         bridge,
         *readiness_release_handlers,
+        *static_release_handlers,
         RegisterEventHandler(OnProcessExit(
             target_action=spawn,
             on_exit=_release_one_shot([joint_broadcaster], "robot insertion"),
@@ -855,6 +1185,10 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
 def _expand_runtime(context):
     world_arg = LaunchConfiguration("world").perform(context)
     resources = LaunchConfiguration("resource_paths").perform(context)
+    localization_mode = validate_localization_mode(
+        LaunchConfiguration("localization_mode").perform(context))
+    if localization_mode == "amcl":
+        validate_map_yaml(LaunchConfiguration("map_yaml").perform(context))
     validated = validate_world(world_arg, resources)
     pose = validate_spawn_pose(
         (
@@ -876,7 +1210,16 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("initial_yaw", default_value="0.0"),
         DeclareLaunchArgument("resource_paths", default_value=""),
         DeclareLaunchArgument("headless", default_value="false", choices=["true", "false"]),
+        DeclareLaunchArgument("software_rendering", default_value="auto", choices=["auto", "true", "false"]),
         DeclareLaunchArgument("rviz", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument("auto_start_exploration", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("simulation_diagnostics", default_value="false", choices=["true", "false"]),
+        DeclareLaunchArgument("localization_mode", default_value="slam", choices=["slam", "amcl"]),
+        DeclareLaunchArgument("map_yaml", default_value=""),
+        # Queue Fast DDS service replies during the high-load lifecycle
+        # bringup.  Synchronous replies can time out before wheel odometry's
+        # change_state response reaches its launch client.
+        SetEnvironmentVariable(
+            name="RMW_FASTRTPS_PUBLICATION_MODE", value="ASYNCHRONOUS"),
         OpaqueFunction(function=_expand_runtime),
     ])

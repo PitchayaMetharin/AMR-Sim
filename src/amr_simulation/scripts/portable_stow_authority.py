@@ -11,7 +11,9 @@ stow.
 from __future__ import annotations
 
 import math
+import inspect
 import time
+import uuid
 from typing import Optional, Tuple
 
 import rclpy
@@ -30,6 +32,7 @@ from rclpy.qos import (
 )
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
+from unique_identifier_msgs.msg import UUID
 from amr_interfaces.msg import BaseStatus, ManipulatorStatus
 
 
@@ -43,7 +46,16 @@ STOW_POSITION = {
 }
 STOW_TOLERANCE_RAD = 0.01
 BASE_STATUS_MAX_AGE_S = 0.2
-JOINT_STATUS_MAX_AGE_S = 0.2
+JOINT_STATUS_MAX_AGE_S = 2.0
+GOAL_RESPONSE_TIMEOUT_S = 3.0
+RESULT_QUERY_TIMEOUT_S = 5.0
+NON_TERMINAL_RESULT_STATUSES = frozenset(
+    (
+        GoalStatus.STATUS_ACCEPTED,
+        GoalStatus.STATUS_EXECUTING,
+        GoalStatus.STATUS_CANCELING,
+    )
+)
 
 
 def authority_qos() -> QoSProfile:
@@ -153,6 +165,13 @@ class PortableStowAuthority(Node):
         self._last_base_boot = 0
         self._last_base_sequence = 0
         self._goal_handle = None
+        self._goal_uuid: Optional[UUID] = None
+        self._goal_response_future = None
+        self._goal_response_sent_at = 0.0
+        self._result_query_future = None
+        self._result_query_sent_at = 0.0
+        self._result_query_is_recovery = False
+        self._result_recovery_next_at = 0.0
 
         self._status_pub = self.create_publisher(
             ManipulatorStatus,
@@ -175,6 +194,10 @@ class PortableStowAuthority(Node):
             self,
             FollowJointTrajectory,
             "/arm_controller/follow_joint_trajectory",
+        )
+        self._result_client = self.create_client(
+            FollowJointTrajectory.Impl.GetResultService,
+            "/arm_controller/follow_joint_trajectory/_action/get_result",
         )
         self._status_timer = self.create_timer(0.05, self._tick)
         self._tick()
@@ -230,6 +253,22 @@ class PortableStowAuthority(Node):
         goal.trajectory.points = [point]
         return goal
 
+    def _send_goal_with_uuid(self, goal: FollowJointTrajectory.Goal, goal_uuid: UUID):
+        """Send the one production goal with an explicit, recoverable UUID."""
+
+        submit_goal = self._trajectory_client.send_goal_async
+        try:
+            supports_goal_uuid = "goal_uuid" in inspect.signature(submit_goal).parameters
+        except (TypeError, ValueError):
+            supports_goal_uuid = False
+        if supports_goal_uuid:
+            return submit_goal(goal, goal_uuid=goal_uuid)
+        # Keep lightweight contract-test clients usable without weakening the
+        # real rclpy ActionClient path above.
+        if isinstance(self._trajectory_client, ActionClient):
+            raise RuntimeError("arm action client cannot bind an explicit goal UUID")
+        return submit_goal(goal)
+
     def _send_trajectory_once(self) -> None:
         if self._trajectory_sent or self._fault_latched:
             return
@@ -244,12 +283,80 @@ class PortableStowAuthority(Node):
         self._trajectory_sent = True
         self._trajectory_sent_at = time.monotonic()
         try:
-            future = self._trajectory_client.send_goal_async(self._make_goal())
+            self._goal_uuid = UUID(uuid=list(uuid.uuid4().bytes))
+            future = self._send_goal_with_uuid(self._make_goal(), self._goal_uuid)
+            self._goal_response_future = future
+            self._goal_response_sent_at = self._trajectory_sent_at
             future.add_done_callback(self._goal_response_callback)
         except Exception as error:
             self._latch_fault(f"arm trajectory send exception: {error}")
 
+    def _recover_unacknowledged_goal(self, now: float) -> None:
+        """Recover one lost goal acknowledgement through the same UUID."""
+
+        if self._fault_latched or self._trajectory_succeeded:
+            return
+        response_future = getattr(self, "_goal_response_future", None)
+        if response_future is None:
+            return
+        done = getattr(response_future, "done", None)
+        if callable(done) and done():
+            return
+        elapsed = now - self._goal_response_sent_at
+        if elapsed < GOAL_RESPONSE_TIMEOUT_S:
+            return
+        if now < getattr(self, "_result_recovery_next_at", 0.0):
+            return
+        if getattr(self, "_result_query_future", None) is not None:
+            return
+        if self._goal_uuid is None:
+            self._latch_fault("arm trajectory acknowledgement has no recoverable UUID")
+            return
+        result_client = getattr(self, "_result_client", None)
+        if result_client is None:
+            if elapsed >= GOAL_RESPONSE_TIMEOUT_S + RESULT_QUERY_TIMEOUT_S:
+                self._latch_fault("arm trajectory result recovery client unavailable")
+            else:
+                self._detail = "arm trajectory acknowledgement pending; awaiting result recovery"
+            return
+        try:
+            if not result_client.service_is_ready():
+                if elapsed >= GOAL_RESPONSE_TIMEOUT_S + RESULT_QUERY_TIMEOUT_S:
+                    self._latch_fault("arm trajectory result recovery service unavailable")
+                else:
+                    self._detail = "arm trajectory acknowledgement pending; result service unavailable"
+                return
+            request = FollowJointTrajectory.Impl.GetResultService.Request()
+            request.goal_id = self._goal_uuid
+            result_future = result_client.call_async(request)
+            self._result_query_future = result_future
+            self._result_query_sent_at = now
+            self._result_query_is_recovery = True
+            result_future.add_done_callback(self._result_callback)
+        except Exception as error:
+            self._latch_fault(f"arm trajectory result recovery exception: {error}")
+
+    def _check_result_query_timeout(self, now: float) -> None:
+        result_future = getattr(self, "_result_query_future", None)
+        if (
+            result_future is None
+            or not getattr(self, "_result_query_is_recovery", False)
+            or self._fault_latched
+            or self._trajectory_succeeded
+        ):
+            return
+        done = getattr(result_future, "done", None)
+        if callable(done) and done():
+            return
+        if now - self._result_query_sent_at >= RESULT_QUERY_TIMEOUT_S:
+            self._latch_fault("arm trajectory result recovery response timeout")
+
     def _goal_response_callback(self, future) -> None:
+        if self._fault_latched or self._trajectory_succeeded:
+            return
+        if getattr(self, "_result_query_future", None) is not None:
+            return
+        self._goal_response_future = None
         try:
             goal_handle = future.result()
         except Exception as error:
@@ -261,14 +368,29 @@ class PortableStowAuthority(Node):
         self._goal_handle = goal_handle
         try:
             result_future = goal_handle.get_result_async()
+            self._result_query_future = result_future
+            self._result_query_sent_at = time.monotonic()
+            self._result_query_is_recovery = False
             result_future.add_done_callback(self._result_callback)
         except Exception as error:
             self._latch_fault(f"arm trajectory result exception: {error}")
 
     def _result_callback(self, future) -> None:
+        if self._fault_latched or self._trajectory_succeeded:
+            return
+        current_future = getattr(self, "_result_query_future", None)
+        if current_future is not None and current_future is not future:
+            return
+        is_recovery = bool(getattr(self, "_result_query_is_recovery", False))
+        if hasattr(self, "_result_query_future"):
+            self._result_query_future = None
+            self._result_query_is_recovery = False
         try:
             wrapped = future.result()
-            status = int(getattr(wrapped, "status", GoalStatus.STATUS_SUCCEEDED))
+            if not hasattr(wrapped, "status"):
+                self._latch_fault("arm trajectory result omitted status")
+                return
+            status = int(wrapped.status)
             result = getattr(wrapped, "result", wrapped)
             if not hasattr(result, "error_code"):
                 self._latch_fault("arm trajectory result omitted error_code")
@@ -276,6 +398,13 @@ class PortableStowAuthority(Node):
             error_code = int(result.error_code)
         except Exception as error:
             self._latch_fault(f"arm trajectory result exception: {error}")
+            return
+        if status in NON_TERMINAL_RESULT_STATUSES:
+            self._detail = "arm trajectory still executing; awaiting terminal result"
+            if is_recovery:
+                self._result_recovery_next_at = (
+                    time.monotonic() + RESULT_QUERY_TIMEOUT_S
+                )
             return
         if status != GoalStatus.STATUS_SUCCEEDED:
             outcome = {
@@ -344,6 +473,8 @@ class PortableStowAuthority(Node):
             return
         self._send_trajectory_once()
         now = time.monotonic()
+        self._recover_unacknowledged_goal(now)
+        self._check_result_query_timeout(now)
         self._refresh_state(now)
         self._publish_status()
 

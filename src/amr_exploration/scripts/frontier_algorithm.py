@@ -12,6 +12,12 @@ NAVIGATION_FOOTPRINT = (
     (-0.61, -0.41), (-0.61, 0.41))
 
 
+# Keep exactly one immutable costmap/footprint mask snapshot.  Routes and
+# candidate eligibility remain per-call because they depend on live pose,
+# heading, map content, and blacklist state.
+_FOOTPRINT_MASK_CACHE = None
+
+
 def _strict_integral(value):
     """Return an actual integral value, without coercing booleans/floats."""
     if isinstance(value, bool) or not isinstance(value, Integral):
@@ -356,15 +362,22 @@ def _polygon_intersects_cell(polygon, cell_min_x, cell_min_y,
     return True
 
 
-def _footprint_costmap_clear(costmap_geometry_value, data, world, footprint):
-    """Return whether the identity-yaw footprint overlaps no lethal cell."""
+def _footprint_costmap_clear(
+        costmap_geometry_value, data, world, footprint, yaw=0.0):
+    """Return whether a footprint at ``world`` overlaps no lethal cell."""
     width, height, resolution, origin_x, origin_y, cos_yaw, sin_yaw = (
         costmap_geometry_value)
     world_x, world_y = world
+    footprint_cos = math.cos(yaw)
+    footprint_sin = math.sin(yaw)
     polygon = []
     for footprint_x, footprint_y in footprint:
-        point_x = world_x + footprint_x
-        point_y = world_y + footprint_y
+        point_x = (
+            world_x + footprint_cos * footprint_x
+            - footprint_sin * footprint_y)
+        point_y = (
+            world_y + footprint_sin * footprint_x
+            + footprint_cos * footprint_y)
         delta_x = point_x - origin_x
         delta_y = point_y - origin_y
         polygon.append((
@@ -390,7 +403,7 @@ def _footprint_costmap_clear(costmap_geometry_value, data, world, footprint):
     for cell_y in range(first_y, last_y + 1):
         for cell_x in range(first_x, last_x + 1):
             cost = int(data[cell_y * width + cell_x])
-            if cost >= 253 and _polygon_intersects_cell(
+            if cost >= 254 and _polygon_intersects_cell(
                     polygon,
                     cell_x * resolution,
                     cell_y * resolution,
@@ -398,6 +411,416 @@ def _footprint_costmap_clear(costmap_geometry_value, data, world, footprint):
                     (cell_y + 1) * resolution):
                 return False
     return True
+
+
+def _footprint_collision_mask(
+        costmap_geometry_value, lethal_rows, width, height, footprint,
+        world_yaw, center_offset=(0.0, 0.0)):
+    """Return a bit-mask row for footprint/lethal overlap at each cell.
+
+    The mask is exact for footprint poses at the sampled cell or movement
+    midpoint.  Bit operations keep the heading-aware search bounded without
+    calling polygon SAT for every state transition.
+    """
+    _width, _height, resolution, _origin_x, _origin_y, cos_yaw, sin_yaw = (
+        costmap_geometry_value)
+    costmap_yaw = math.atan2(sin_yaw, cos_yaw)
+    relative_yaw = world_yaw - costmap_yaw
+    footprint_cos = math.cos(relative_yaw)
+    footprint_sin = math.sin(relative_yaw)
+    polygon = tuple(
+        (
+            footprint_cos * footprint_x - footprint_sin * footprint_y,
+            footprint_sin * footprint_x + footprint_cos * footprint_y)
+        for footprint_x, footprint_y in footprint)
+    min_x = min(point[0] for point in polygon)
+    max_x = max(point[0] for point in polygon)
+    min_y = min(point[1] for point in polygon)
+    max_y = max(point[1] for point in polygon)
+    offset_x, offset_y = center_offset
+    offset_radius_x = math.ceil(
+        max(abs(min_x), abs(max_x)) / resolution) + 2
+    offset_radius_y = math.ceil(
+        max(abs(min_y), abs(max_y)) / resolution) + 2
+    overlap_offsets = {}
+    for cell_y in range(-offset_radius_y, offset_radius_y + 1):
+        offsets_x = []
+        for cell_x in range(-offset_radius_x, offset_radius_x + 1):
+            cell_min_x = (cell_x - 0.5 - offset_x) * resolution
+            cell_min_y = (cell_y - 0.5 - offset_y) * resolution
+            if _polygon_intersects_cell(
+                    polygon, cell_min_x, cell_min_y,
+                    cell_min_x + resolution, cell_min_y + resolution):
+                offsets_x.append(cell_x)
+        if offsets_x:
+            overlap_offsets[cell_y] = tuple(offsets_x)
+
+    width_mask = (1 << width) - 1
+    blocked_rows = []
+    safe_first_x = max(
+        0, math.ceil(-0.5 - offset_x - min_x / resolution - 1.0e-12))
+    safe_last_x = min(
+        width - 1,
+        math.floor(width - 0.5 - offset_x - max_x / resolution + 1.0e-12))
+    if safe_first_x <= safe_last_x:
+        safe_x_mask = (
+            (1 << (safe_last_x - safe_first_x + 1)) - 1) << safe_first_x
+    else:
+        safe_x_mask = 0
+
+    for center_y in range(height):
+        center_local_y = (center_y + 0.5 + offset_y) * resolution
+        y_inside = (
+            center_local_y + min_y >= -1.0e-12
+            and center_local_y + max_y <= height * resolution + 1.0e-12)
+        blocked = width_mask ^ safe_x_mask if y_inside else width_mask
+        if y_inside:
+            for offset_y_index, offsets_x in overlap_offsets.items():
+                source_y = center_y + offset_y_index
+                if not 0 <= source_y < height:
+                    continue
+                source = lethal_rows[source_y]
+                for offset_x_index in offsets_x:
+                    if offset_x_index >= 0:
+                        blocked |= source >> offset_x_index
+                    else:
+                        blocked |= source << -offset_x_index
+        blocked_rows.append(blocked & width_mask)
+    return tuple(blocked_rows)
+
+
+def _first_step_headings(
+        costmap_geometry_value, data, robot_world, footprint,
+        robot_yaw=0.0):
+    """Return first-step headings legal from one costmap pose.
+
+    This is the first transition of ``_reachable_costmap_cells`` expressed as
+    a pure set-valued proof.  It keeps the same center-cost, diagonal-corner,
+    exact-footprint, and midpoint checks as the route graph.
+    """
+    try:
+        width, height, _resolution, _origin_x, _origin_y, cos_yaw, sin_yaw = (
+            costmap_geometry_value)
+        if len(data) != width * height:
+            return frozenset()
+        validated_footprint = _strict_footprint(footprint)
+        if validated_footprint is None:
+            return frozenset()
+        robot_yaw = float(robot_yaw)
+        if not math.isfinite(robot_yaw):
+            return frozenset()
+        start = _costmap_cell(costmap_geometry_value, robot_world)
+        if start is None:
+            return frozenset()
+
+        def cost(cell):
+            cell_x, cell_y = cell
+            return int(data[cell_y * width + cell_x])
+
+        if cost(start) >= 253:
+            return frozenset()
+        costmap_yaw = math.atan2(sin_yaw, cos_yaw)
+        heading_angles = tuple(
+            costmap_yaw + index * math.pi / 4.0 for index in range(8))
+        directions = ((1, 0), (1, 1), (0, 1), (-1, 1),
+                      (-1, 0), (-1, -1), (0, -1), (1, -1))
+        legal = set()
+        for move_heading, (dx, dy) in enumerate(directions):
+            next_cell = (start[0] + dx, start[1] + dy)
+            if (not 0 <= next_cell[0] < width
+                    or not 0 <= next_cell[1] < height
+                    or cost(next_cell) >= 253):
+                continue
+            if dx and dy and (
+                    cost((start[0] + dx, start[1])) >= 253
+                    or cost((start[0], start[1] + dy)) >= 253):
+                continue
+            next_world = _cell_world(costmap_geometry_value, next_cell)
+            if next_world is None:
+                continue
+            move_yaw = heading_angles[move_heading]
+            turn_delta = math.atan2(
+                math.sin(move_yaw - robot_yaw),
+                math.cos(move_yaw - robot_yaw))
+            turn_samples = max(
+                1, int(math.ceil(abs(turn_delta) / (math.pi / 16.0))))
+            turn_clear = all(
+                _footprint_costmap_clear(
+                    costmap_geometry_value, data, robot_world,
+                    validated_footprint,
+                    yaw=robot_yaw + turn_delta * sample / turn_samples)
+                for sample in range(turn_samples + 1))
+            midpoint = (
+                (robot_world[0] + next_world[0]) / 2.0,
+                (robot_world[1] + next_world[1]) / 2.0)
+            if (
+                    turn_clear
+                    and _footprint_costmap_clear(
+                        costmap_geometry_value, data, robot_world,
+                        validated_footprint, yaw=move_yaw)
+                    and _footprint_costmap_clear(
+                        costmap_geometry_value, data, midpoint,
+                        validated_footprint, yaw=move_yaw)
+                    and _footprint_costmap_clear(
+                        costmap_geometry_value, data, next_world,
+                        validated_footprint, yaw=move_yaw)):
+                legal.add(move_heading)
+        return frozenset(legal)
+    except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
+        return frozenset()
+
+
+def _goal_distance_is_valid(robot_world, goal_world, min_goal_distance):
+    """Return whether a goal satisfies the existing minimum distance gate."""
+    try:
+        robot_x, robot_y = (float(value) for value in robot_world)
+        goal_x, goal_y = (float(value) for value in goal_world)
+        minimum = float(min_goal_distance)
+        if (not all(math.isfinite(value)
+                    for value in (robot_x, robot_y, goal_x, goal_y, minimum))
+                or minimum < 0.0):
+            return False
+        return ((goal_x - robot_x) ** 2 + (goal_y - robot_y) ** 2
+                >= minimum ** 2)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _route_start_proof(
+        costmap_geometry_value, data, footprint,
+        old_world, old_yaw, new_world, new_yaw):
+    """Prove a refreshed pose preserves the selected costmap route start."""
+    try:
+        old_world = tuple(float(value) for value in old_world)
+        new_world = tuple(float(value) for value in new_world)
+        old_yaw = float(old_yaw)
+        new_yaw = float(new_yaw)
+        if (len(old_world) != 2 or len(new_world) != 2
+                or not all(math.isfinite(value)
+                           for value in old_world + new_world)
+                or not all(
+                    math.isfinite(value) for value in (old_yaw, new_yaw))):
+            return False
+        width, height = costmap_geometry_value[:2]
+        if len(data) != width * height:
+            return False
+        validated_footprint = _strict_footprint(footprint)
+        if validated_footprint is None:
+            return False
+        old_start = _costmap_cell(costmap_geometry_value, old_world)
+        new_start = _costmap_cell(costmap_geometry_value, new_world)
+        if old_start is None or old_start != new_start:
+            return False
+        start_index = old_start[1] * width + old_start[0]
+        if int(data[start_index]) >= 253:
+            return False
+        if not _footprint_costmap_clear(
+                costmap_geometry_value, data, old_world,
+                validated_footprint, yaw=old_yaw):
+            return False
+        if not _footprint_costmap_clear(
+                costmap_geometry_value, data, new_world,
+                validated_footprint, yaw=new_yaw):
+            return False
+        old_headings = _first_step_headings(
+            costmap_geometry_value, data, old_world, validated_footprint,
+            robot_yaw=old_yaw)
+        new_headings = _first_step_headings(
+            costmap_geometry_value, data, new_world, validated_footprint,
+            robot_yaw=new_yaw)
+        return bool(old_headings) and old_headings.issubset(new_headings)
+    except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _reachable_costmap_cells(
+        costmap_geometry_value, data, robot_world, robot_yaw,
+        target_cells, footprint, stop_after_first=False):
+    """Return target cells reachable through heading-aware safe costmap space.
+
+    Unknown and lethal cells are not traversable, diagonal moves cannot cut an
+    occupied corner, and heading/turn/midpoint footprint masks are checked
+    during the search.  Nav2's planner and smoother remain authoritative.
+    """
+    width, height, resolution, _origin_x, _origin_y, cos_yaw, sin_yaw = (
+        costmap_geometry_value)
+    target_cells = tuple(dict.fromkeys(target_cells))
+    if not target_cells:
+        return set()
+    target_cell_set = set(target_cells)
+    start = _costmap_cell(costmap_geometry_value, robot_world)
+    if start is None:
+        return set()
+
+    def cost(cell):
+        cell_x, cell_y = cell
+        return int(data[cell_y * width + cell_x])
+
+    if cost(start) >= 253:
+        return set()
+    if footprint is None:
+        directions = ((1, 0), (1, 1), (0, 1), (-1, 1),
+                      (-1, 0), (-1, -1), (0, -1), (1, -1))
+        queue = deque([start])
+        parents = {start: None}
+        remaining = set(target_cell_set)
+        while queue and remaining:
+            cell_x, cell_y = queue.popleft()
+            remaining.discard((cell_x, cell_y))
+            for dx, dy in directions:
+                next_cell = (cell_x + dx, cell_y + dy)
+                if (not 0 <= next_cell[0] < width
+                        or not 0 <= next_cell[1] < height
+                        or next_cell in parents
+                        or cost(next_cell) >= 253):
+                    continue
+                if dx and dy and (
+                        cost((cell_x + dx, cell_y)) >= 253
+                        or cost((cell_x, cell_y + dy)) >= 253):
+                    continue
+                parents[next_cell] = (cell_x, cell_y)
+                queue.append(next_cell)
+        return target_cell_set.intersection(parents)
+
+    costmap_yaw = math.atan2(sin_yaw, cos_yaw)
+    mask_cache_key = (
+        costmap_geometry_value, bytes(data), tuple(footprint))
+    global _FOOTPRINT_MASK_CACHE
+    cached_masks = _FOOTPRINT_MASK_CACHE
+    if cached_masks is not None and cached_masks[0] == mask_cache_key:
+        lethal_rows, heading_masks, movement_masks, goal_mask = cached_masks[1:]
+    else:
+        lethal_rows = []
+        for cell_y in range(height):
+            row = 0
+            row_offset = cell_y * width
+            for cell_x, value in enumerate(data[row_offset:row_offset + width]):
+                if int(value) >= 254:
+                    row |= 1 << cell_x
+            lethal_rows.append(row)
+
+        heading_angles = tuple(
+            costmap_yaw + index * math.pi / 4.0 for index in range(8))
+        heading_masks = tuple(
+            _footprint_collision_mask(
+                costmap_geometry_value, lethal_rows, width, height, footprint,
+                costmap_yaw + index * math.pi / 16.0)
+            for index in range(32))
+        movement_masks = tuple(
+            _footprint_collision_mask(
+                costmap_geometry_value, lethal_rows, width, height, footprint,
+                heading_angles[index], center_offset=(dx / 2.0, dy / 2.0))
+            for index, (dx, dy) in enumerate(
+                ((1, 0), (1, 1), (0, 1), (-1, 1),
+                 (-1, 0), (-1, -1), (0, -1), (1, -1))))
+        goal_mask = _footprint_collision_mask(
+            costmap_geometry_value, lethal_rows, width, height, footprint, 0.0)
+        _FOOTPRINT_MASK_CACHE = (
+            mask_cache_key, lethal_rows, heading_masks, movement_masks,
+            goal_mask)
+
+    heading_angles = tuple(
+        costmap_yaw + index * math.pi / 4.0 for index in range(8))
+
+    def blocked(mask, cell):
+        return bool(mask[cell[1]] & (1 << cell[0]))
+
+    def turn_clear(cell, arrival_heading, move_heading):
+        if arrival_heading < 0:
+            return True
+        arrival_index = arrival_heading * 4
+        target_index = move_heading * 4
+        delta = (target_index - arrival_index) % 32
+        if delta > 16:
+            delta -= 32
+        step = 1 if delta >= 0 else -1
+        for index in range(0, abs(delta) + 1):
+            heading_index = (arrival_index + step * index) % 32
+            if blocked(heading_masks[heading_index], cell):
+                return False
+        return True
+
+    def goal_turn_clear(cell, arrival_heading):
+        if arrival_heading < 0:
+            return not blocked(goal_mask, cell)
+        arrival_angle = heading_angles[arrival_heading]
+        goal_delta = math.atan2(
+            math.sin(-arrival_angle), math.cos(-arrival_angle))
+        samples = max(1, int(math.ceil(abs(goal_delta) / (math.pi / 16.0))))
+        for sample in range(samples + 1):
+            angle = arrival_angle + goal_delta * sample / samples
+            heading_index = int(round(
+                (angle - costmap_yaw) / (math.pi / 16.0))) % 32
+            if blocked(heading_masks[heading_index], cell):
+                return False
+        return not blocked(goal_mask, cell)
+
+    directions = ((1, 0), (1, 1), (0, 1), (-1, 1),
+                  (-1, 0), (-1, -1), (0, -1), (1, -1))
+    queue = deque([(start[0], start[1], -1)])
+    visited = {(start[0], start[1], -1)}
+    remaining = set(target_cell_set)
+    reachable = set()
+    footprint_cache_miss = object()
+    exact_clear_cache = {}
+
+    def exact_clear(world, yaw):
+        key = (world, round(yaw, 12))
+        cached = exact_clear_cache.get(key, footprint_cache_miss)
+        if cached is footprint_cache_miss:
+            cached = _footprint_costmap_clear(
+                costmap_geometry_value, data, world, footprint, yaw=yaw)
+            exact_clear_cache[key] = cached
+        return cached
+
+    if not exact_clear(robot_world, robot_yaw):
+        return set()
+
+    first_step_headings = _first_step_headings(
+        costmap_geometry_value, data, robot_world, footprint,
+        robot_yaw=robot_yaw)
+
+    first_target = target_cells[0] if stop_after_first else None
+    while queue:
+        cell_x, cell_y, arrival_heading = queue.popleft()
+        current_cell = (cell_x, cell_y)
+        if current_cell in remaining and goal_turn_clear(
+                current_cell, arrival_heading):
+            remaining.remove(current_cell)
+            reachable.add(current_cell)
+            if stop_after_first and current_cell == first_target:
+                return {current_cell}
+
+        for move_heading, (dx, dy) in enumerate(directions):
+            next_cell = (cell_x + dx, cell_y + dy)
+            next_state = (next_cell[0], next_cell[1], move_heading)
+            if (next_state in visited
+                    or not 0 <= next_cell[0] < width
+                    or not 0 <= next_cell[1] < height
+                    or cost(next_cell) >= 253):
+                continue
+            if dx and dy and (
+                    cost((cell_x + dx, cell_y)) >= 253
+                    or cost((cell_x, cell_y + dy)) >= 253):
+                continue
+
+            if arrival_heading < 0:
+                if move_heading not in first_step_headings:
+                    continue
+            elif (not turn_clear(current_cell, arrival_heading, move_heading)
+                  or blocked(movement_masks[move_heading], current_cell)
+                  or blocked(heading_masks[move_heading * 4], next_cell)):
+                continue
+
+            visited.add(next_state)
+            queue.append(next_state)
+
+    if stop_after_first:
+        for target in target_cells:
+            if target in reachable:
+                return {target}
+        return set()
+    return reachable
 
 
 def _neighbors(x, y, width, height):
@@ -472,8 +895,17 @@ def frontier_clusters(width, height, data):
 
 def costmap_frontier_candidates(
         clusters, grid, costmap, blacklist=(), robot_world=None,
-        min_goal_distance=0.0, footprint=None):
-    """Select map-grid endpoints admissible in costmap and goal distance."""
+        min_goal_distance=0.0, footprint=None, robot_yaw=0.0,
+        require_path_clear=False, return_diagnostics=False):
+    """Select endpoints admissible in costmap, distance, and optional path.
+
+    The default return value remains the candidate-cell list.  When
+    ``return_diagnostics`` is true, return ``(candidates, diagnostics)``;
+    each diagnostic records whether the cluster has an admissible endpoint,
+    whether the heading-aware route proof reached one, and the resulting
+    safety/route classification.  The diagnostics are observation-only and
+    use the same gates as the normal selector.
+    """
     map_geometry = None
     try:
         map_geometry = _grid_geometry(grid.info, allow_identity=True)
@@ -498,10 +930,17 @@ def costmap_frontier_candidates(
         min_goal_distance = float(min_goal_distance)
         if not math.isfinite(min_goal_distance) or min_goal_distance < 0.0:
             return None
+        if type(require_path_clear) is not bool:
+            return None
         if robot_world is not None:
             robot_x, robot_y = (float(value) for value in robot_world)
             if not all(math.isfinite(value) for value in (robot_x, robot_y)):
                 return None
+        if not math.isfinite(float(robot_yaw)):
+            return None
+        robot_yaw = float(robot_yaw)
+        if require_path_clear and robot_world is None:
+            return None
         blacklisted = set(blacklist)
         footprint_cache_miss = object()
         footprint_clear_cache = {}
@@ -519,7 +958,16 @@ def costmap_frontier_candidates(
             return cached
 
         candidates = []
-        for representative, cells in clusters:
+        candidate_records = []
+        diagnostics = []
+        for cluster_index, (representative, cells) in enumerate(clusters):
+            diagnostic = {
+                "cluster_index": cluster_index,
+                "classification": "BLOCKED_SAFETY",
+                "safe_endpoint_count": 0,
+                "reachable_endpoint_count": 0,
+            }
+            diagnostics.append(diagnostic)
             eligible = []
             for cell in cells:
                 if cell in blacklisted:
@@ -541,25 +989,8 @@ def costmap_frontier_candidates(
                 representative_cost is not None
                 and representative_cost < 253
                 and footprint_clear(representative, representative_world))
-            if representative in eligible and representative_clear:
-                candidates.append(representative)
-                continue
-
-            if validated_footprint is None:
-                admissible = []
-                for cell in eligible:
-                    cost = _endpoint_cost(
-                        map_geometry, costmap_geometry_value, data, cell)
-                    world = _cell_world(map_geometry, cell)
-                    if cost is not None and cost < 253:
-                        distance = hypot(
-                            cell[0] - representative[0],
-                            cell[1] - representative[1])
-                        admissible.append((cost, distance, cell[1], cell[0], cell))
-                if admissible:
-                    candidates.append(min(admissible)[-1])
-                continue
-
+            representative_selected = (
+                representative in eligible and representative_clear)
             ranked = []
             for cell in eligible:
                 cost = _endpoint_cost(
@@ -570,14 +1001,57 @@ def costmap_frontier_candidates(
                 if world is None:
                     continue
                 distance = hypot(
-                    cell[0] - representative[0],
-                    cell[1] - representative[1])
+                        cell[0] - representative[0],
+                        cell[1] - representative[1])
                 ranked.append((cost, distance, cell[1], cell[0], cell, world))
             ranked.sort(key=lambda item: item[:5])
-            for _cost, _distance, _y, _x, cell, world in ranked:
-                if footprint_clear(cell, world):
-                    candidates.append(cell)
-                    break
+            safe_ranked = [
+                item for item in ranked if footprint_clear(item[-2], item[-1])]
+            diagnostic["safe_endpoint_count"] = len(safe_ranked)
+            if not require_path_clear:
+                if representative_selected:
+                    candidates.append(representative)
+                    diagnostic["reachable_endpoint_count"] = 1
+                elif safe_ranked:
+                    candidates.append(safe_ranked[0][-2])
+                    diagnostic["reachable_endpoint_count"] = 1
+                if diagnostic["reachable_endpoint_count"]:
+                    diagnostic["classification"] = "REACHABLE"
+                continue
+
+            if representative_selected:
+                candidate_records.append((
+                    cluster_index, representative, representative_world))
+            for _cost, _distance, _y, _x, cell, world in safe_ranked:
+                if not representative_selected or cell != representative:
+                    candidate_records.append((cluster_index, cell, world))
+        if not require_path_clear:
+            return (candidates, diagnostics) if return_diagnostics else candidates
+
+        target_cells = []
+        target_records = []
+        for cluster_index, candidate, world in candidate_records:
+            target_cell = (
+                None if world is None
+                else _costmap_cell(costmap_geometry_value, world))
+            if target_cell is not None:
+                target_cells.append(target_cell)
+                target_records.append((cluster_index, candidate, target_cell))
+        reachable = _reachable_costmap_cells(
+            costmap_geometry_value, data, (robot_x, robot_y), robot_yaw,
+            target_cells,
+            validated_footprint, stop_after_first=True)
+        for cluster_index, candidate, target_cell in target_records:
+            if target_cell in reachable:
+                candidates.append(candidate)
+                diagnostics[cluster_index]["reachable_endpoint_count"] += 1
+        for diagnostic in diagnostics:
+            if diagnostic["reachable_endpoint_count"]:
+                diagnostic["classification"] = "REACHABLE"
+            elif diagnostic["safe_endpoint_count"]:
+                diagnostic["classification"] = "BLOCKED_ROUTE"
+        if return_diagnostics:
+            return candidates, diagnostics
         return candidates
     except (AttributeError, TypeError, ValueError, OverflowError):
         return None

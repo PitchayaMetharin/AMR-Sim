@@ -114,6 +114,10 @@ def test_canonical_interfaces_have_one_named_authority():
         "type": "diagnostic_msgs/msg/DiagnosticArray",
         "publisher": "amr_exploration/frontier_explorer",
     }
+    assert topics["/amr/mission/status"] == {
+        "type": "diagnostic_msgs/msg/DiagnosticArray",
+        "publisher": "amr_mission/mission_supervisor_node",
+    }
     for service_name in ("/amr/exploration/start", "/amr/exploration/stop"):
         assert contract["services"][service_name] == {
             "type": "std_srvs/srv/Trigger",

@@ -10,6 +10,9 @@ from launch_ros.actions import Node
 def generate_launch_description():
     parameters = os.path.join(
         get_package_share_directory("amr_navigation"), "config", "planner.yaml")
+    lattice_file = os.path.join(
+        get_package_share_directory("nav2_smac_planner"), "sample_primitives",
+        "5cm_resolution", "0.5m_turning_radius", "diff", "output.json")
     lifecycle_manager = Node(
         package="nav2_lifecycle_manager",
         executable="lifecycle_manager",
@@ -25,7 +28,7 @@ def generate_launch_description():
             name="planner_server",
             namespace="/amr",
             output="screen",
-            parameters=[parameters],
+            parameters=[parameters, {"GridBased.lattice_filepath": lattice_file}],
         ),
         Node(
             package="nav2_smoother",
