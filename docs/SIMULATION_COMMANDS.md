@@ -5,22 +5,28 @@ terminal. It applies to the laptop-only ROS 2 Humble and Gazebo Harmonic
 workspace. It does not make physical-robot, hardware, or functional-safety
 claims.
 
-Current Phase 14 status: Product 101 (1 kg) and Product 102 (3 kg) passed the
-approved autonomous factory-cycle scope. Normal-cycle evidence is retained in
+Current factory status (2026-10-01): full simulation passed in
+`phase14_evidence/factory_full_validation_20261001_23/` with Gazebo GUI, ROS domain 232,
+runner exit 0 with all 17 recorded mandatory gates plus clean teardown. Scope: Product 101 (1 kg), Product 102
+(3 kg), then registered home; both final slots, fresh empty stow/detach,
+unchanged analyzers and clean owned teardown passed. Independent source review
+remains pending. Earlier normal-cycle reports are retained in
 `.ros_logs/amr_autonomous_factory_20260908_11/` and
 `.ros_logs/amr_autonomous_factory_20260908_13/`; cancellation evidence is in
 `_14/`, and graceful-stop evidence is in `_16/`. Product 103 (5 kg) and Gate 7
 are out of scope and remain disabled. Do not rerun an accepted product merely
-for progression. The `.ros_logs` retention set is intentionally capped below
-1 GB; use a targeted recorder and retain only the gate/analyzer/status evidence
-needed for the run.
+for progression. All retained logs together must stay <=500,000,000 bytes and
+all retained evidence together must stay <=500,000,000 bytes, counting archives,
+temporary decoding and retained bin content. Check logical and allocated sizes.
 
-As of 2026-09-12, Phase 15 packets P0 through P8 are implemented and
-independently accepted at the source/offline boundary. No fresh canonical
-factory acceptance runtime was run after the factory CLI timeout and
-cycle-adapter shutdown fixes. The installed Python API still exposes no
-publisher GID, so per-edge TF publisher ownership remains fail-closed;
-aggregate `/tf` publisher lists are not a substitute.
+As of 2026-09-27, Phase 15 packets P0 through P8 are implemented and
+independently accepted at the source/offline boundary. The existing Phase 14
+Product 101/102 runtime runs remain the approved factory-simulation boundary.
+The later factory CLI, cycle-adapter shutdown, dispatch clearance, startup
+forwarding and home-route fixes were exercised together by the passing run21.
+The installed Python API still exposes no publisher GID, so per-edge TF
+publisher ownership remains fail-closed; aggregate `/tf` publisher lists are
+not a substitute.
 The recorded Phase 15 mapping runtime is accepted at the safe terminal
 boundary: its non-faulted outcome was `INCOMPLETE` and its bounded runtime
 report passed. Human map-quality approval, promotion, canonical-map
@@ -47,7 +53,7 @@ and unresolved local model references.
 The current navigation chain is:
 
 ```text
-NavFn planner -> collision-checked SimpleSmoother -> Regulated Pure Pursuit
+SmacPlannerLattice planner -> collision-checked SimpleSmoother -> Regulated Pure Pursuit
 -> /amr/mpc/cmd_vel -> command_arbitration_node -> base_adapter_node -> Gazebo
 ```
 
@@ -58,7 +64,13 @@ Repeat the same setup in every terminal belonging to that run. Source the
 workspace environment before exporting the run-specific domain because
 `amr_ros_env.sh` sets a default domain.
 
-Keep the complete `.ros_logs` directory below 1 GB. Do not use
+Keep each retained log/evidence total below 500 MB across the workspace. Check:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 phase14_evidence/factory_runtime_tools/storage_budget.py
+```
+
+Do not use
 `ros2 bag record -a` for routine work: high-rate clock, sensor, and controller
 topics can create multi-gigabyte bags in minutes. Record only the explicit
 topics required by the gate being exercised, and preserve the gate/analyzer/
@@ -106,6 +118,96 @@ colcon test-result --verbose
 
 Do not start a product run if the relevant test result reports an error or
 failure.
+
+### Bounded AWS exploration evidence runner
+
+For the portable AWS exploration gate, use one fresh absolute run directory and
+run the recorder, observer, diagnostics, and launch through the maintained
+runner. The runner validates `ROS_DOMAIN_ID` in the inclusive range `0`–`232`,
+sets `AMR_RUN_ID`, `GZ_PARTITION`, and `ROS_LOG_DIR` for every child, and
+rejects a reused run directory. The observer must write a JSON record to
+`verdict.json` with `state` set to `COMPLETE`, `INCOMPLETE`, or `FAULT` and
+explicit `active`, `pending`, `cancel_owned_motion`, and `cancel_target`
+fields. A `COMPLETE` result is accepted only when all four fields prove that
+no motion remains owned by the Explorer.
+
+Use the maintained diagnostics launcher for the GUI reproduction. It supplies
+the complete recorder topic set, enables the observation-only Gazebo evidence
+plugin, subscribes to simulation evidence with `--simulation-evidence`, and
+keeps recorder, monitor, diagnostics, and launch in one owned session:
+
+```bash
+cd /home/pete/amr_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+RUN_DIR="$PWD/.ros_logs/aws_warehouse_runner_01"
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  src/amr_simulation/scripts/aws_exploration_diagnostics_run.py \
+  --run-dir "$RUN_DIR" --ros-domain-id 232 --workspace "$PWD"
+```
+
+Use a fresh run directory and an unused domain for every attempt. The
+diagnostics launcher starts Gazebo and RViz (`headless:=false`,
+`software_rendering:=auto`, `rviz:=true`) and autostarts exploration. Stop at
+the first durable fault or terminal outcome; do not inspect the active bag.
+The recorder is finalized before the runner performs any bag inspection.
+
+The runner records child PIDs, process groups, session IDs, start ticks, exit
+codes, first-failure evidence, cleanup escalation, terminal evidence, and the
+final classification in `run.json`, `processes.json`, `events.jsonl`, and
+`result.json`. It detects smoothing/path-following abort logs and treats
+recorder failure, observer failure, interruption, and launch exit as distinct
+non-passing outcomes. It sends bounded `SIGINT`/`SIGTERM`/`SIGKILL` cleanup to
+every descendant in the owned session and verifies that the session is empty.
+
+Never run `ros2 bag info`, SQLite, `rosbag2_py`, or an integrity query against
+the active bag. The runner performs optional bag checks only after the recorder
+and every run-owned process have exited; use a new run directory for every
+retry. A successful source test or a nonzero bag row count is not AWS runtime
+acceptance: the final gate still requires a fresh, non-faulted `COMPLETE` with
+continued mapping through reachable shelf areas.
+
+### TF2 runtime overlay for AWS exploration
+
+The workspace vendors the installed ROS Humble `tf2` 0.25.23 source with a
+small `BufferCore` callback-lock fix. It prevents the `waitForTransform` /
+`setTransform` lock inversion that can freeze a costmap's private TF path while
+external `/tf` continues to update. The overlay is ABI-compatible with the
+Humble `tf2_ros` package and must be built before the AWS runtime:
+
+```bash
+cd /home/pete/amr_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select tf2 --symlink-install --allow-overriding tf2 \
+  --cmake-args -DBUILD_TESTING=ON
+source install/setup.bash
+colcon test --packages-select tf2 --event-handlers console_direct+
+colcon test-result --verbose
+```
+
+Confirm that the sourced package resolves to this workspace before launching:
+
+```bash
+ros2 pkg prefix tf2
+readlink -f "$(ros2 pkg prefix tf2)/lib/libtf2.so"
+```
+
+For a clean rollback comparison, stop all ROS/Gazebo processes, source the
+workspace so its launch packages remain available, and preload the underlay
+library for the comparison run. Do not mix old processes with the new library:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export LD_PRELOAD=/opt/ros/humble/lib/libtf2.so
+# launch the comparison run here
+unset LD_PRELOAD
+```
+
+The rollback is runtime-only and does not remove the source overlay or delete
+build/install artifacts. The TF2 test pass is source evidence; AWS acceptance
+still requires a fresh simulation with advancing local costmap/footprint
+timestamps and no controller progress failure.
 
 ## Standalone simulation
 
@@ -162,7 +264,7 @@ frontier explorer:
 ros2 launch amr_simulation portable_exploration.launch.py \
   world:=/home/pete/amr_ws/src/amr_simulation/worlds/amr_world.sdf \
   initial_x:=0.0 initial_y:=0.0 initial_z:=0.12 initial_yaw:=0.0 \
-  resource_paths:='' headless:=false rviz:=true \
+  resource_paths:='' headless:=false software_rendering:=auto rviz:=true \
   auto_start_exploration:=true
 ```
 
@@ -181,7 +283,7 @@ includes the portable launch once:
 
 ```bash
 ros2 launch amr_simulation aws_warehouse_exploration.launch.py \
-  headless:=false rviz:=true auto_start_exploration:=true
+  headless:=false software_rendering:=auto rviz:=true auto_start_exploration:=true
 ```
 
 The SDF contains exact, pinned OpenRobotics Fuel model URLs. Model bundles are
@@ -221,7 +323,82 @@ copy a candidate into the canonical map directory, replace a canonical map, or
 infer human quality approval from this runtime result. Only an intentional
 `auto_start_exploration:=false` launch uses the start service, after readiness.
 
+### AWS static-map localization with the saved candidate
+
+The maintained AWS runner saves `evidence/aws_map.yaml` before shutting down
+the mapping graph. For a manual mapping launch, save and validate the candidate
+while SLAM Toolbox is still running, then stop that launch. Do not run SLAM and
+AMCL together: they must not publish competing `map -> odom` transforms.
+
+Use the same AWS world and the saved YAML in a new run with a fresh run ID and
+an unused ROS domain from 0 through 232:
+
+```bash
+aws_run_id=aws_warehouse_runner_01  # replace with the completed run ID
+aws_run_dir="$PWD/.ros_logs/$aws_run_id"
+map_yaml="$aws_run_dir/evidence/aws_map.yaml"
+
+# In this terminal, repeat the "Before every run" setup above first, using this
+# fresh identity and domain:
+export AMR_RUN_ID=aws_warehouse_localization_01
+export GZ_PARTITION="amr_${AMR_RUN_ID}"
+export ROS_DOMAIN_ID=231
+export ROS_LOG_DIR="$PWD/.ros_logs/$AMR_RUN_ID"
+mkdir -p "$ROS_LOG_DIR"
+
+ros2 launch amr_simulation aws_warehouse_localization.launch.py \
+  map_yaml:="$map_yaml" \
+  initial_x:=0.0 initial_y:=0.0 initial_z:=0.12 initial_yaw:=0.0 \
+  headless:=false software_rendering:=auto rviz:=true
+```
+
+This launch starts `map_server` and AMCL, does not start SLAM Toolbox or the
+frontier explorer, and uses AMCL as the sole `map -> odom` owner. The initial
+pose must match the map datum used when the candidate was saved.
+
 ## Factory and Gate 6 simulation
+
+### Full validated workflow — one terminal
+
+This owned workflow passed recorded Gazebo GUI run23. It launches the
+factory, MoveIt, recorder and final observer; runs Product 101, Product 102 and
+home; then checks finalized evidence and tears down only its owned processes.
+Do not start separate launch/recorder/product terminals alongside this command.
+Choose a fresh run ID and an unused ROS domain in 0–232. The command requires
+150 MB free in each storage category before launch, including working/cleanup
+space. If that check fails, retire superseded disposable workspace artifacts
+while retaining the latest passing evidence before starting another recording.
+
+```bash
+set -e
+cd /home/pete/amr_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+PYTHONDONTWRITEBYTECODE=1 python3 -c \
+  'import sys; sys.path.insert(0, "phase14_evidence/factory_runtime_tools"); import storage_budget; print(storage_budget.check(reserve=150000000))'
+factory_run="factory_full_validation_$(date +%Y%m%d_%H%M%S)"
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  phase14_evidence/factory_runtime_tools/run_full_factory.py \
+  --run-id "$factory_run" --domain 232 --gui
+```
+
+Success requires runner exit 0 and `success: true` in
+`phase14_evidence/$factory_run/result.json`, all 17 recorded mandatory gates, both strict
+analyzers, fresh final slot/home/stow/detach proof and clean teardown. The runner
+uses every required topic, lossless zstd FILE recording in 25 MB parts, bounded
+one-part decoding and periodic storage checks with 50 MB reserved for cleanup.
+It stops at the first mandatory failure. An ordinary product CLI success alone
+does not establish full simulation acceptance.
+
+`--gui` displays Gazebo while retaining the complete monitored workflow. Omit
+that flag for headless execution. Run23 passed functional gates; its pickupB
+heading was already within tolerance, so the pathological heading-correction
+branch and complete stability optimization remain unverified. Each simulation
+also requires a measured stability report of at most60 lines.
+
+The following multi-terminal commands are for manual GUI use and inspection.
+The approved home/start pose is now `(-4.5,-1.5,0)`; the dispatch/home clearance
+motion is handled inside the supervisors and requires no new operator action.
 
 The factory launch uses the registered static factory map and AMCL. It starts
 the localization, perception, Nav2 planner/smoother, RPP controller,
@@ -238,7 +415,7 @@ The canonical autonomous factory launch is:
 ros2 launch amr_factory factory_autonomous.launch.py \
   factory_attachment:=true headless:=true software_rendering:=false \
   require_hardware_rendering:=true control_mode:=autonomous \
-  initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
+  initial_x:=-4.5 initial_y:=-1.5 initial_yaw:=0.0
 ```
 
 The lower-level `factory_localization.launch.py` remains useful for manual
@@ -260,13 +437,13 @@ ros2 run amr_factory factory_runtime_preflight.py host \
 ros2 launch amr_factory factory_autonomous.launch.py \
   headless:=false software_rendering:=false \
   require_hardware_rendering:=true factory_attachment:=true \
-  control_mode:=autonomous initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
+  control_mode:=autonomous initial_x:=-4.5 initial_y:=-1.5 initial_yaw:=0.0
 
 # Headless mode:
 # ros2 launch amr_factory factory_autonomous.launch.py \
 #   headless:=true software_rendering:=false \
 #   require_hardware_rendering:=true factory_attachment:=true \
-#   control_mode:=autonomous initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
+#   control_mode:=autonomous initial_x:=-4.5 initial_y:=-1.5 initial_yaw:=0.0
 ```
 
 If the host preflight fails, stop and fix the host/device access problem. Do
@@ -486,16 +663,38 @@ ros2 launch amr_manipulation move_group.launch.py
 
 Wait until MoveIt reports that the planning group is ready.
 
+### RViz — arm motion planning
+
+After `move_group` is ready, open the installed MoveIt RViz template. The
+`-f` option replaces the template placeholder with the mobile-manipulator root
+frame:
+
+```bash
+rviz2 \
+  -d /opt/ros/humble/share/moveit_setup_app_plugins/templates/config/moveit.rviz \
+  -f base_footprint \
+  --ros-args -p use_sim_time:=true
+```
+
+In the MotionPlanning panel, select planning group `manipulator`. The `gripper`
+group is available for the separate gripper check. Use `Plan` to inspect the
+trajectory first; `Execute` sends it to the simulated arm controller.
+
 ### Terminal 3 — readiness and graph inspection
 
-Paste the common setup, then run these read-only checks:
+Paste the common setup, then run this readiness sequence:
 
 ```bash
 ros2 run amr_factory factory_runtime_preflight.py graph \
   --evidence-dir "$ROS_LOG_DIR/evidence"
 
+python3 phase14_evidence/factory_runtime_tools/activate_arbitration.py
+
 ros2 run amr_factory factory_runtime_preflight.py lifecycle \
   --evidence-dir "$ROS_LOG_DIR/evidence/lifecycle_preflight"
+
+ros2 run amr_factory factory_runtime_preflight.py moveit \
+  --evidence-dir "$ROS_LOG_DIR/evidence/moveit_preflight"
 
 ros2 action list
 ros2 control list_controllers -c /controller_manager
@@ -618,6 +817,8 @@ cat > "$recorder_qos" <<'YAML'
 YAML
 
 ros2 bag record --include-hidden-topics --include-unpublished-topics \
+  --compression-mode file --compression-format zstd \
+  --compression-queue-size 0 --compression-threads 2 --max-bag-size 25000000 \
   --qos-profile-overrides-path "$recorder_qos" \
   -o "$ROS_LOG_DIR/product_evidence" \
   /clock /tf /tf_static \
@@ -678,14 +879,18 @@ Wait for `Recording...` before starting the stage. Stop the recorder with
 `Ctrl-C` only after the stage has finished so the remaining messages are
 written.
 
-The recorder above is the historical full Gate 6 analyzer contract. It is not
-the default because it includes high-rate sensors and can exceed 1 GB quickly.
+The recorder above is the historical full Gate 6 topic contract, now recorded
+with lossless split compression. Compression alone does not enforce the total
+500 MB caps or establish final acceptance; use the owned workflow above for
+the complete normal-cycle evidence and its live storage monitor.
 For routine cancellation, graceful-stop, or status/ownership evidence, use
 this bounded recorder instead (it deliberately omits `/clock`, lidar, plans,
 and other high-rate streams):
 
 ```bash
 ros2 bag record --include-hidden-topics \
+  --compression-mode file --compression-format zstd \
+  --compression-queue-size 0 --compression-threads 2 --max-bag-size 25000000 \
   --qos-profile-overrides-path "$recorder_qos" \
   -o "$ROS_LOG_DIR/compact_evidence" \
   /amr/factory/status /amr/manipulation/status /amr/manipulation/internal/status \
@@ -722,11 +927,12 @@ through the registry-backed factory CLI. Product 103 (5 kg) is disabled and
 must not be started:
 
 ```bash
+set -e
 ros2 run amr_factory factory_cli.py list
 ros2 run amr_factory factory_cli.py mode autonomous
 ros2 run amr_factory factory_cli.py send pickup_a dispatch --timeout 240
 ros2 run amr_factory factory_cli.py send pickup_b dispatch --timeout 240
-ros2 run amr_factory factory_cli.py loop pickup_a pickup_b --cycles 1 --finish stay
+ros2 run amr_factory factory_cli.py go home --timeout 180
 ros2 run amr_factory factory_cli.py status
 ```
 
@@ -735,6 +941,10 @@ Use `factory_cli.py stop` to finish the active delivery and stop a sequence,
 `factory_cli.py go home` only while idle with fresh safe empty-stowed proof.
 Stop at the first failed gate and preserve the run evidence. Do not rerun an
 accepted product merely for progression.
+
+An optional sequence request remains available as
+`factory_cli.py loop pickup_a pickup_b --cycles 1 --finish home --timeout 3600`.
+Run21 used the separate `send`, `send`, `go home` calls shown above.
 
 The former standalone `gate6_mass_stage` and higher-mass aliases remain
 historical diagnostic entry points. They are not the current autonomous
@@ -750,7 +960,7 @@ ros2 launch amr_factory factory_autonomous.launch.py \
   headless:=false software_rendering:=false \
   require_hardware_rendering:=true \
   factory_attachment:=true control_mode:=autonomous \
-  initial_x:=-4.5 initial_y:=0.0 initial_yaw:=0.0
+  initial_x:=-4.5 initial_y:=-1.5 initial_yaw:=0.0
 ```
 
 `factory_demo.launch.py` is legacy/optional and is not a current acceptance
@@ -766,8 +976,8 @@ ros2 run amr_factory factory_cli.py mode autonomous
 ros2 run amr_factory factory_cli.py send pickup_a dispatch --timeout 240
 ```
 
-Use the CLI only for the boundaries it exposes. Its high-level transport
-path is separate from the manually verified `gate6_mass_stage` acceptance.
+The passing run21 exercises the high-level transport and home path through
+this CLI. Historical standalone `gate6_mass_stage` runs are separate evidence.
 
 ## Read-only inspection
 

@@ -1,7 +1,9 @@
 import hashlib
+import importlib.util
 import math
 import struct
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -13,6 +15,80 @@ from ament_index_python.packages import get_package_prefix
 ROOT = Path(__file__).resolve().parents[1]
 LIDAR_SELF_VISIBILITY_FLAG = 0x01
 LIDAR_VISIBILITY_MASK = 0xFFFFFFFE
+
+
+@pytest.fixture
+def cad_derivation():
+    spec = importlib.util.spec_from_file_location(
+        "amr_cad_derivation", ROOT / "scripts" / "derive_cad_meshes.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def cad_triangle(*, reverse=False, normal=1.0, attribute=0):
+    vertices = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    if reverse:
+        vertices = vertices[:3] + vertices[6:] + vertices[3:6]
+    return struct.pack("<12fH", 0.0, 0.0, normal, *vertices, attribute)
+
+
+@pytest.mark.parametrize("change, failure", [
+    ("triangles", "triangle count changed"),
+    ("topology", "component count changed"),
+    ("mapping", "mapped component 0 changed"),
+    ("winding", "oriented geometry"),
+    ("normal", "oriented geometry"),
+    ("attribute", "oriented geometry"),
+    ("multiplicity", "oriented geometry"),
+])
+def test_v2_gate_rejects_changed_structure(cad_derivation, change, failure):
+    # Repeat one triangle to exercise the real required count without creating
+    # a synthetic full robot; the source identity is checked separately below.
+    triangle = cad_triangle()
+    records = (triangle,) * 266_696
+    reference = records
+    component_count = 1
+    mapping = ((0, 266_696, (0, 0, 0), (1_000_000, 1_000_000, 0)),)
+    if change == "triangles":
+        records = records[:-1]
+    elif change == "topology":
+        component_count = 2
+    elif change == "mapping":
+        mapping = ((0, 266_695, (0, 0, 0), (1_000_000, 1_000_000, 0)),)
+    elif change == "winding":
+        reference = (cad_triangle(reverse=True),) + records[1:]
+    elif change == "normal":
+        reference = (cad_triangle(normal=-1.0),) + records[1:]
+    elif change == "attribute":
+        reference = (cad_triangle(attribute=1),) + records[1:]
+    elif change == "multiplicity":
+        reference = records[:-1]
+    with pytest.raises(RuntimeError, match=failure):
+        cad_derivation.validate_v2_records(
+            "fixture.STL", records, component_count, mapping, reference)
+
+
+def test_v2_gate_rejects_changed_source_hash(cad_derivation, tmp_path):
+    source = tmp_path / "amr_v2" / "meshes"
+    source.mkdir(parents=True)
+    (source / "base_link.STL").write_bytes(b"changed export")
+    with pytest.raises(RuntimeError, match="SHA256 changed"):
+        cad_derivation.validate_v2_sources(tmp_path)
+
+
+def test_v2_gate_allows_regeneration_without_existing_outputs(cad_derivation, tmp_path):
+    workspace = ROOT.parents[1]
+    (tmp_path / "amr_v2").symlink_to(workspace / "amr_v2", target_is_directory=True)
+    (tmp_path / "amr_urdf_cad").symlink_to(workspace / "amr_urdf_cad", target_is_directory=True)
+    assert not (tmp_path / "src").exists()
+    assert cad_derivation.main(["--root", str(tmp_path)]) == 0
+    generated = tmp_path / "src" / "amr_description" / "meshes"
+    names = {path.name for path in generated.glob("*.STL")}
+    assert len(names) == 13
+    for name in names:
+        assert (generated / name).read_bytes() == (ROOT / "meshes" / name).read_bytes()
 
 
 def stl_vertices(path):

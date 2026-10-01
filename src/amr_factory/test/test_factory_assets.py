@@ -68,7 +68,7 @@ def test_station_registry_is_the_exact_phase14_pose_and_tag_contract():
     assert registry["station_tag_size"] == 0.10
     assert registry["max_hamming"] == 0
     expected = {
-        "home": ((-4.5, 0.0, 0.0), None, None, None),
+        "home": ((-4.5, -1.5, 0.0), None, None, None),
         "pickup_a": ((1.5, 3.0, 0.0), (2.4, 3.0, 0.0),
                      (1.9, 3.0, 0.0), 10),
         "pickup_b": ((1.5, 0.0, 0.0), (2.4, 0.0, 0.0),
@@ -617,3 +617,13 @@ def test_factory_has_all_fixed_tag_ids_and_product_handle_geometry():
             "./plugin[@name='gz::sim::systems::PosePublisher']")
         assert publisher.find("publish_model_pose").text == "true"
         assert publisher.find("use_pose_vector_msg").text == "false"
+
+
+def test_home_relocation_matches_factory_startup_defaults_and_amcl():
+    home = yaml.safe_load((ROOT / "config" / "stations.yaml").read_text())["stations"]["home"]["approach"]
+    initial = yaml.safe_load((ROOT / "config" / "amcl.yaml").read_text())["/amr/amcl"]["ros__parameters"]["initial_pose"]
+    assert (initial["x"], initial["y"], initial["yaw"]) == (home["x"], home["y"], home["yaw"])
+    for filename in ("factory_autonomous.launch.py", "factory_demo.launch.py", "factory_localization.launch.py"):
+        source = (ROOT / "launch" / filename).read_text()
+        for name, value in (("initial_x", home["x"]), ("initial_y", home["y"]), ("initial_yaw", home["yaw"])):
+            assert f'DeclareLaunchArgument("{name}", default_value="{value}")' in source

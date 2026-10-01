@@ -2,7 +2,8 @@
 """Derive deterministic ROS 2 meshes from the legacy AMR CAD export.
 
 The SolidWorks export is intentionally kept outside the ROS 2 package.  This
-script is the single, fail-closed conversion step for its visual meshes:
+script gates the verified v2 chassis, LiDAR and caster provenance before the
+legacy conversion step, preserving all thirteen output files byte-for-byte:
 
 * the base export is hash- and topology-gated before its baked arm, mounting
   plate, and pedestal geometry are excluded;
@@ -17,6 +18,7 @@ deterministic bytes that would be generated without changing any file.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import struct
 import sys
@@ -47,6 +49,121 @@ CASTER_ASSETS = (
     "right_caster_front_link.STL",
     "right_caster_back_link.STL",
 )
+
+
+# Approved v2 source/component identities; visual equivalence does not authorize
+# importing its repeated assembly, baked arm, camera joint, or inertias.
+V2_RAW_MESHES = Path("amr_v2") / "meshes"
+V2_IDENTITIES = {
+    "base_link.STL": (
+        "2d168ef5fd088472cfbf7c89d2675cb2504042dca1eca21f56fed64d30946a4b",
+        "b0f27db25987905634d2bff27f52c68fd1fe90f1ce1d0977ec57de63eb44d015", 111, (
+            (10, 3838, (-408000, -253000, -20000), (408000, 253000, 330000)),
+            (11, 4536, (-405000, -250000, -20000), (405000, 250000, 165838)),
+            (12, 96, (-400000, -80000, -20000), (-220000, -40000, 20000)),
+            (13, 96, (-400000, 40000, -20000), (-220000, 80000, 20000)),
+            (14, 96, (-220000, -245000, -20000), (-180000, 245000, 20000)),
+            (15, 320, (-180000, -120000, -20000), (220000, 120000, 20000)),
+            (16, 96, (220000, -80000, -20000), (400000, -40000, 20000)),
+            (17, 96, (220000, 40000, -20000), (400000, 80000, 20000)),
+            (18, 1024, (-387000, -232000, 23000), (269688, 232000, 198000)),
+            (20, 284, (308000, 150317, 37000), (388022, 233000, 40000)),
+            (21, 128, (-27368, -167501, 41917), (25895, -142501, 62000)),
+            (22, 128, (-27368, 142500, 41917), (25895, 167500, 62000)),
+            (27, 2384, (116000, -182501, 71024), (144000, -173501, 98976)),
+            (28, 2384, (116000, -159501, 71024), (144000, -150501, 98976)),
+            (29, 2384, (116000, -136501, 71024), (144000, -127501, 98976)),
+            (30, 2384, (116000, 127500, 71024), (144000, 136500, 98976)),
+            (31, 2384, (116000, 150500, 71024), (144000, 159500, 98976)),
+            (32, 2384, (116000, 173500, 71024), (144000, 182500, 98976)),
+            (33, 144, (126000, -182501, 81061), (134000, -127501, 88939)),
+            (34, 144, (126000, 127500, 81061), (134000, 182500, 88939)),
+            (35, 816, (87010, -177501, 137862), (143046, -132501, 234587)),
+            (36, 816, (87010, 132500, 137862), (143046, 177500, 234587)),
+            (37, 2548, (122000, -180001, 142000), (138000, -175001, 158000)),
+            (38, 2548, (122000, -135001, 142000), (138000, -130001, 158000)),
+            (39, 2548, (122000, 130000, 142000), (138000, 135000, 158000)),
+            (40, 2548, (122000, 175000, 142000), (138000, 180000, 158000)),
+            (41, 144, (126000, -180001, 146061), (134000, -130001, 153939)),
+            (42, 144, (126000, 130000, 146061), (134000, 180000, 153939)),
+            (43, 6940, (66134, -173610, 164256), (132527, -136393, 267167)),
+            (44, 6940, (66134, 136391, 164256), (132527, 173609, 267167)),
+            (45, 8024, (55512, -168501, 187959), (120972, -141501, 293773)),
+            (46, 8024, (55512, 141500, 187959), (120972, 168500, 293773)),
+            (47, 1362, (-28500, -20950, 198000), (28500, 20950, 221600)),
+            (48, 2460, (118518, 253000, 230518), (177494, 253500, 289482)),
+            (49, 1170, (129494, 227058, 237657), (166506, 241110, 288871)),
+            (50, 1514, (128003, 241100, 240000), (167997, 278950, 280000)),
+            (51, 3678, (131219, 207400, 241210), (147007, 235025, 282391)),
+            (52, 3644, (129486, 207400, 242070), (145274, 235025, 283251)),
+            (53, 1368, (130883, 219100, 245271), (140554, 221400, 254705)),
+            (54, 2054, (132719, 208900, 246988), (138718, 219400, 252988)),
+            (55, 3490, (52891, -180902, 248627), (102379, -129101, 275927)),
+            (56, 3490, (52891, 129099, 248627), (102379, 180901, 275927)),
+            (57, 12, (141168, 212700, 255503), (141924, 213900, 258051)),
+            (58, 12, (141168, 225300, 255503), (141924, 226500, 258051)),
+            (59, 12, (132759, 212700, 257083), (133515, 213900, 259632)),
+            (60, 12, (132759, 225300, 257083), (133515, 226500, 259632)),
+            (61, 608, (133995, 226073, 259300), (142497, 233900, 265161)),
+            (62, 12, (142978, 212700, 264829), (143734, 213900, 267378)),
+            (63, 12, (142978, 225300, 264829), (143734, 226500, 267378)),
+            (64, 12, (134568, 212700, 266409), (135324, 213900, 268958)),
+            (65, 12, (134568, 225300, 266409), (135324, 226500, 268958)),
+            (66, 1368, (135644, 219100, 269813), (145315, 221400, 279247)),
+            (67, 2054, (137480, 208900, 271531), (143479, 219400, 277530)),
+            (68, 452, (23, -172501, 272647), (77579, -137501, 315757)),
+        )),
+    "lidar_front_link.STL": (
+        "72e0538007caa1e96a95d89a546f0bc063d8f6332fe0d42a93b0bd536f9e2523",
+        "737dc0e77d3624833792781a6a0ece65711039ab123ce93ca1e2cbfcbc8b3176", 113, (
+            (72, 24109, (-74048, -50892, -158719), (50892, 74044, 3065)),
+            (75, 152, (-48185, 3166, -148219), (-47086, 4265, -147719)),
+            (78, 70, (32149, -37244, -66579), (32616, -36835, -62686)),
+            (80, 1320, (-49009, -48932, -54686), (48262, 48365, -54470)),
+            (84, 152, (-30881, 26677, -54132), (-26685, 30874, -52102)),
+            (85, 152, (-12627, -41413, -54132), (-8431, -37216, -52102)),
+            (86, 152, (37214, 8441, -54132), (41410, 12637, -52102)),
+        )),
+    "lidar_back_link.STL": (
+        "806b377a345acd610c4d8d2cff22bfabb46543caa53f140c2c5b771857806162",
+        "90689416da03a53c39e551fa3ed06ecf463574ec95ba3989c30e3d5e3e660054", 111, (
+            (70, 24109, (-74048, -50892, -158719), (50892, 74044, 3065)),
+            (73, 152, (-48185, 3166, -148219), (-47086, 4265, -147719)),
+            (76, 70, (32149, -37244, -66579), (32616, -36835, -62686)),
+            (78, 1320, (-49009, -48932, -54686), (48262, 48365, -54470)),
+            (82, 152, (-30881, 26677, -54132), (-26685, 30874, -52102)),
+            (83, 152, (-12627, -41413, -54132), (-8431, -37216, -52102)),
+            (84, 152, (37214, 8441, -54132), (41410, 12637, -52102)),
+        )),
+    "left_caster_front_link.STL": (
+        "e72fd31b8311073b98cae9ca7ead0612a60d6e35fde535468e30dd7e68273741",
+        "9dcd8083014c0abb9ea07e5eb4f32364134a82ad8e2bb607cca6ccc06455671d", 111, (
+            (5, 3360, (-62441, -20955, -94233), (12441, 21110, -19367)),
+            (9, 2004, (-44076, -35000, -68850), (35000, 35000, 2200)),
+            (26, 3670, (-45118, -45118, 0), (45118, 45118, 11700)),
+        )),
+    "right_caster_front_link.STL": (
+        "8a66a92f90af43af7e2094f0befa3aecbbafd762fad10078eab9b582e4786887",
+        "02461a39b7cd3b74cf66a71f5fb11835ab435244452c3fdeef7f90a69cccad84", 113, (
+            (4, 3360, (-62441, -21110, -102433), (12441, 20955, -27567)),
+            (8, 2004, (-44076, -35000, -77050), (35000, 35000, -6000)),
+            (25, 3670, (-45118, -45118, -8200), (45118, 45118, 3500)),
+        )),
+    "left_caster_back_link.STL": (
+        "7813d350e7af5d3e9142e4e30429e7f7ebebef5b4eae9f9b61440deb20789fe7",
+        "f687ef11870a423b67671ba9a11727a25394c90550f9ffc79051c20c2b65dc17", 111, (
+            (3, 3360, (-12441, -20955, -94233), (62441, 21110, -19367)),
+            (7, 2004, (-35000, -35000, -68850), (44076, 35000, 2200)),
+            (24, 3670, (-45118, -45118, 0), (45118, 45118, 11700)),
+        )),
+    "right_caster_back_link.STL": (
+        "afec0b3a83e86aec415ea036b11e3175bf7e58da870a280cce35f2ec5ad3424a",
+        "a8595cf64b6da5fe3b75c1e8efde57a4c654123523e4e205217ae9452ceaa0b0", 111, (
+            (2, 3360, (-12441, -21110, -94233), (62441, 20955, -19367)),
+            (6, 2004, (-35000, -35000, -68850), (44076, 35000, 2200)),
+            (23, 3670, (-45118, -45118, 0), (45118, 45118, 11700)),
+        )),
+}
 
 
 @dataclass(frozen=True)
@@ -261,7 +378,57 @@ def derive_caster(root: Path, source_name: str) -> tuple[tuple[Path, bytes], tup
     )
 
 
+def oriented_records(records: tuple[bytes, ...]) -> Counter:
+    """Compare cyclic winding, normals, attributes and triangle multiplicity."""
+    signatures = []
+    for record in records:
+        values = struct.unpack("<12fH", record)
+        vertices = tuple(vertex_key(vertex) for vertex in record_vertices(record))
+        winding = min(vertices, vertices[1:] + vertices[:1], vertices[2:] + vertices[:2])
+        signatures.append((vertex_key(values[:3]), winding, values[12]))
+    return Counter(signatures)
+
+
+def validate_v2_records(source_name: str, records: tuple[bytes, ...],
+                        component_count: int, mapping: tuple,
+                        reference_records: tuple[bytes, ...]) -> None:
+    if len(records) != 266_696:
+        fail(f"{source_name} v2 triangle count changed: expected 266696, got {len(records)}")
+    components = connected_components(records)
+    if len(components) != component_count:
+        fail(f"{source_name} v2 component count changed: expected {component_count}, got {len(components)}")
+    selected = []
+    for index, count, lower, upper in mapping:
+        component = components[index]
+        if (component.triangle_count, component.lower, component.upper) != (count, lower, upper):
+            fail(f"{source_name} v2 mapped component {index} changed")
+        selected.extend(records[i] for i in component.triangle_indices)
+    if oriented_records(tuple(selected)) != oriented_records(reference_records):
+        fail(f"{source_name} v2 oriented geometry, normals, attributes or multiplicity changed")
+
+
+def validate_v2_sources(root: Path) -> None:
+    """Gate v2 provenance against legacy source derivation, never output meshes."""
+    for name, (v2_sha, legacy_sha, component_count, mapping) in V2_IDENTITIES.items():
+        source = root / V2_RAW_MESHES / name
+        legacy = root / RAW_MESHES / name
+        for path, expected_sha in ((source, v2_sha), (legacy, legacy_sha)):
+            require_file(path)
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha:
+                fail(f"{path} SHA256 changed: expected {expected_sha}")
+        _, records = read_binary_stl(source)
+        if name == "base_link.STL":
+            _, reference_bytes = derive_base(root)
+            reference_count = struct.unpack_from("<I", reference_bytes, 80)[0]
+            reference = tuple(reference_bytes[84 + 50*i:84 + 50*(i+1)]
+                              for i in range(reference_count))
+        else:
+            _, reference = read_binary_stl(legacy)
+        validate_v2_records(name, records, component_count, mapping, reference)
+
+
 def expected_outputs(root: Path) -> dict[Path, bytes]:
+    validate_v2_sources(root)
     outputs: dict[Path, bytes] = {}
     base_path, base_data = derive_base(root)
     outputs[base_path] = base_data

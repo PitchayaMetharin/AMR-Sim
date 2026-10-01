@@ -741,6 +741,19 @@ class ProductPreparation(Node):
         assert self._robot_pose is not None
         return _dock_travel_target(_pose_tuple(self._robot_pose), self.selected.dock)
 
+    def _align_dock_heading(
+        self, achieved: Tuple[float, float, float]
+    ) -> Tuple[float, float, float]:
+        achieved = _finite_values(achieved, "achieved dock terminal pose")
+        dock = _finite_values(self.selected.dock, "registered dock pose")
+        if len(achieved) != 3 or len(dock) != 3:
+            raise PreparationError("dock heading poses must contain x, y, yaw")
+        if _angle_error(achieved[2], dock[2]) <= DOCK_YAW_TOLERANCE_RAD:
+            # Preserve the registered precise position closure when yaw already fits.
+            return self._navigate(self.selected.dock, precise=True)
+        # The normal controller can rotate; keep its goal at achieved localized XY.
+        return self._navigate((achieved[0], achieved[1], dock[2]), precise=False)
+
     def _cancel_accepted_navigation_goal(self, goal_handle: object, label: str) -> None:
         """Cancel an accepted prep navigation goal and prove terminal CANCELED."""
         cancel_future = goal_handle.cancel_goal_async()  # type: ignore[attr-defined]
@@ -893,6 +906,7 @@ class ProductPreparation(Node):
             raise NavigationAbortedError(detail, latest_localized)
         if latest_localized is None or not self._fresh(
                 latest_localized_at, NAVIGATION_FEEDBACK_MAX_AGE_S):
+            latest_localized = None
             # A same-position precise goal can complete before the mission
             # supervisor forwards its final controller feedback.  For normal
             # precise docking legs only, use the independent AMCL stream
@@ -1072,7 +1086,7 @@ class ProductPreparation(Node):
             dock_navigation_aborted = False
             try:
                 localized_dock = self._navigate(dock_travel_target, precise=True)
-                localized_dock = self._navigate(self.selected.dock, precise=True)
+                localized_dock = self._align_dock_heading(localized_dock)
             except NavigationAbortedError as error:
                 if not _recoverable_dock_abort(
                         error.localized_pose, self.selected.dock):
@@ -1135,8 +1149,8 @@ class ProductPreparation(Node):
                 self._wait_stationary()
                 dock_travel_target = self._final_dock_travel_target()
                 try:
-                    self._navigate(dock_travel_target, precise=True)
-                    self._navigate(self.selected.dock, precise=True)
+                    localized_dock = self._navigate(dock_travel_target, precise=True)
+                    localized_dock = self._align_dock_heading(localized_dock)
                 except NavigationAbortedError as error:
                     if not _recoverable_dock_abort(
                             error.localized_pose, self.selected.dock):

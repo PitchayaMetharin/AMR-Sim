@@ -1,0 +1,7 @@
+<library path="precision_navfn_planner">
+  <class name="amr_navigation/PrecisionNavfnPlanner"
+         type="amr_navigation::PrecisionNavfnPlanner"
+         base_class_type="nav2_core::GlobalPlanner">
+    <description>Exact swept-footprint-checked precision segments with Navfn detour fallback.</description>
+  </class>
+</library>

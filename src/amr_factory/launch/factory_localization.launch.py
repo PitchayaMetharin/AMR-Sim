@@ -5,9 +5,9 @@ import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, ExecuteProcess
 from launch.actions import OpaqueFunction, RegisterEventHandler, SetEnvironmentVariable
-from launch.actions import TimerAction
+from launch.actions import TimerAction, Shutdown
 from launch.conditions import IfCondition, UnlessCondition
 from launch.events import matches_action
 from launch.event_handlers import OnProcessExit
@@ -22,6 +22,28 @@ import xacro
 
 
 _DEFERRED_FACTORY_ACTIONS = []
+
+
+def _shutdown_after_gazebo_exit(event, context):
+    # A Gazebo exit during SIGINT teardown must not emit a second Shutdown:
+    # Humble's launch_ros adapter has already been destroyed by the first.
+    if context.is_shutdown:
+        return []
+    return [Shutdown(reason=f"required factory Gazebo process exited: {event.returncode}")]
+
+
+def _gazebo_process(arguments):
+    plugin_paths = os.pathsep.join(filter(None, (
+        os.environ.get("GZ_SIM_SYSTEM_PLUGIN_PATH", ""),
+        os.environ.get("LD_LIBRARY_PATH", ""))))
+    legacy_plugin_paths = os.pathsep.join(filter(None, (
+        os.environ.get("IGN_GAZEBO_SYSTEM_PLUGIN_PATH", ""),
+        os.environ.get("LD_LIBRARY_PATH", ""))))
+    return ExecuteProcess(
+        cmd=["gz", "sim", *arguments, "--force-version", "8"],
+        additional_env={"GZ_SIM_SYSTEM_PLUGIN_PATH": plugin_paths,
+                        "IGN_GAZEBO_SYSTEM_PLUGIN_PATH": legacy_plugin_paths},
+        output="screen", on_exit=_shutdown_after_gazebo_exit)
 
 
 def managed_node(package, executable):
@@ -184,24 +206,11 @@ def launch_gazebo(context):
             SetEnvironmentVariable(name="LIBGL_ALWAYS_SOFTWARE", value="1"),
             SetEnvironmentVariable(name="GALLIUM_DRIVER", value="llvmpipe"),
         ])
-    gz_launch = PythonLaunchDescriptionSource(os.path.join(
-        get_package_share_directory("ros_gz_sim"),
-        "launch",
-        "gz_sim.launch.py",
-    ))
-    actions.append(
-        IncludeLaunchDescription(
-            gz_launch,
-            launch_arguments={"gz_args": " ".join(server_arguments)}.items(),
-        )
-    )
+    actions.append(_gazebo_process(server_arguments))
     if not server_only:
         actions.append(TimerAction(
             period=2.0,
-            actions=[IncludeLaunchDescription(
-                gz_launch,
-                launch_arguments={"gz_args": " ".join(gui_arguments)}.items(),
-            )],
+            actions=[_gazebo_process(gui_arguments)],
         ))
     return actions
 
@@ -565,7 +574,7 @@ def generate_launch_description():
         DeclareLaunchArgument("map_yaml", default_value=map_path),
         OpaqueFunction(function=validate_launch_options),
         DeclareLaunchArgument("initial_x", default_value="-4.5"),
-        DeclareLaunchArgument("initial_y", default_value="0.0"),
+        DeclareLaunchArgument("initial_y", default_value="-1.5"),
         DeclareLaunchArgument("initial_yaw", default_value="0.0"),
         OpaqueFunction(function=launch_gazebo),
         bridge,

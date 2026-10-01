@@ -71,7 +71,7 @@
       lookahead_time: 1.50
       use_velocity_scaled_lookahead_dist: true
       transform_tolerance: 0.30
-      min_approach_linear_velocity: 0.01
+      min_approach_linear_velocity: 0.02
       approach_velocity_scaling_dist: 0.60
       use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 1.0

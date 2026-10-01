@@ -16,6 +16,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
 
 add_executable(generate_apriltag_textures tools/generate_apriltag_textures.cpp)
@@ -29,6 +30,7 @@ ament_target_dependencies(factory_supervisor_node
   rclcpp
   rclcpp_action
   std_srvs
+  tf2_ros
   yaml_cpp_vendor)
 target_link_libraries(factory_supervisor_node yaml-cpp)
 

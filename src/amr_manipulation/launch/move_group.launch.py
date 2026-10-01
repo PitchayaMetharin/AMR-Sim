@@ -46,6 +46,15 @@ def generate_launch_description():
             package="moveit_ros_move_group",
             executable="move_group",
             output="screen",
+            # Humble MoveIt 2.5.10 can unload this plugin before its retained
+            # callback-group deleters run during Node teardown. Keep the
+            # library mapped for this process's lifetime, not system-wide.
+            additional_env={
+                "LD_PRELOAD": ":".join(filter(None, [
+                    os.environ.get("LD_PRELOAD", ""),
+                    "libmoveit_simple_controller_manager.so",
+                ])),
+            },
             parameters=[moveit_config.to_dict(), {"use_sim_time": True}],
             remappings=[
                 ("joint_states", "/amr/base/joint_states"),

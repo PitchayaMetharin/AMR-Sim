@@ -59,4 +59,9 @@ add_replay_backend(planner_replay_contract_test AMR_REPLAY_LATTICE_ONLY
 enable_testing()
 add_test(NAME planner_replay_contract COMMAND planner_replay_contract_test)
 
+add_replay_backend(precision_planner_contract_test AMR_REPLAY_LATTICE_ONLY
+  ${NAV2_SMAC_LATTICE_PLUGIN} precision_planner_contract_test.cpp)
+target_link_libraries(precision_planner_contract_test precision_navfn_planner)
+add_test(NAME precision_planner_contract COMMAND precision_planner_contract_test)
+
 install(TARGETS planner_replay_2d planner_replay_lattice DESTINATION lib)

@@ -47,6 +47,8 @@
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
 #include "moveit/trajectory_processing/iterative_time_parameterization.h"
 #include "trajectory_msgs/msg/joint_trajectory_point.hpp"
 
@@ -87,18 +89,28 @@ struct PendingActionGoal {
 class MassStageNode final : public rclcpp::Node {
  public:
   MassStageNode(const ProductSpec & product, const rclcpp::NodeOptions & options)
-  : Node("gate6_mass_stage", options), product_(product) {
+  : Node("gate6_mass_stage", options), product_(product), tf_buffer_(get_clock()) {
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(tf_buffer_, this, false);
     boot_id_ = static_cast<uint32_t>(
       std::chrono::steady_clock::now().time_since_epoch().count());
     if (boot_id_ == 0U) boot_id_ = 1U;
 
     status_pub_ = create_publisher<amr_interfaces::msg::ManipulatorStatus>(
       product_.status_topic, amr_interfaces::qos::authority());
+    forwarded_status_sub_ = create_subscription<amr_interfaces::msg::ManipulatorStatus>(
+      "/amr/manipulation/status", amr_interfaces::qos::authority(),
+      [this](const amr_interfaces::msg::ManipulatorStatus::SharedPtr message) {
+        std::lock_guard<std::mutex> lock(evidence_mutex_);
+        forwarded_status_ = *message;
+        forwarded_status_received_ = std::chrono::steady_clock::now();
+        terminal_evidence_condition_.notify_all();
+      });
     cancel_service_ = create_service<std_srvs::srv::Trigger>(
       product_.cancel_service,
       [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
         cancel_requested_.store(true);
+        terminal_evidence_condition_.notify_all();
         std::function<void()> hook;
         {
           std::lock_guard<std::mutex> lock(cancellation_mutex_);
@@ -119,6 +131,7 @@ class MassStageNode final : public rclcpp::Node {
           std::lock_guard<std::mutex> lock(evidence_mutex_);
           attachment_states_[index] = message->data;
           attachment_state_received_[index] = std::chrono::steady_clock::now();
+          terminal_evidence_condition_.notify_all();
         });
     }
     base_sub_ = create_subscription<amr_interfaces::msg::BaseStatus>(
@@ -161,6 +174,7 @@ class MassStageNode final : public rclcpp::Node {
         amcl_pose_ = *message;
         amcl_pose_received_ = std::chrono::steady_clock::now();
         have_amcl_pose_ = true;
+        terminal_evidence_condition_.notify_all();
       });
     joint_states_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/amr/base/joint_states", amr_interfaces::qos::sensor(),
@@ -182,6 +196,12 @@ class MassStageNode final : public rclcpp::Node {
       });
     navigation_client_ = rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
       this, "/amr/mission/navigate_to_pose");
+    retreat_navigation_client_ =
+      rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+      this, "/amr/mission/navigate_to_pose_retreat");
+    precise_navigation_client_ =
+      rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+      this, "/amr/mission/navigate_to_pose_precise");
     egress_client_ = rclcpp_action::create_client<nav2_msgs::action::BackUp>(
       this, "/amr/control/dock_egress");
     bootstrap_client_ = create_client<std_srvs::srv::Trigger>(
@@ -215,6 +235,34 @@ class MassStageNode final : public rclcpp::Node {
   {
     std::lock_guard<std::mutex> lock(cancellation_mutex_);
     cancellation_hook_ = std::move(hook);
+  }
+
+  bool wait_for_stage_start_forwarded(std::chrono::milliseconds timeout) {
+    // Standalone stages already own the public stream. Only the factory's
+    // internal stream needs acknowledgment from its forwarding supervisor.
+    if (product_.status_topic == "/amr/manipulation/status") return true;
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + timeout;
+    std::unique_lock<std::mutex> lock(evidence_mutex_);
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+      if (cancellation_requested()) return false;
+      const auto now_wall = std::chrono::steady_clock::now();
+      const auto & status = forwarded_status_;
+      if (forwarded_status_received_ >= started &&
+        now_wall - forwarded_status_received_ <= 200ms &&
+        status.source_boot_id != 0U && status.source_boot_id != boot_id_ &&
+        status.sequence != 0U && status.valid &&
+        status.state == amr_interfaces::msg::ManipulatorStatus::STARTING &&
+        !status.product_attached && status.product_id.empty() &&
+        !status.base_motion_allowed && status.detail == "Gate 6 mass stage is starting")
+      {
+        RCLCPP_INFO(get_logger(), "Genuine stage-start forwarding observed after %.3f s",
+          std::chrono::duration<double>(now_wall-started).count());
+        return true;
+      }
+      terminal_evidence_condition_.wait_until(lock, deadline);
+    }
+    return false;
   }
 
   bool wait_for_motion_permission(std::chrono::seconds timeout, bool attached = false) {
@@ -601,12 +649,49 @@ class MassStageNode final : public rclcpp::Node {
       navigation_feedback_pose_.header = amcl_pose.header;
       navigation_feedback_pose_.pose = amcl_pose.pose.pose;
     }
-    RCLCPP_WARN(
+    RCLCPP_INFO(
       get_logger(),
-      "Navigation succeeded without feedback; using fresh AMCL terminal pose "
-      "within existing tolerance: position=%.3f m yaw=%.3f rad",
+      "using fresh AMCL terminal pose within existing tolerance: "
+      "position=%.3f m yaw=%.3f rad",
       position_error, yaw_error);
     return true;
+  }
+
+  bool wait_for_amcl_terminal_pose(
+    const std::array<double, 3> & target, std::chrono::milliseconds timeout = 5s)
+  {
+    // Nav2's terminal TF feedback can precede the next AMCL publication.
+    // Observe that publication within the existing feedback horizon instead
+    // of rejecting the pre-turn cache or changing the terminal tolerances.
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + timeout;
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+      if (cancellation_requested() || !native_attachment_state_is("attached")) return false;
+      SteadyTime observed_receipt;
+      {
+        std::lock_guard<std::mutex> lock(evidence_mutex_);
+        observed_receipt = amcl_pose_received_;
+      }
+      if (use_fresh_amcl_terminal_pose(target)) {
+        if (cancellation_requested() || !native_attachment_state_is("attached")) {
+          reset_navigation_feedback();
+          return false;
+        }
+        RCLCPP_INFO(get_logger(), "AMCL terminal observation accepted after %.3f s",
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+        return true;
+      }
+      std::unique_lock<std::mutex> lock(evidence_mutex_);
+      // Notifications wake on new AMCL/attachment/cancellation evidence.
+      // The bounded wake also observes shutdown and direct cancellation flags.
+      terminal_evidence_condition_.wait_until(
+        lock, std::min(deadline, std::chrono::steady_clock::now() + 20ms),
+        [this, observed_receipt]() {
+          return amcl_pose_received_ != observed_receipt || cancellation_requested() ||
+            attachment_states_[selected_product_index()] != "attached";
+        });
+    }
+    return false;
   }
 
   bool latest_navigation_feedback_pose(geometry_msgs::msg::PoseStamped & pose) const {
@@ -771,11 +856,21 @@ class MassStageNode final : public rclcpp::Node {
     }
   }
 
-  bool navigate_to(const std::array<double, 3> & target, std::chrono::seconds timeout)
+  bool navigate_to_with_client(
+    const std::array<double, 3> & target, std::chrono::seconds timeout,
+    const rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr & navigation_client,
+    const char * endpoint, bool require_detached = false)
   {
     using Action = nav2_msgs::action::NavigateToPose;
-    if (cancellation_requested()) return false;
-    if (!navigation_client_->wait_for_action_server(5s)) return false;
+    if (cancellation_requested() || (require_detached && !native_attachment_state_is("detached")) ||
+      !navigation_client ||
+      !navigation_client->wait_for_action_server(5s))
+    {
+      RCLCPP_ERROR(
+        get_logger(), "Navigation action server unavailable: %s",
+        endpoint ? endpoint : "(unknown endpoint)");
+      return false;
+    }
     reset_navigation_feedback();
     {
       std::lock_guard<std::mutex> lock(evidence_mutex_);
@@ -796,7 +891,7 @@ class MassStageNode final : public rclcpp::Node {
         if (feedback) record_navigation_feedback(*feedback);
       };
     const auto pending = std::make_shared<PendingActionGoal<Action>>();
-    options.goal_response_callback = [this, pending](
+    options.goal_response_callback = [this, pending, navigation_client](
       rclcpp_action::ClientGoalHandle<Action>::SharedPtr goal_handle) {
         bool cancel_late = false;
         {
@@ -808,14 +903,16 @@ class MassStageNode final : public rclcpp::Node {
         pending->condition.notify_all();
         if (goal_handle && cancel_late) {
           try {
-            (void)navigation_client_->async_cancel_goal(goal_handle);
+            (void)navigation_client->async_cancel_goal(goal_handle);
           } catch (const rclcpp_action::exceptions::UnknownGoalHandleError &) {
             RCLCPP_WARN(get_logger(), "late navigation goal was already terminal during cancellation");
           }
         }
       };
     const auto monitoring_started = std::chrono::steady_clock::now();
-    navigation_client_->async_send_goal(goal, options);
+    if (require_detached &&
+      (cancellation_requested() || !native_attachment_state_is("detached"))) return false;
+    navigation_client->async_send_goal(goal, options);
     bool canceled_before_acceptance = false;
     const auto acceptance_deadline = std::chrono::steady_clock::now() + 5s;
     while (rclcpp::ok()) {
@@ -847,18 +944,23 @@ class MassStageNode final : public rclcpp::Node {
       cancel_requested_.store(true);
       return false;
     }
-    auto result = navigation_client_->async_get_result(goal_handle);
+    auto result = navigation_client->async_get_result(goal_handle);
     if (canceled_before_acceptance) {
-      (void)cancel_navigation_goal(navigation_client_, goal_handle, result);
+      (void)cancel_navigation_goal(navigation_client, goal_handle, result);
       return false;
     }
     const auto simulation_limit_ns =
       std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
     while (rclcpp::ok()) {
+      if (require_detached && !native_attachment_state_is("detached")) {
+        RCLCPP_ERROR(get_logger(), "Dispatch clearance lost native detached proof");
+        (void)cancel_navigation_goal(navigation_client, goal_handle, result);
+        return false;
+      }
       if (result.wait_for(50ms) == std::future_status::ready) break;
       if (cancellation_requested()) {
         RCLCPP_WARN(get_logger(), "Canceling active navigation goal on cycle request");
-        (void)cancel_navigation_goal(navigation_client_, goal_handle, result);
+        (void)cancel_navigation_goal(navigation_client, goal_handle, result);
         return false;
       }
       bool cancel = false;
@@ -887,7 +989,7 @@ class MassStageNode final : public rclcpp::Node {
       }
       if (cancel) {
         RCLCPP_ERROR(get_logger(), "Canceling navigation target: %s", reason);
-        (void)cancel_navigation_goal(navigation_client_, goal_handle, result);
+        (void)cancel_navigation_goal(navigation_client, goal_handle, result);
         return false;
       }
     }
@@ -916,6 +1018,113 @@ class MassStageNode final : public rclcpp::Node {
     }
     return have_feedback && !feedback_invalid &&
       wrapped.code == rclcpp_action::ResultCode::SUCCEEDED && wrapped.result != nullptr;
+  }
+
+  bool navigate_to(const std::array<double, 3> & target, std::chrono::seconds timeout)
+  {
+    return navigate_to_with_client(
+      target, timeout, navigation_client_, "/amr/mission/navigate_to_pose");
+  }
+
+  bool navigate_to_registered_retreat(
+    const std::array<double, 3> & target, std::chrono::seconds timeout)
+  {
+    return navigate_to_with_client(
+      target, timeout, retreat_navigation_client_, "/amr/mission/navigate_to_pose_retreat");
+  }
+
+  bool navigate_empty_dispatch_clearance(std::chrono::seconds timeout)
+  {
+    // Keep this leg inside the owned product cycle. Next-job/home permission
+    // cannot be granted until the detached robot has backed clear of the slot.
+    {
+      std::lock_guard<std::mutex> lock(status_mutex_);
+      if (state_ != amr_interfaces::msg::ManipulatorStatus::STOWED_EMPTY ||
+        attached_ || !base_allowed_) return false;
+    }
+    if (cancellation_requested() || !native_attachment_state_is("detached") ||
+      !(selected_slot_position_error() <= 0.030)) return false;
+    geometry_msgs::msg::PoseStamped physical;
+    if (!latest_robot_pose(physical) || !std::isfinite(physical.pose.position.x) ||
+      !std::isfinite(physical.pose.position.y)) return false;
+    geometry_msgs::msg::TransformStamped localized;
+    try {
+      localized = tf_buffer_.lookupTransform("map", "base_footprint", tf2::TimePointZero);
+    } catch (const tf2::TransformException & error) {
+      RCLCPP_ERROR(get_logger(), "Dispatch clearance localization unavailable: %s", error.what());
+      return false;
+    }
+    const double age = (now() - rclcpp::Time(localized.header.stamp, get_clock()->get_clock_type())).seconds();
+    const auto yaw = [](const geometry_msgs::msg::Quaternion & q) {
+        return std::atan2(2.0 * q.w * q.z, 1.0 - 2.0 * q.z * q.z);
+      };
+    const double physical_yaw = yaw(physical.pose.orientation);
+    const double localized_yaw = yaw(localized.transform.rotation);
+    const double heading_error = std::abs(std::remainder(
+      physical_yaw - product_.dispatch_approach[2], 2.0 * std::acos(-1.0)));
+    const double reverse_x = -std::cos(physical_yaw);
+    const double distance = (product_.dispatch_approach[0] - physical.pose.position.x) / reverse_x;
+    const double registered_leg = std::hypot(
+      product_.dispatch_approach[0] - product_.dispatch_dock[0],
+      product_.dispatch_approach[1] - product_.dispatch_dock[1]);
+    // The 0.35 m placement and 0.07 m terminal envelopes are unchanged.
+    if (!std::isfinite(age) || age < 0.0 || age > 0.30 ||
+      !std::isfinite(physical_yaw) || !std::isfinite(localized_yaw) ||
+      !std::isfinite(heading_error) || heading_error > 0.15 || reverse_x <= 0.0 ||
+      !std::isfinite(distance) || distance <= 0.0 ||
+      distance > (registered_leg + 0.35 + 0.07) / reverse_x) return false;
+    const std::array<double, 3> target{
+      localized.transform.translation.x - distance * std::cos(localized_yaw),
+      localized.transform.translation.y - distance * std::sin(localized_yaw), localized_yaw};
+    if (!std::isfinite(target[0]) || !std::isfinite(target[1])) return false;
+    RCLCPP_INFO(get_logger(), "Empty dispatch clearance: same-heading reverse %.3f m", distance);
+    if (!navigate_to_with_client(target, timeout, retreat_navigation_client_,
+        "/amr/mission/navigate_to_pose_retreat", true)) return false;
+    geometry_msgs::msg::PoseStamped achieved;
+    if (cancellation_requested() || !native_attachment_state_is("detached") ||
+      !latest_robot_pose(achieved) || !(selected_slot_position_error() <= 0.030)) return false;
+    const double expected_y = physical.pose.position.y - distance * std::sin(physical_yaw);
+    const double position_error = std::hypot(
+      achieved.pose.position.x - product_.dispatch_approach[0],
+      achieved.pose.position.y - expected_y);
+    const double yaw_error = std::abs(std::remainder(
+      yaw(achieved.pose.orientation) - physical_yaw, 2.0 * std::acos(-1.0)));
+    if (!std::isfinite(position_error) || !std::isfinite(yaw_error) ||
+      position_error > 0.07 || yaw_error > 0.15) return false;
+    RCLCPP_INFO(get_logger(), "Empty dispatch clearance PASS: position=%.3f m yaw=%.3f rad",
+      position_error, yaw_error);
+    return true;
+  }
+
+  bool navigate_to_precise(const std::array<double, 3> & target, std::chrono::seconds timeout)
+  {
+    return navigate_to_with_client(
+      target, timeout, precise_navigation_client_, "/amr/mission/navigate_to_pose_precise");
+  }
+
+  bool navigate_to_aligned_precision(
+    const std::array<double, 3> & target, std::chrono::seconds timeout)
+  {
+    geometry_msgs::msg::PoseStamped start;
+    if (cancellation_requested() || !native_attachment_state_is("attached") ||
+      !std::isfinite(target[0]) || !std::isfinite(target[1]) || !std::isfinite(target[2]) ||
+      !latest_navigation_feedback_pose(start))
+    {
+      return false;
+    }
+    const auto & q = start.pose.orientation;
+    const double yaw = std::atan2(2.0 * q.w * q.z, 1.0 - 2.0 * q.z * q.z);
+    const double heading_error = std::abs(std::remainder(target[2] - yaw, 2.0 * std::acos(-1.0)));
+    if (!std::isfinite(yaw) || !std::isfinite(heading_error)) return false;
+    // PlacementFollowPath cannot rotate to a terminal yaw. Align in place
+    // with the normal controller before asking it to follow the short path.
+    if (heading_error > 0.15) {
+      const std::array<double, 3> heading_target{
+        start.pose.position.x, start.pose.position.y, target[2]};
+      if (!navigate_to(heading_target, timeout)) return false;
+    }
+    if (cancellation_requested() || !native_attachment_state_is("attached")) return false;
+    return navigate_to_precise(target, timeout);
   }
 
   bool bounded_reverse(
@@ -1228,8 +1437,13 @@ class MassStageNode final : public rclcpp::Node {
   }
 
   ProductSpec product_;
+  tf2_ros::Buffer tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   mutable std::mutex evidence_mutex_;
+  std::condition_variable terminal_evidence_condition_;
   amr_interfaces::msg::BaseStatus base_status_;
+  amr_interfaces::msg::ManipulatorStatus forwarded_status_;
+  SteadyTime forwarded_status_received_{};
   nav_msgs::msg::Odometry odometry_;
   sensor_msgs::msg::JointState joint_states_;
   geometry_msgs::msg::PoseStamped product_pose_;
@@ -1265,6 +1479,7 @@ class MassStageNode final : public rclcpp::Node {
   std::array<rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr, 3> detach_pubs_;
   std::array<rclcpp::Subscription<std_msgs::msg::String>::SharedPtr, 3> state_subs_;
   rclcpp::Subscription<amr_interfaces::msg::BaseStatus>::SharedPtr base_sub_;
+  rclcpp::Subscription<amr_interfaces::msg::ManipulatorStatus>::SharedPtr forwarded_status_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr product_pose_sub_;
@@ -1273,6 +1488,8 @@ class MassStageNode final : public rclcpp::Node {
   rclcpp::Subscription<ros_gz_interfaces::msg::Contacts>::SharedPtr left_contact_sub_;
   rclcpp::Subscription<ros_gz_interfaces::msg::Contacts>::SharedPtr right_contact_sub_;
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr navigation_client_;
+  rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr retreat_navigation_client_;
+  rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr precise_navigation_client_;
   rclcpp_action::Client<nav2_msgs::action::BackUp>::SharedPtr egress_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr bootstrap_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_service_;
@@ -1618,6 +1835,15 @@ geometry_msgs::msg::Quaternion top_down_radial_quaternion(const double radial_ya
 }
 }  // namespace amr_manipulation
 
+namespace amr_manipulation {
+bool pickup_station_admission_proof(
+  const std::shared_ptr<MassStageNode> & node,
+  const ProductSpec & product,
+  bool product_attached,
+  geometry_msgs::msg::PoseStamped & pickup_station_achieved,
+  geometry_msgs::msg::PoseStamped & dispatch_translation_start);
+}  // namespace amr_manipulation
+
 int main(int argc, char ** argv) {
   using moveit::planning_interface::MoveGroupInterface;
   using moveit::planning_interface::PlanningSceneInterface;
@@ -1722,6 +1948,10 @@ int main(int argc, char ** argv) {
       };
     if (!node->verify_attachment_bootstrap(5s))
       throw std::runtime_error("attachment bootstrap was not READY before motion");
+    if (!node->wait_for_stage_start_forwarded(8s)) {
+      node->throw_if_canceled();
+      throw std::runtime_error("genuine mass-stage start boundary was not forwarded");
+    }
     require_motion_permission();
     if (!node->capture_reference_evidence(3s))
       throw std::runtime_error("fresh dock and product reference evidence timed out");
@@ -2319,9 +2549,10 @@ int main(int argc, char ** argv) {
     // Pickup collision objects are expressed in base_footprint.  They must be
     // removed before transport or they would move with the AMR.
     scene.removeCollisionObjects({"pickup_pedestal", "pickup_product", "pickup_handle"});
-    // The station approach is a second bounded reverse leg.  The registered
-    // pickup poses are collinear, so this preserves the base heading instead
-    // of asking RPP to reverse along a short path while turning 180 degrees.
+    // The station approach is a registered retreat navigation goal.  Retain
+    // the registry geometry checks below, but let the retreat planner/controller
+    // correct map-relative lateral error instead of issuing another zero-angular
+    // BackUp command from the dock-egress heading.
     const double dock_to_egress_dx = product.pickup_egress[0] - product.pickup_dock[0];
     const double dock_to_egress_dy = product.pickup_egress[1] - product.pickup_dock[1];
     const double dock_to_approach_dx = product.pickup_station[0] - product.pickup_dock[0];
@@ -2350,37 +2581,21 @@ int main(int argc, char ** argv) {
       !(0.0 < ordering && ordering < dock_to_approach_distance_sq) ||
       !std::isfinite(pickup_approach_yaw_error) || pickup_approach_yaw_error > 1e-9)
     {
-      throw std::runtime_error("pickup station reverse geometry was invalid");
+      throw std::runtime_error("pickup station retreat geometry was invalid");
     }
-    if (!node->bounded_reverse(
-        pickup_approach_distance, "Pickup approach reverse", 65s))
-      throw std::runtime_error("pickup station reverse failed");
-    if (!product_attached || !node->native_attachment_state_is("attached"))
-      throw std::runtime_error("attachment proof failed after pickup station reverse");
+    if (!node->navigate_to_registered_retreat(product.pickup_station, 120s))
+      throw std::runtime_error("pickup station retreat failed");
+    // The registered retreat deliberately uses an XY-only goal checker so the
+    // clearance leg cannot turn the loaded base beside the pickup pedestal.
+    // Once clear of that pedestal, align the registered station heading with a
+    // normal same-position goal before the independent admission proof.
     if (!node->navigate_to(product.pickup_station, 120s))
-      throw std::runtime_error("navigation to pickup station failed");
-
+      throw std::runtime_error("pickup station heading alignment failed");
     geometry_msgs::msg::PoseStamped pickup_station_achieved;
-    if (!node->latest_navigation_feedback_pose(pickup_station_achieved))
-      throw std::runtime_error("fresh localized pickup station terminal pose was unavailable");
-    const double pickup_station_xy_error = std::hypot(
-      pickup_station_achieved.pose.position.x - product.pickup_station[0],
-      pickup_station_achieved.pose.position.y - product.pickup_station[1]);
-    const double pickup_station_yaw = std::atan2(
-      2.0 * pickup_station_achieved.pose.orientation.w * pickup_station_achieved.pose.orientation.z,
-      1.0 - 2.0 * pickup_station_achieved.pose.orientation.z *
-      pickup_station_achieved.pose.orientation.z);
-    const double pickup_station_yaw_error = std::abs(std::remainder(
-      pickup_station_yaw - product.pickup_station[2], 2.0 * std::acos(-1.0)));
-    if (!std::isfinite(pickup_station_xy_error) ||
-      !std::isfinite(pickup_station_yaw_error) ||
-      pickup_station_xy_error > 0.07 || pickup_station_yaw_error > 0.15)
-    {
-      throw std::runtime_error("pickup station localized terminal pose was out of tolerance");
-    }
     geometry_msgs::msg::PoseStamped dispatch_translation_start;
-    if (!node->latest_navigation_feedback_pose(dispatch_translation_start))
-      throw std::runtime_error("fresh localized pose was unavailable before dispatch translation");
+    if (!amr_manipulation::pickup_station_admission_proof(
+        node, product, product_attached, pickup_station_achieved, dispatch_translation_start))
+      throw std::runtime_error("pickup station admission proof failed");
     const double dispatch_translation_heading = std::atan2(
       product.dispatch_approach[1] - dispatch_translation_start.pose.position.y,
       product.dispatch_approach[0] - dispatch_translation_start.pose.position.x);
@@ -2405,6 +2620,55 @@ int main(int argc, char ** argv) {
       throw std::runtime_error("navigation to dispatch approach heading failed");
     if (!product_attached || !node->native_attachment_state_is("attached"))
       throw std::runtime_error("attachment proof failed after dispatch approach heading");
+    constexpr double kDesiredProduct102SlotBaseX = 0.755000000;
+    constexpr double kDesiredProduct102SlotBaseY = 0.100000000;
+    constexpr double kFinalHeadingGoalMargin = 0.03;
+    const auto entry_slot = product.dispatch_slots.at(product.selected_slot_index);
+    const bool prealigned_product102_entry =
+      product.id == 102 && entry_slot[1] == product.dispatch_dock[1];
+    std::array<double, 3> dispatch_entry_physical = product.dispatch_dock;
+    if (prealigned_product102_entry) {
+      dispatch_entry_physical = {
+        entry_slot[0] - std::cos(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseX +
+        std::sin(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseY,
+        entry_slot[1] - std::sin(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseX -
+        std::cos(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseY,
+        product.dispatch_dock[2] - kFinalHeadingGoalMargin};
+      // Turn and establish lateral alignment at the clear approach, then
+      // follow the validated arrival heading into the existing stance.
+      const double approach_y = dispatch_entry_physical[1] -
+        (dispatch_entry_physical[0] - product.dispatch_approach[0]) *
+        std::tan(dispatch_entry_physical[2]);
+      geometry_msgs::msg::PoseStamped physical_start, localized_start;
+      if (!node->latest_robot_pose(physical_start) ||
+        !node->latest_navigation_feedback_pose(localized_start))
+        throw std::runtime_error("fresh Product 102 approach alignment evidence unavailable");
+      const double dx = product.dispatch_approach[0] - physical_start.pose.position.x;
+      const double dy = approach_y - physical_start.pose.position.y;
+      const auto yaw = [](const geometry_msgs::msg::Quaternion & q) {
+          return std::atan2(2*q.w*q.z, 1-2*q.z*q.z);
+        };
+      const double bias_yaw = std::remainder(
+        yaw(physical_start.pose.orientation) - yaw(localized_start.pose.orientation),
+        2*std::acos(-1.0));
+      if (!std::isfinite(approach_y) || !std::isfinite(dx) || !std::isfinite(dy) ||
+        !std::isfinite(bias_yaw) || std::hypot(dx,dy) > 0.15 ||
+        std::hypot(physical_start.pose.position.x-product.dispatch_approach[0],
+          physical_start.pose.position.y-product.dispatch_approach[1]) > 0.155)
+        throw std::runtime_error("Product 102 clear approach alignment exceeded existing bounds");
+      const std::array<double, 3> approach_alignment{
+        localized_start.pose.position.x + dx, localized_start.pose.position.y + dy,
+        std::remainder(std::atan2(dy,dx)-bias_yaw, 2*std::acos(-1.0))};
+      if (!node->navigate_to_aligned_precision(approach_alignment, 120s) ||
+        !node->native_attachment_state_is("attached"))
+        throw std::runtime_error("Product 102 clear approach lateral alignment failed");
+      geometry_msgs::msg::PoseStamped achieved_approach;
+      if (!node->latest_robot_pose(achieved_approach) ||
+        std::hypot(achieved_approach.pose.position.x-physical_start.pose.position.x,
+          achieved_approach.pose.position.y-physical_start.pose.position.y) > 0.15)
+        throw std::runtime_error("Product 102 achieved approach segment exceeded 0.15 m");
+      RCLCPP_INFO(node->get_logger(), "Product 102 lateral entry alignment established at clear approach Y %.4f", approach_y);
+    }
     geometry_msgs::msg::PoseStamped dispatch_dock_bias_ground_truth;
     geometry_msgs::msg::PoseStamped dispatch_dock_bias_localized;
     if (!node->latest_robot_pose(dispatch_dock_bias_ground_truth) ||
@@ -2419,10 +2683,13 @@ int main(int argc, char ** argv) {
     if (!std::isfinite(dispatch_dock_bias_x) || !std::isfinite(dispatch_dock_bias_y))
       throw std::runtime_error("dispatch dock localization bias was non-finite");
     const std::array<double, 3> dispatch_dock_corrected_target{
-      product.dispatch_dock[0] - dispatch_dock_bias_x,
-      product.dispatch_dock[1] - dispatch_dock_bias_y,
-      product.dispatch_dock[2]};
-    if (!node->navigate_to(dispatch_dock_corrected_target, 120s))
+      dispatch_entry_physical[0] - dispatch_dock_bias_x,
+      dispatch_entry_physical[1] - dispatch_dock_bias_y,
+      dispatch_entry_physical[2]};
+    // Coarse stateful arrival can pass dock admission but leave the selected
+    // stance beyond the unchanged placement-motion cap. Use the existing
+    // heading-aligned precision route for the registered dock approach.
+    if (!node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s))
       throw std::runtime_error("navigation to dispatch dock failed");
     if (!product_attached || !node->native_attachment_state_is("attached"))
       throw std::runtime_error("attachment proof failed after dispatch dock");
@@ -2451,12 +2718,10 @@ int main(int argc, char ** argv) {
     // radial reach while biasing only the upper-slot stance farther outward.
     constexpr double kDesiredUpperSlotBaseY = -0.640000000;
     // Product 102's centered slot has a narrow collision-free placement
-    // branch. Keep the measured release stance inside the existing radius
-    // envelope, and use a separate map-frame lead only for Nav2's bounded
-    // approach; the fresh measured pose remains the source of release geometry.
-    constexpr double kDesiredProduct102SlotBaseX = 0.775000000;
-    constexpr double kDesiredProduct102SlotBaseY = 0.075000000;
-    constexpr double kProduct102PlacementLeadMapY = 0.085000000;
+    // branch. Exact loaded-scene replay clears this stance and its 1 cm
+    // neighborhood, unlike the old nominal stance that collided with the
+    // fixed lidar/base. Precision travel targets it directly, without a
+    // coarse-route lead, inside the unchanged radius and motion envelopes.
     // Product 102 needs a higher loaded pre-place waypoint to clear the fixed
     // product camera on the wrist-flipped collision-free placement branch.
     constexpr double kProduct102PrePlaceZOffset = 0.100000000;
@@ -2476,12 +2741,12 @@ int main(int argc, char ** argv) {
     // Keep the unchanged 0.15 rad acceptance envelope, but command the final
     // same-position heading goal 0.03 rad inside it so Nav2 cannot accept the
     // already-near-heading state without making the required rotation.
-    constexpr double kFinalHeadingGoalMargin = 0.03;
-    // Leave the existing 0.07 m Nav2 terminal tolerance inside the 0.15 m
-    // achieved-segment bound.  Translation goals use their travel bearing so
-    // MPPI does not fight the short diagonal path; a final same-position goal
-    // then rotates to the approved dock heading.  This changes only goal
-    // sequencing, not controller parameters or safety limits.
+    // Leave the existing 0.07 m physical terminal envelope inside the 0.15 m
+    // achieved-segment bound. Short translations use the existing precision
+    // route and its 0.01 m stateless goal checker instead of a lattice loop
+    // that can end within the normal coarse tolerance before actual travel.
+    // A final normal goal retains explicit heading correction. No controller
+    // parameters or safety limits change.
     constexpr double kMaxPlacementCommandDisplacement =
       kMaxPlacementAlignmentSegmentDisplacement - kMaxPlacementAlignmentPositionError;
     const double selected_slot_lateral_offset =
@@ -2490,6 +2755,10 @@ int main(int argc, char ** argv) {
       throw std::runtime_error("desired placement stance lateral offset was non-finite");
     const bool product102_center_slot =
       product.id == 102 && selected_slot_lateral_offset == 0.0;
+    // Match the existing precision goal checker for the narrow centered-slot
+    // reach branch; keep the separate physical 0.07 m acceptance gate below.
+    const double placement_translation_position_tolerance =
+      product102_center_slot ? 0.01 : kMaxPlacementAlignmentPositionError;
     double desired_slot_direction_x;
     double desired_slot_direction_y;
     if (product102_center_slot) {
@@ -2533,11 +2802,7 @@ int main(int argc, char ** argv) {
       selected_slot[0] - desired_slot_map_x,
       selected_slot[1] - desired_slot_map_y,
       dispatch_yaw};
-    const std::array<double, 3> placement_alignment_target_physical{
-      placement_alignment_physical[0],
-      placement_alignment_physical[1] +
-      (product102_center_slot ? kProduct102PlacementLeadMapY : 0.0),
-      placement_alignment_physical[2]};
+    const auto placement_alignment_target_physical = placement_alignment_physical;
     const auto yaw_from_pose = [](const geometry_msgs::msg::Pose & pose) {
         return std::atan2(
           2.0 * pose.orientation.w * pose.orientation.z,
@@ -2600,27 +2865,72 @@ int main(int argc, char ** argv) {
       alignment_segments, alignment_displacement,
       localization_bias_x, localization_bias_y, localization_bias_yaw);
     geometry_msgs::msg::PoseStamped previous_alignment_pose = dock_alignment_ground_truth;
-    for (std::size_t segment = 1; segment <= alignment_segments; ++segment) {
-      const double fraction = static_cast<double>(segment) /
-        static_cast<double>(alignment_segments);
-      const double previous_fraction = static_cast<double>(segment - 1) /
-        static_cast<double>(alignment_segments);
-      const double segment_start_x = dock_alignment_localized.pose.position.x +
-        (placement_alignment[0] - dock_alignment_localized.pose.position.x) * previous_fraction;
-      const double segment_start_y = dock_alignment_localized.pose.position.y +
-        (placement_alignment[1] - dock_alignment_localized.pose.position.y) * previous_fraction;
-      std::array<double, 3> segment_target{
-        dock_alignment_localized.pose.position.x +
-          (placement_alignment[0] - dock_alignment_localized.pose.position.x) * fraction,
-        dock_alignment_localized.pose.position.y +
-          (placement_alignment[1] - dock_alignment_localized.pose.position.y) * fraction,
-        0.0};
-      const double segment_heading = std::atan2(
-        segment_target[1] - segment_start_y, segment_target[0] - segment_start_x);
-      if (!std::isfinite(segment_heading))
-        throw std::runtime_error("placement alignment segment bearing was non-finite");
-      segment_target[2] = segment_heading;
-      if (!node->navigate_to(segment_target, 120s))
+    std::size_t alignment_segment_count = 0;
+    double remaining_alignment_distance = alignment_displacement;
+    while (alignment_segment_count < 8) {
+      geometry_msgs::msg::PoseStamped current_alignment_ground_truth;
+      geometry_msgs::msg::PoseStamped current_alignment_localized;
+      if (!node->latest_robot_pose(current_alignment_ground_truth) ||
+        !node->latest_navigation_feedback_pose(current_alignment_localized))
+      {
+        throw std::runtime_error("fresh alignment start pose was unavailable");
+      }
+      const double remaining_dx =
+        placement_alignment_target_physical[0] - current_alignment_ground_truth.pose.position.x;
+      const double remaining_dy =
+        placement_alignment_target_physical[1] - current_alignment_ground_truth.pose.position.y;
+      remaining_alignment_distance = std::hypot(remaining_dx, remaining_dy);
+      if (!std::isfinite(remaining_alignment_distance))
+        throw std::runtime_error("remaining dispatch placement alignment was non-finite");
+      if (remaining_alignment_distance <= placement_translation_position_tolerance) {
+        previous_alignment_pose = current_alignment_ground_truth;
+        break;
+      }
+      const double current_bias_x =
+        current_alignment_ground_truth.pose.position.x - current_alignment_localized.pose.position.x;
+      const double current_bias_y =
+        current_alignment_ground_truth.pose.position.y - current_alignment_localized.pose.position.y;
+      const double current_physical_yaw = yaw_from_pose(current_alignment_ground_truth.pose);
+      const double current_bias_yaw = wrap_yaw(
+        current_physical_yaw - yaw_from_pose(current_alignment_localized.pose));
+      const double forward_heading = std::atan2(remaining_dy, remaining_dx);
+      const double reverse_heading = wrap_yaw(forward_heading + std::acos(-1.0));
+      const double segment_heading =
+        product102_center_slot ? dispatch_entry_physical[2] :
+        std::abs(wrap_yaw(forward_heading - current_physical_yaw)) <=
+        std::abs(wrap_yaw(reverse_heading - current_physical_yaw)) ?
+        forward_heading : reverse_heading;
+      const double step_distance = std::min(
+        kMaxPlacementCommandDisplacement, remaining_alignment_distance);
+      const double step_scale = step_distance / remaining_alignment_distance;
+      const double step_target_physical_x =
+        current_alignment_ground_truth.pose.position.x + remaining_dx * step_scale;
+      const double step_target_physical_y =
+        current_alignment_ground_truth.pose.position.y + remaining_dy * step_scale;
+      if (!std::isfinite(current_bias_x) || !std::isfinite(current_bias_y) ||
+        !std::isfinite(current_bias_yaw) || !std::isfinite(segment_heading) ||
+        !std::isfinite(step_distance) || !std::isfinite(step_scale) ||
+        !std::isfinite(step_target_physical_x) || !std::isfinite(step_target_physical_y))
+      {
+        throw std::runtime_error("bounded dispatch placement alignment step was non-finite");
+      }
+      // Recompute each short target from the fresh achieved physical pose.
+      // A previous action can return while its physical endpoint still lags
+      // the planned waypoint; fixed interpolation from the dock would then
+      // make the next command exceed the 0.15 m achieved-segment bound.
+      // Choose the closest forward/reverse travel heading. Lateral motion
+      // requires an explicit normal heading phase before precision travel;
+      // the final goal below restores the registered dispatch heading.
+      const std::array<double, 3> segment_target{
+        step_target_physical_x - current_bias_x,
+        step_target_physical_y - current_bias_y,
+        wrap_yaw(segment_heading - current_bias_yaw)};
+      const geometry_msgs::msg::PoseStamped segment_start_pose =
+        current_alignment_ground_truth;
+      const bool segment_succeeded = product102_center_slot ?
+        node->navigate_to_precise(segment_target, 120s) :
+        node->navigate_to_aligned_precision(segment_target, 120s);
+      if (!segment_succeeded)
         throw std::runtime_error("navigation to dispatch placement alignment segment failed");
       if (!product_attached || !node->native_attachment_state_is("attached"))
         throw std::runtime_error("attachment proof failed during placement alignment");
@@ -2628,14 +2938,23 @@ int main(int argc, char ** argv) {
       if (!node->latest_robot_pose(achieved_segment_pose))
         throw std::runtime_error("fresh alignment segment pose was unavailable");
       const double achieved_segment_displacement = std::hypot(
-        achieved_segment_pose.pose.position.x - previous_alignment_pose.pose.position.x,
-        achieved_segment_pose.pose.position.y - previous_alignment_pose.pose.position.y);
+        achieved_segment_pose.pose.position.x - segment_start_pose.pose.position.x,
+        achieved_segment_pose.pose.position.y - segment_start_pose.pose.position.y);
       if (!std::isfinite(achieved_segment_displacement) ||
         achieved_segment_displacement > kMaxPlacementAlignmentSegmentDisplacement)
       {
         throw std::runtime_error("achieved placement alignment segment exceeded 0.15 m");
       }
       previous_alignment_pose = achieved_segment_pose;
+      remaining_alignment_distance = std::hypot(
+        placement_alignment_target_physical[0] - achieved_segment_pose.pose.position.x,
+        placement_alignment_target_physical[1] - achieved_segment_pose.pose.position.y);
+      if (!std::isfinite(remaining_alignment_distance))
+        throw std::runtime_error("remaining dispatch placement alignment was non-finite");
+      ++alignment_segment_count;
+    }
+    if (remaining_alignment_distance > placement_translation_position_tolerance) {
+      throw std::runtime_error("bounded dispatch placement alignment did not converge");
     }
     // Finish the bounded translation with an explicit terminal heading goal.
     // The preceding goals follow the bounded translation path; this terminal
@@ -3237,6 +3556,18 @@ int main(int argc, char ** argv) {
       if (std::abs(empty_current[i] - stow[i]) > 0.01)
         throw std::runtime_error("empty stow tolerance was not achieved");
     }
+    require_motion_permission();
+    if (!node->native_attachment_state_is("detached") ||
+      !(node->selected_slot_position_error() <= 0.030))
+      throw std::runtime_error("fresh detached dispatch-slot proof failed before clearance");
+    node->set_status(amr_interfaces::msg::ManipulatorStatus::STOWED_EMPTY,
+      true, false, "Empty stow proven; dispatch departure clearance pending");
+    if (!node->navigate_empty_dispatch_clearance(120s))
+      throw std::runtime_error("empty-stowed dispatch departure clearance failed");
+    require_motion_permission();
+    if (!node->native_attachment_state_is("detached") ||
+      !(node->selected_slot_position_error() <= 0.030))
+      throw std::runtime_error("fresh detached dispatch-slot proof failed after clearance");
     node->set_status(amr_interfaces::msg::ManipulatorStatus::STOWED_EMPTY,
       true, false, "Gate 6 " + std::to_string(product.mass_kg) +
       " kg grasp, transport, placement, and empty stow passed");
@@ -3264,3 +3595,48 @@ int main(int argc, char ** argv) {
   spin_thread.join();
   return canceled ? 130 : (passed ? 0 : 1);
 }
+
+namespace amr_manipulation {
+
+bool pickup_station_admission_proof(
+  const std::shared_ptr<MassStageNode> & node,
+  const ProductSpec & product,
+  bool product_attached,
+  geometry_msgs::msg::PoseStamped & pickup_station_achieved,
+  geometry_msgs::msg::PoseStamped & dispatch_translation_start)
+{
+  if (!node) return false;
+  if (!product_attached || !node->native_attachment_state_is("attached")) {
+    RCLCPP_ERROR(node->get_logger(), "attachment proof failed after pickup station retreat");
+    return false;
+  }
+  node->reset_navigation_feedback();
+  if (!node->wait_for_amcl_terminal_pose(product.pickup_station)) {
+    RCLCPP_ERROR(node->get_logger(), "fresh AMCL pickup station terminal pose was unavailable");
+    return false;
+  }
+  if (!node->latest_navigation_feedback_pose(pickup_station_achieved)) {
+    RCLCPP_ERROR(node->get_logger(), "fresh localized pickup station terminal pose was unavailable");
+    return false;
+  }
+  const double pickup_station_xy_error = std::hypot(
+    pickup_station_achieved.pose.position.x - product.pickup_station[0],
+    pickup_station_achieved.pose.position.y - product.pickup_station[1]);
+  const double pickup_station_yaw = std::atan2(
+    2.0 * pickup_station_achieved.pose.orientation.w * pickup_station_achieved.pose.orientation.z,
+    1.0 - 2.0 * pickup_station_achieved.pose.orientation.z *
+    pickup_station_achieved.pose.orientation.z);
+  const double pickup_station_yaw_error = std::abs(std::remainder(
+    pickup_station_yaw - product.pickup_station[2], 2.0 * std::acos(-1.0)));
+  if (!std::isfinite(pickup_station_xy_error) ||
+    !std::isfinite(pickup_station_yaw_error) ||
+    pickup_station_xy_error > 0.07 || pickup_station_yaw_error > 0.15)
+  {
+    RCLCPP_ERROR(node->get_logger(), "pickup station localized terminal pose was out of tolerance");
+    return false;
+  }
+  dispatch_translation_start = pickup_station_achieved;
+  return true;
+}
+
+}  // namespace amr_manipulation

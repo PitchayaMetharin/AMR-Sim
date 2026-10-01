@@ -7,6 +7,35 @@ description uses the derived CAD meshes for visual appearance only and
 conservative primitives for collision and dynamics. It is simulation-ready,
 not a mechanically authoritative export.
 
+## Verified v2 provenance — 2026-10-01
+
+`amr_v2` also remains an untouched source export. Its ten named STL files each
+contain a complete assembly, so importing them directly would duplicate robot
+geometry. The derivation now requires the approved v2 source SHA-256 values,
+266,696 triangles per selected source, exact connected-component counts and
+mapped component bounds/counts before running the existing conversion.
+
+The selected chassis components (96,178 triangles), both LiDAR assemblies
+(26,107 each), and four caster assemblies (9,034 each) match the deterministic
+legacy source derivation. Comparison preserves oriented cyclic triangle vertices
+at 1 micrometre, stored normals at 1e-6, exact STL attributes and triangle
+multiplicity. References come from legacy source records, including the gated
+base derivation; generated output meshes cannot influence admission, and missing
+outputs can still be regenerated. All thirteen output meshes remain byte-identical.
+
+This is a partial provenance integration. V2 wheel geometry has not passed the
+same equivalence check; existing wheel assets remain. The export still bakes a
+KR6 R900 sixx into its base and supplies no articulated arm chain. Its left wheel
+axis transforms to base -Y; the active model already corrects it to base +Y,
+matching the right wheel and the native DiffDrive/odometry contract. No active
+axis, articulated arm, collision, dynamics or public interface changed here.
+
+The exported `camera_joint` is continuous and base-parented despite the requested
+arm mount. Its base-relative origin cannot establish an arm-relative transform
+without the actual parent link and rigid mount transform or known CAD arm pose.
+Camera calibration is absent. The active base-fixed simulation camera is retained
+pending those inputs; camera attachment and authoritative inertias remain unresolved.
+
 ## Export problems and bounded responses
 
 | Export problem | Effect | Applied response |

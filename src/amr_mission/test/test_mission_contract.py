@@ -11,6 +11,9 @@ def test_mission_boundary_is_managed_and_validated():
     assert '"/amr/mission/navigate_to_pose_retreat"' in source
     assert '"retreat_goal_checker"' in source
     assert '"placement_goal_checker"' in source
+    assert '"GridBased", "goal_checker", "FollowPath"' in source
+    assert '"PrecisionGridBased", "placement_goal_checker"' in source
+    assert '"PrecisionGridBased", "retreat_goal_checker"' in source
     assert 'frame_id != "map"' in source
     assert "PRIMARY_STATE_ACTIVE" in source
     assert "GoalResponse::REJECT" in source
@@ -27,6 +30,7 @@ def test_mission_sequences_planning_then_path_following():
     assert "start_smoothing" in source
     assert "start_following" in source
     assert "path.poses.empty()" in source
+    assert 'goal.planner_id = selected_planner_id' in source
     assert 'goal.goal_checker_id = goal_checker_id' in source
     assert 'goal.controller_id = controller_id' in source
     assert '"PlacementFollowPath"' in source
@@ -38,14 +42,18 @@ def test_mission_endpoints_share_one_reserved_goal_lifecycle():
     assert "precise_server_" in source
     assert "retreat_server_" in source
     assert "goal_reserved_" in source
+    assert "reserved_planner_id_" in source
     assert "reserved_goal_checker_id_" in source
     assert "reserved_controller_id_" in source
+    assert "mission_planner_id_" in source
     assert "mission_goal_checker_id_" in source
     assert "mission_controller_id_" in source
     assert "goal_reserved_ || state_ != MissionState::IDLE || mission_goal_" in source
     assert "mission_goal_checker_id_.clear();" in source
     assert "reserved_goal_checker_id_.clear();" in source
     assert "reserved_controller_id_.clear();" in source
+    assert "mission_planner_id_.clear();" in source
+    assert "reserved_planner_id_.clear();" in source
     assert "mission_controller_id_.clear();" in source
 
 

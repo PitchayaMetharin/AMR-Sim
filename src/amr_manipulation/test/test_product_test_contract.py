@@ -138,7 +138,7 @@ def test_persistent_product_runner_is_limited_and_fail_closed():
     normal_egress = recovery_source.index(
         "self._navigate(self.selected.egress, precise=False)")
     egress_wait = recovery_source.index("self._wait_stationary()", normal_egress)
-    precise_dock = recovery_source.index("self._navigate(self.selected.dock, precise=True)")
+    precise_dock = recovery_source.index("self._align_dock_heading(localized_dock)")
     assert relocalization_wait < missing_egress < normal_egress < egress_wait < precise_dock
     assert "self._navigate(self.selected.dock, precise=False)" not in recovery_source
     assert "self._amcl_pose_generation += 1" in source
@@ -161,7 +161,7 @@ def test_recovery_precise_dock_abort_requires_fresh_independent_final_proof():
     recovery_source = source[recovery_start:proof]
 
     final_dock = recovery_source.index(
-        "self._navigate(self.selected.dock, precise=True)")
+        "self._align_dock_heading(localized_dock)")
     final_dock_try = recovery_source.rfind("try:", 0, final_dock)
     final_dock_catch = recovery_source.index(
         "except NavigationAbortedError as error:", final_dock)
@@ -179,7 +179,7 @@ def test_recovery_precise_dock_abort_requires_fresh_independent_final_proof():
     assert final_dock_try < final_dock < final_dock_catch < recovery_gate
     assert recovery_gate < recovery_log < stationary < fresh_pose
     assert proof > fresh_pose
-    assert "self._navigate(self.selected.dock, precise=True)" not in \
+    assert "self._align_dock_heading(localized_dock)" not in \
         recovery_source[final_dock_catch:]
 
 
@@ -202,7 +202,7 @@ def test_initial_precise_dock_waits_and_uses_registered_egress_clearance():
         "self._navigate(self.selected.egress, precise=False)", egress_guard)
     egress_settle = route.index("self._wait_stationary()", egress_navigation)
     precise_dock = source.index(
-        "localized_dock = self._navigate(self.selected.dock, precise=True)",
+        "localized_dock = self._navigate(dock_travel_target, precise=True)",
         first_dock_attempt)
 
     assert normal_approach < egress_guard < approach_settle
@@ -226,7 +226,7 @@ def test_final_dock_uses_travel_bearing_then_registered_terminal_heading():
     assert "def _verify_dock_and_product_geometry(self) -> None:" in source
     assert source.count("dock_travel_target = self._final_dock_travel_target()") == 2
     assert source.count("self._navigate(dock_travel_target, precise=True)") == 2
-    assert source.count("self._navigate(self.selected.dock, precise=True)") == 2
+    assert source.count("self._align_dock_heading(localized_dock)") == 2
 
     first_target = source.index(
         "dock_travel_target = self._final_dock_travel_target()")
@@ -235,11 +235,11 @@ def test_final_dock_uses_travel_bearing_then_registered_terminal_heading():
     first_travel = source.index(
         "self._navigate(dock_travel_target, precise=True)", first_target)
     first_heading = source.index(
-        "self._navigate(self.selected.dock, precise=True)", first_travel)
+        "self._align_dock_heading(localized_dock)", first_travel)
     second_travel = source.index(
         "self._navigate(dock_travel_target, precise=True)", second_target)
     second_heading = source.index(
-        "self._navigate(self.selected.dock, precise=True)", second_travel)
+        "self._align_dock_heading(localized_dock)", second_travel)
     assert first_travel < first_heading < second_target
     assert second_travel < second_heading
 
@@ -330,3 +330,167 @@ def test_runner_is_installed_under_the_ros_executable_name():
 
     assert "scripts/gate6_product_test.py" in source
     assert "RENAME gate6_product_test" in source
+
+
+def _real_navigation_methods():
+    """Execute actual methods with transport/clock seams, without a ROS graph."""
+    tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
+    names = {"_finite_values", "_yaw", "_pose_tuple", "_amcl_pose_tuple", "_angle_error"}
+    nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+             and node.name in names | {"PreparationError", "PreparationCanceled", "NavigationAbortedError"}]
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            nodes.extend(method for method in node.body if isinstance(method, ast.FunctionDef)
+                         and method.name in {"_navigate", "_align_dock_heading"})
+    namespace = dict(math=math, Iterable=Iterable, Tuple=Tuple, Optional=__import__('typing').Optional,
+                     PoseStamped=object, PoseWithCovarianceStamped=object,
+                     NAVIGATION_FEEDBACK_MAX_AGE_S=1.0, RELOCALIZATION_TERMINAL_AMCL_MAX_AGE_S=6.0,
+                     DOCK_YAW_TOLERANCE_RAD=0.15,
+                     GoalStatus=SimpleNamespace(STATUS_SUCCEEDED=4, STATUS_ABORTED=6))
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(RUNNER), "exec"), namespace)
+    return namespace
+
+
+def _fake_pose(x=2.3994, y=-0.0047, yaw=0.2379, amcl=False, frame="map"):
+    pose = SimpleNamespace(position=SimpleNamespace(x=x, y=y),
+                           orientation=SimpleNamespace(z=math.sin(yaw/2), w=math.cos(yaw/2)))
+    return SimpleNamespace(header=SimpleNamespace(frame_id=frame, stamp=None),
+                           pose=SimpleNamespace(pose=pose) if amcl else pose)
+
+
+def _run_navigation(feedback_age=0.1, amcl_age=None, precise=True, retreat=False,
+                    amcl_frame="map", amcl_x=2.3994, feedback=True, namespace=None):
+    namespace = namespace or _real_navigation_methods()
+    now = [0.0]
+    namespace['time'] = SimpleNamespace(monotonic=lambda: now[0])
+    namespace['NavigateToPose'] = SimpleNamespace(Goal=lambda: SimpleNamespace(pose=_fake_pose()))
+    handle = SimpleNamespace(get_result_async=lambda: object())
+    def send(goal, feedback_callback):
+        if feedback:
+            feedback_callback(SimpleNamespace(feedback=SimpleNamespace(current_pose=_fake_pose())))
+        return object()
+    client = SimpleNamespace(wait_for_server=lambda **kwargs: True, send_goal_async=send)
+    def result(*args):
+        now[0] = feedback_age
+        return SimpleNamespace(status=4)
+    node = SimpleNamespace(_check_canceled=lambda: None, _normal_navigation=client,
+                           _precise_navigation=client, _retreat_navigation=client,
+                           get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: None)),
+                           _wait_navigation_goal_acceptance=lambda *args: handle,
+                           _wait_future=result, _fresh=lambda stamp, age: now[0]-stamp <= age,
+                           _amcl_pose=None if amcl_age is None else _fake_pose(amcl=True, frame=amcl_frame, x=amcl_x),
+                           _amcl_pose_at=feedback_age-(amcl_age or 0),
+                           get_logger=lambda: SimpleNamespace(info=lambda message: None, warning=lambda message: None))
+    return namespace['_navigate'](node, (2.4, 0.0, 0.0), precise=precise, retreat=retreat)
+
+
+def test_successful_navigation_rejects_stale_feedback_without_amcl():
+    namespace = _real_navigation_methods()
+    with pytest.raises(namespace['PreparationError'], match='fresh localized terminal pose'):
+        _run_navigation(feedback_age=10.0, namespace=namespace)
+
+
+@pytest.mark.parametrize('precise,retreat', [(False, False), (True, False), (True, True)])
+def test_navigation_accepts_fresh_public_feedback(precise, retreat):
+    assert _run_navigation(precise=precise, retreat=retreat) == pytest.approx((2.3994, -0.0047, 0.2379))
+
+
+def test_stale_feedback_uses_only_fresh_eligible_amcl():
+    assert _run_navigation(feedback_age=10.0, amcl_age=5.9) == pytest.approx((2.3994, -0.0047, 0.2379))
+
+
+@pytest.mark.parametrize('options', [dict(amcl_age=6.1), dict(amcl_age=0.1, amcl_frame='odom'),
+                                      dict(amcl_age=0.1, amcl_x=float('nan')),
+                                      dict(amcl_age=0.1, precise=False),
+                                      dict(amcl_age=0.1, retreat=True)])
+def test_stale_feedback_rejects_invalid_or_ineligible_amcl(options):
+    namespace = _real_navigation_methods()
+    with pytest.raises(namespace['PreparationError'], match='fresh localized terminal pose'):
+        _run_navigation(feedback_age=10.0, namespace=namespace, **options)
+
+
+@pytest.mark.parametrize('achieved,dock,expected,precise', [
+    ((2.3994, -0.0047, 0.2379), (2.4, 0.0, 0.0), (2.3994, -0.0047, 0.0), False),
+    ((2.39, 0.01, 0.15), (2.4, 0.0, 0.0), (2.4, 0.0, 0.0), True),
+    ((2.39, 0.01, -0.15), (2.4, 0.0, 0.0), (2.4, 0.0, 0.0), True),
+    ((2.39, 0.01, 0.1501), (2.4, 0.0, 0.0), (2.39, 0.01, 0.0), False),
+    ((2.39, 0.01, math.pi-0.01), (2.4, 0.0, -math.pi+0.01), (2.4, 0.0, -math.pi+0.01), True),
+])
+def test_dock_heading_selects_controller_without_normal_xy_translation(achieved, dock, expected, precise):
+    namespace = _real_navigation_methods()
+    calls = []
+    terminal = (2.398, -0.003, 0.001)
+    node = SimpleNamespace(selected=SimpleNamespace(dock=dock),
+                           _navigate=lambda target, precise: calls.append((target, precise)) or terminal)
+    assert namespace['_align_dock_heading'](node, achieved) == terminal
+    assert calls == [(expected, precise)]
+
+
+@pytest.mark.parametrize('achieved,dock', [
+    ((float('nan'), 0.0, 0.0), (2.4, 0.0, 0.0)),
+    ((0.0, float('inf'), 0.0), (2.4, 0.0, 0.0)),
+    ((0.0, 0.0, float('nan')), (2.4, 0.0, 0.0)),
+    ((2.4, 0.0, 0.2), (float('inf'), 0.0, 0.0)),
+    ((2.4, 0.0, 0.2), (2.4, 0.0, float('nan'))),
+    ((2.4, 0.0), (2.4, 0.0, 0.0)),
+])
+def test_dock_heading_rejects_invalid_pose_before_dispatch(achieved, dock):
+    namespace = _real_navigation_methods()
+    calls = []
+    node = SimpleNamespace(selected=SimpleNamespace(dock=dock),
+                           _navigate=lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(namespace['PreparationError']):
+        namespace['_align_dock_heading'](node, achieved)
+    assert calls == []
+
+
+def test_dock_heading_propagates_navigation_failure():
+    namespace = _real_navigation_methods()
+    def fail(*args, **kwargs):
+        raise namespace['PreparationError']('heading failed')
+    node = SimpleNamespace(selected=SimpleNamespace(dock=(2.4, 0.0, 0.0)), _navigate=fail)
+    with pytest.raises(namespace['PreparationError'], match='heading failed'):
+        namespace['_align_dock_heading'](node, (2.3994, -0.0047, 0.2379))
+
+
+@pytest.mark.parametrize('branch', [0, 1], ids=['initial', 'recovery'])
+@pytest.mark.parametrize('aborted', [False, True], ids=['succeeded', 'aborted'])
+def test_actual_dock_try_bodies_issue_heading_only_after_travel_success(branch, aborted):
+    namespace = _real_navigation_methods()
+    tree = ast.parse(RUNNER.read_text(encoding='utf-8'))
+    bodies = sorted([node for node in ast.walk(tree) if isinstance(node, ast.Try)
+                     and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                             and call.func.attr == '_align_dock_heading'
+                             for statement in node.body for call in ast.walk(statement))], key=lambda node: node.lineno)
+    assert len(bodies) == 2
+    block = bodies[branch]
+    assert any(isinstance(handler.type, ast.Name) and handler.type.id == 'NavigationAbortedError'
+               for handler in block.handlers)
+    travel_target = (2.4, 0.0, -0.030182)
+    achieved = (2.3994, -0.0047, 0.2379)
+    calls = []
+    def navigate(target, precise):
+        calls.append((target, precise))
+        if len(calls) == 1 and aborted:
+            raise namespace['NavigationAbortedError']('collision abort', achieved)
+        return achieved
+    node = SimpleNamespace(selected=SimpleNamespace(dock=(2.4, 0.0, 0.0)), _navigate=navigate)
+    node._align_dock_heading = lambda pose: namespace['_align_dock_heading'](node, pose)
+    code = compile(ast.Module(body=block.body, type_ignores=[]), str(RUNNER), 'exec')
+    if aborted:
+        with pytest.raises(namespace['NavigationAbortedError'], match='collision abort'):
+            exec(code, dict(self=node, dock_travel_target=travel_target))
+        assert calls == [(travel_target, True)]
+    else:
+        exec(code, dict(self=node, dock_travel_target=travel_target))
+        assert calls == [(travel_target, True), ((achieved[0], achieved[1], 0.0), False)]
+
+
+@pytest.mark.parametrize('amcl_age,accepted', [(None, False), (5.9, True), (6.1, False)])
+def test_absent_public_feedback_requires_fresh_eligible_amcl(amcl_age, accepted):
+    namespace = _real_navigation_methods()
+    if accepted:
+        assert _run_navigation(feedback=False, amcl_age=amcl_age, namespace=namespace) == pytest.approx((2.3994, -0.0047, 0.2379))
+    else:
+        with pytest.raises(namespace['PreparationError'], match='fresh localized terminal pose'):
+            _run_navigation(feedback=False, amcl_age=amcl_age, namespace=namespace)

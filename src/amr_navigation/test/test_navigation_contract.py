@@ -22,7 +22,7 @@ def test_planner_consumes_map_and_independent_perception_clouds():
     config = yaml.safe_load((ROOT / "config" / "planner.yaml").read_text())
     planner = config["/amr/planner_server"]["ros__parameters"]
     costmap = config["/amr/global_costmap/global_costmap"]["ros__parameters"]
-    assert planner["planner_plugins"] == ["GridBased"]
+    assert planner["planner_plugins"] == ["GridBased", "PrecisionGridBased"]
     grid_based = planner["GridBased"]
     assert grid_based["plugin"] == "nav2_smac_planner/SmacPlannerLattice"
     assert grid_based["tolerance"] == 0.05
@@ -35,6 +35,26 @@ def test_planner_consumes_map_and_independent_perception_clouds():
     assert grid_based["max_on_approach_iterations"] == 1000
     assert grid_based["max_planning_time"] == 2.0
     assert grid_based["cost_penalty"] == 2.0
+    assert grid_based["analytic_expansion_ratio"] == 3.5
+    assert grid_based["change_penalty"] == 0.05
+    assert grid_based["non_straight_penalty"] == 1.05
+    assert grid_based["reverse_penalty"] == 2.0
+    assert grid_based["retrospective_penalty"] == 0.015
+    assert grid_based["rotation_penalty"] == 5.0
+    assert grid_based["cache_obstacle_heuristic"] is False
+    assert set(grid_based) == {
+        "plugin", "tolerance", "allow_unknown", "max_iterations",
+        "max_on_approach_iterations", "max_planning_time",
+        "analytic_expansion_max_length", "analytic_expansion_ratio",
+        "smooth_path", "lookup_table_size", "cost_penalty", "change_penalty",
+        "non_straight_penalty", "reverse_penalty", "retrospective_penalty",
+        "rotation_penalty", "allow_reverse_expansion", "cache_obstacle_heuristic",
+    }
+    precision_grid_based = planner["PrecisionGridBased"]
+    assert precision_grid_based["plugin"] == "amr_navigation/PrecisionNavfnPlanner"
+    assert precision_grid_based["use_astar"] is True
+    assert precision_grid_based["allow_unknown"] is False
+    assert precision_grid_based["tolerance"] == 0.01
     assert costmap["global_frame"] == "map"
     assert costmap["robot_base_frame"] == "base_footprint"
     assert costmap["static_layer"]["map_topic"] == "/map"

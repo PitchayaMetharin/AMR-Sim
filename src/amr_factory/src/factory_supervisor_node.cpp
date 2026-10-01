@@ -31,6 +31,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
 #include "yaml-cpp/yaml.h"
 
 namespace amr_factory {
@@ -79,8 +81,9 @@ struct ExecuteCall {
 class FactorySupervisorNode final : public rclcpp::Node {
  public:
   explicit FactorySupervisorNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
-  : Node("factory_supervisor_node", options)
+  : Node("factory_supervisor_node", options), tf_buffer_(get_clock())
   {
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(tf_buffer_, this, false);
     declare_parameter("products_config", "");
     declare_parameter("stations_config", "");
     load_registry();
@@ -98,6 +101,8 @@ class FactorySupervisorNode final : public rclcpp::Node {
       this, "/amr/manipulation/execute_product_cycle");
     navigation_client_ = rclcpp_action::create_client<NavigateToPose>(
       this, "/amr/mission/navigate_to_pose");
+    precision_navigation_client_ = rclcpp_action::create_client<NavigateToPose>(
+      this, "/amr/mission/navigate_to_pose_precise");
 
     transport_server_ = rclcpp_action::create_server<Transport>(
       this, "/amr/factory/transport_product",
@@ -1271,11 +1276,12 @@ class FactorySupervisorNode final : public rclcpp::Node {
   }
 
   bool cancel_home_navigation_goal(
+    const rclcpp_action::Client<NavigateToPose>::SharedPtr & client,
     const std::shared_ptr<rclcpp_action::ClientGoalHandle<NavigateToPose>> & goal_handle,
     std::shared_future<rclcpp_action::ClientGoalHandle<NavigateToPose>::WrappedResult> & result)
   {
     try {
-      auto cancel = navigation_client_->async_cancel_goal(goal_handle);
+      auto cancel = client->async_cancel_goal(goal_handle);
       if (cancel.wait_for(3s) != std::future_status::ready) {
         RCLCPP_ERROR(get_logger(), "home navigation cancellation response timed out");
         return false;
@@ -1311,15 +1317,11 @@ class FactorySupervisorNode final : public rclcpp::Node {
     }
   }
 
-  bool navigate_home()
+  bool navigate_home_leg(
+    const std::array<double, 3> & pose,
+    const rclcpp_action::Client<NavigateToPose>::SharedPtr & client)
   {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      home_cancel_confirmation_failed_ = false;
-      home_interlock_failed_ = false;
-    }
-    if (!navigation_client_->wait_for_action_server(2s)) return false;
-    const auto pose = stations_.at("home").approach;
+    if (!client->wait_for_action_server(2s)) return false;
     NavigateToPose::Goal goal;
     goal.pose.header.frame_id = "map";
     goal.pose.header.stamp = now();
@@ -1342,7 +1344,7 @@ class FactorySupervisorNode final : public rclcpp::Node {
     };
     const auto pending = std::make_shared<PendingHomeGoal>();
     rclcpp_action::Client<NavigateToPose>::SendGoalOptions options;
-    options.goal_response_callback = [this, pending](
+    options.goal_response_callback = [this, pending, client](
       std::shared_ptr<rclcpp_action::ClientGoalHandle<NavigateToPose>> goal_handle) {
         bool cancel_late = false;
         {
@@ -1354,13 +1356,13 @@ class FactorySupervisorNode final : public rclcpp::Node {
         pending->condition.notify_all();
         if (goal_handle && cancel_late) {
           try {
-            (void)navigation_client_->async_cancel_goal(goal_handle);
+            (void)client->async_cancel_goal(goal_handle);
           } catch (const rclcpp_action::exceptions::UnknownGoalHandleError &) {
             RCLCPP_WARN(get_logger(), "late home goal was already terminal during cancellation");
           }
         }
       };
-    navigation_client_->async_send_goal(goal, options);
+    client->async_send_goal(goal, options);
     lock.unlock();
     bool canceled_before_acceptance = false;
     const auto acceptance_deadline = std::chrono::steady_clock::now() + 3s;
@@ -1399,9 +1401,9 @@ class FactorySupervisorNode final : public rclcpp::Node {
       else home_interlock_failed_ = true;
       return false;
     }
-    auto result = navigation_client_->async_get_result(goal_handle);
+    auto result = client->async_get_result(goal_handle);
     if (canceled_before_acceptance) {
-      if (!cancel_home_navigation_goal(goal_handle, result)) {
+      if (!cancel_home_navigation_goal(client, goal_handle, result)) {
         std::lock_guard<std::mutex> state_lock(mutex_);
         home_cancel_confirmation_failed_ = true;
       }
@@ -1436,7 +1438,7 @@ class FactorySupervisorNode final : public rclcpp::Node {
         cancel_requested = home_cancel_requested_ || sequence_cancel_requested_ || stopping_;
       }
       if (cancel_requested) {
-        const bool confirmed = cancel_home_navigation_goal(goal_handle, result);
+        const bool confirmed = cancel_home_navigation_goal(client, goal_handle, result);
         if (!confirmed) {
           std::lock_guard<std::mutex> lock(mutex_);
           home_cancel_confirmation_failed_ = true;
@@ -1445,6 +1447,61 @@ class FactorySupervisorNode final : public rclcpp::Node {
       }
     }
     return false;
+  }
+
+  std::optional<std::array<double, 3>> current_home_pose()
+  {
+    try {
+      const auto pose = tf_buffer_.lookupTransform("map", "base_footprint", tf2::TimePointZero);
+      const double age = (now() - rclcpp::Time(
+        pose.header.stamp, get_clock()->get_clock_type())).seconds();
+      const auto & q = pose.transform.rotation;
+      const std::array<double, 3> result{pose.transform.translation.x,
+        pose.transform.translation.y, std::atan2(2.0 * q.w * q.z, 1.0 - 2.0 * q.z * q.z)};
+      if (!std::isfinite(age) || age < 0.0 || age > 0.30 ||
+        !std::all_of(result.begin(), result.end(), [](double value) { return std::isfinite(value); }))
+      {
+        RCLCPP_ERROR(get_logger(), "Home navigation localization is stale or invalid");
+        return std::nullopt;
+      }
+      return result;
+    } catch (const tf2::TransformException & error) {
+      RCLCPP_ERROR(get_logger(), "Home navigation localization unavailable: %s", error.what());
+      return std::nullopt;
+    }
+  }
+
+  bool navigate_home()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      home_cancel_confirmation_failed_ = false;
+      home_interlock_failed_ = false;
+    }
+    const auto start = current_home_pose();
+    if (!start) return false;
+    const auto home = stations_.at("home").approach;
+    const auto dispatch = stations_.at("dispatch").approach;
+    // The delivered products are below the lidar obstacle slice. Turn at the
+    // cleared approach and use the existing straight precision route, rather
+    // than allowing the normal lattice's departure curve beside the products.
+    if (std::abs((*start)[0] - dispatch[0]) <= 0.07 &&
+      std::hypot((*start)[0] - dispatch[0], (*start)[1] - dispatch[1]) <= 0.155)
+    {
+      const double heading = std::atan2(home[1] - (*start)[1], home[0] - (*start)[0]);
+      RCLCPP_INFO(get_logger(), "Home dispatch clearance: heading then straight precision travel");
+      if (!navigate_home_leg({(*start)[0], (*start)[1], heading}, navigation_client_)) return false;
+      const auto aligned = current_home_pose();
+      if (!aligned || std::abs((*aligned)[0] - dispatch[0]) > 0.07 ||
+        std::hypot((*aligned)[0] - dispatch[0], (*aligned)[1] - dispatch[1]) > 0.155)
+      {
+        RCLCPP_ERROR(get_logger(), "Home heading phase left the cleared dispatch approach");
+        return false;
+      }
+      const double travel_heading = std::atan2(home[1] - (*aligned)[1], home[0] - (*aligned)[0]);
+      if (!navigate_home_leg({home[0], home[1], travel_heading}, precision_navigation_client_)) return false;
+    }
+    return navigate_home_leg(home, navigation_client_);
   }
 
   void execute_home(const std::shared_ptr<HomeGoalHandle> & goal_handle)
@@ -1662,6 +1719,9 @@ class FactorySupervisorNode final : public rclcpp::Node {
   rclcpp_action::Server<NavigateStation>::SharedPtr home_server_;
   rclcpp_action::Client<Execute>::SharedPtr execute_client_;
   rclcpp_action::Client<NavigateToPose>::SharedPtr navigation_client_;
+  rclcpp_action::Client<NavigateToPose>::SharedPtr precision_navigation_client_;
+  tf2_ros::Buffer tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Service<SetOperationMode>::SharedPtr mode_service_;
   rclcpp::Service<Trigger>::SharedPtr stop_service_;
   rclcpp::Service<Trigger>::SharedPtr cancel_service_;

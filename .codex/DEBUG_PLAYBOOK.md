@@ -4,6 +4,27 @@ Use this playbook when a failure is unresolved, repeated, integration-related, t
 
 Normal straightforward fixes do not need this entire procedure.
 
+## 0. Default model assignments and user overrides
+
+The default model assignments use exact identifiers:
+
+* Sol/high is `gpt-6.1-sol` with high reasoning effort, the default advisor/analyzer
+  for advice, analysis, planning, diagnosis, and independent review.
+* Luna/max is `gpt-5.6-luna` with max reasoning effort, the default implementer.
+* There is no blanket GPT-6 prohibition. Explicit user direction may authorize
+  diagnosis, implementation, and validation in the current selected-model
+  session without a Luna handoff. This is not permission to switch models,
+  delegate, or change global settings.
+* Verify the exact model identifier and reasoning effort before every model
+  switch or delegation. If the assigned model is unavailable, stop and
+  report the blocker instead of substituting another model family.
+* The user's no-agent instruction remains binding. Use a manual Luna/max
+  handoff under the default workflow, or work directly in the current session
+  when explicitly directed. The Sol/Luna references below then mean the
+  authorized diagnosing/implementing session; all evidence requirements,
+  attempt limits, stop conditions, and independent-review requirements remain
+  binding. An author cannot claim their own verification as independent review.
+
 ## 1. Classify the failure
 
 Before changing source, classify the blocker as:
@@ -129,6 +150,14 @@ Then:
 * add focused regression coverage when practical
 * inspect the complete diff
 * run focused validation first
+
+After every Luna implementation mistake, update
+`LUNA_IMPLEMENTATION_LEDGER.md` before closing or handing off the packet.
+Increment the count and record the date/time, topic, observed failure, why it
+is a mistake, likely cause, detection evidence, and exact failure text when
+available. This includes rejected patches, implementation-caused validation
+failures, contradictions of the approved packet, reviewer-identified defects,
+and model-assignment violations.
 
 Do not alter thresholds, safety gates, tests, analyzers, or expected values just to produce a pass.
 

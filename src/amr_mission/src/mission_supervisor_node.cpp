@@ -117,12 +117,12 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         controller_log_callback(message);
       });
     server_ = create_mission_server(
-      "/amr/mission/navigate_to_pose", "goal_checker", "FollowPath");
+      "/amr/mission/navigate_to_pose", "GridBased", "goal_checker", "FollowPath");
     precise_server_ = create_mission_server(
-      "/amr/mission/navigate_to_pose_precise", "placement_goal_checker",
+      "/amr/mission/navigate_to_pose_precise", "PrecisionGridBased", "placement_goal_checker",
       "PlacementFollowPath");
     retreat_server_ = create_mission_server(
-      "/amr/mission/navigate_to_pose_retreat", "retreat_goal_checker",
+      "/amr/mission/navigate_to_pose_retreat", "PrecisionGridBased", "retreat_goal_checker",
       "PlacementFollowPath");
     return CallbackReturn::SUCCESS;
   }
@@ -293,26 +293,28 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
 
   rclcpp_action::Server<NavigateToPose>::SharedPtr create_mission_server(
     const std::string & endpoint,
+    const std::string & planner_id,
     const std::string & goal_checker_id,
     const std::string & controller_id)
   {
     return rclcpp_action::create_server<NavigateToPose>(
       this, endpoint,
-      [this, goal_checker_id, controller_id](const rclcpp_action::GoalUUID &,
+      [this, planner_id, goal_checker_id, controller_id](const rclcpp_action::GoalUUID &,
              std::shared_ptr<const NavigateToPose::Goal> goal) {
-        return handle_goal(*goal, goal_checker_id, controller_id);
+        return handle_goal(*goal, planner_id, goal_checker_id, controller_id);
       },
       [this](const std::shared_ptr<MissionGoalHandle> goal_handle) {
         return handle_cancel(goal_handle);
       },
-      [this, goal_checker_id, controller_id](
+      [this, planner_id, goal_checker_id, controller_id](
         const std::shared_ptr<MissionGoalHandle> goal_handle) {
-        start_planning(goal_handle, goal_checker_id, controller_id);
+        start_planning(goal_handle, planner_id, goal_checker_id, controller_id);
       });
   }
 
   rclcpp_action::GoalResponse handle_goal(
     const NavigateToPose::Goal & goal,
+    const std::string & planner_id,
     const std::string & goal_checker_id,
     const std::string & controller_id)
   {
@@ -329,6 +331,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       return rclcpp_action::GoalResponse::REJECT;
     }
     goal_reserved_ = true;
+    reserved_planner_id_ = planner_id;
     reserved_goal_checker_id_ = goal_checker_id;
     reserved_controller_id_ = controller_id;
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
@@ -409,12 +412,15 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
 
   void start_planning(
     const std::shared_ptr<MissionGoalHandle> & mission,
+    const std::string & planner_id,
     const std::string & goal_checker_id,
     const std::string & controller_id)
   {
+    std::string selected_planner_id;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!mission || !goal_reserved_ || mission_goal_ ||
+        reserved_planner_id_ != planner_id ||
         reserved_goal_checker_id_ != goal_checker_id ||
         reserved_controller_id_ != controller_id)
       {
@@ -422,6 +428,24 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       }
       mission_goal_ = mission;
       goal_reserved_ = false;
+      mission_planner_id_ = planner_id;
+      // A goal already inside the normal checker's 0.07 m XY tolerance is
+      // a terminal heading adjustment, not another lattice translation.
+      // Smac can otherwise create a multi-metre loop for that same-position
+      // goal. Keep FollowPath's collision-checked in-place rotation and the
+      // existing checker; only choose the exact, swept-footprint planner.
+      geometry_msgs::msg::PoseStamped current_pose;
+      const auto & target = mission->get_goal()->pose.pose.position;
+      if (planner_id == "GridBased" && latest_base_pose(current_pose) &&
+        std::isfinite(current_pose.pose.position.x) &&
+        std::isfinite(current_pose.pose.position.y) &&
+        std::hypot(target.x - current_pose.pose.position.x,
+          target.y - current_pose.pose.position.y) <= 0.07)
+      {
+        mission_planner_id_ = "PrecisionGridBased";
+        RCLCPP_INFO(get_logger(), "Near-position heading goal uses PrecisionGridBased");
+      }
+      selected_planner_id = mission_planner_id_;
       mission_goal_checker_id_ = goal_checker_id;
       mission_controller_id_ = controller_id;
       cancel_requested_ = false;
@@ -463,7 +487,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
 
     ComputePath::Goal goal;
     goal.goal = mission->get_goal()->pose;
-    goal.planner_id = "GridBased";
+    goal.planner_id = selected_planner_id;
     goal.use_start = false;
     rclcpp_action::Client<ComputePath>::SendGoalOptions options;
     options.goal_response_callback =
@@ -961,6 +985,8 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       cancel_requested_ = false;
       downstream_acceptance_pending_ = false;
       mission_goal_.reset();
+      mission_planner_id_.clear();
+      reserved_planner_id_.clear();
       mission_goal_checker_id_.clear();
       reserved_goal_checker_id_.clear();
       mission_controller_id_.clear();
@@ -1075,8 +1101,10 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   bool smoother_cancel_sent_{false};
   bool controller_cancel_sent_{false};
   std::string cancel_reason_;
+  std::string reserved_planner_id_;
   std::string reserved_goal_checker_id_;
   std::string reserved_controller_id_;
+  std::string mission_planner_id_;
   std::string mission_goal_checker_id_;
   std::string mission_controller_id_;
   std::shared_ptr<MissionGoalHandle> mission_goal_;

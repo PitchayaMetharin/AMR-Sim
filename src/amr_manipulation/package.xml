@@ -20,6 +20,7 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>trajectory_msgs</depend>
+  <depend>tf2_ros</depend>
   <exec_depend>amr_description</exec_depend>
   <exec_depend>amr_control</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>

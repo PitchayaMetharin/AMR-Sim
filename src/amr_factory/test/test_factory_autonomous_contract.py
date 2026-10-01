@@ -1109,12 +1109,14 @@ int main() {
 
 
 def _home_dispatch_probe():
-    body = _method("  bool navigate_home()", "  void execute_home(")
-    send_and_unlock = "    navigation_client_->async_send_goal(goal, options);\n    lock.unlock();"
+    body = _method("  bool navigate_home_leg(", "  std::optional<std::array<double, 3>> current_home_pose()")
+    body = body.replace("const rclcpp_action::Client<NavigateToPose>::SharedPtr & client",
+                        "const std::shared_ptr<Client> & client")
+    send_and_unlock = "    client->async_send_goal(goal, options);\n    lock.unlock();"
     assert send_and_unlock in body
     pre_correction_body = body.replace(
         send_and_unlock,
-        "    lock.unlock();\n    navigation_client_->async_send_goal(goal, options);",
+        "    lock.unlock();\n    client->async_send_goal(goal, options);",
         1,
     )
     body = body.replace("std::mutex", "TrackingMutex")
@@ -1241,8 +1243,8 @@ struct CurrentProbe {
   }
   int now() const {return 0;}
   CurrentProbe() {navigation_client_->guard=&mutex_;}
-  template<class Goal, class Result>
-  bool cancel_home_navigation_goal(const std::shared_ptr<Goal>&, Result&) {return false;}
+  template<class Owner, class Goal, class Result>
+  bool cancel_home_navigation_goal(const std::shared_ptr<Owner>&, const std::shared_ptr<Goal>&, Result&) {return false;}
 ''' + body + r'''
 };
 struct PreCorrectionProbe {
@@ -1259,24 +1261,24 @@ struct PreCorrectionProbe {
   }
   int now() const {return 0;}
   PreCorrectionProbe() {navigation_client_->guard=&mutex_;}
-  template<class Goal, class Result>
-  bool cancel_home_navigation_goal(const std::shared_ptr<Goal>&, Result&) {return false;}
+  template<class Owner, class Goal, class Result>
+  bool cancel_home_navigation_goal(const std::shared_ptr<Owner>&, const std::shared_ptr<Goal>&, Result&) {return false;}
 ''' + pre_correction_body + r'''
 };
 int main() {
   CurrentProbe expired; expired.ready=false;
-  if(expired.navigate_home() || expired.navigation_client_->dispatch_calls!=0 ||
+  if(expired.navigate_home_leg({1,2,0}, expired.navigation_client_) || expired.navigation_client_->dispatch_calls!=0 ||
      !expired.home_interlock_failed_) return 1;
   CurrentProbe fresh;
-  if(!fresh.navigate_home() || fresh.navigation_client_->dispatch_calls!=1 ||
+  if(!fresh.navigate_home_leg({1,2,0}, fresh.navigation_client_) || fresh.navigation_client_->dispatch_calls!=1 ||
      fresh.home_interlock_failed_ || !fresh.navigation_client_->dispatch_inside_guard) return 2;
   PreCorrectionProbe pre_correction;
-  if(!pre_correction.navigate_home() || pre_correction.navigation_client_->dispatch_calls!=1 ||
+  if(!pre_correction.navigate_home_leg({1,2,0}, pre_correction.navigation_client_) || pre_correction.navigation_client_->dispatch_calls!=1 ||
      pre_correction.navigation_client_->dispatch_inside_guard) return 3;
   CurrentProbe late;
   late.navigation_client_->accept_immediately=false;
   rclcpp::ok_value=false;
-  if(late.navigate_home() || !late.home_interlock_failed_ ||
+  if(late.navigate_home_leg({1,2,0}, late.navigation_client_) || !late.home_interlock_failed_ ||
      late.navigation_client_->dispatch_calls!=1) return 4;
   rclcpp::ok_value=true;
   late.navigation_client_->response_callback(std::make_shared<GoalHandle>());
@@ -1694,6 +1696,85 @@ def test_final_child_dispatch_rechecks_interlock_and_send_is_atomic():
 def test_home_dispatch_rechecks_fresh_empty_stow_before_send():
     output = _run_cpp("home_dispatch_probe", _home_dispatch_probe())
     assert "lock-owner instrumentation" in output
+
+
+def test_home_departure_orders_owned_legs_and_stops_after_failed_boundaries():
+    body = _method("  bool navigate_home()", "  void execute_home(")
+    program = r'''
+#include <array>
+#include <cmath>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <iostream>
+#define RCLCPP_INFO(...) do {} while(false)
+#define RCLCPP_ERROR(...) do {} while(false)
+struct Station {std::array<double,3> approach;};
+struct Client {int id;};
+struct Probe {
+  std::mutex mutex_;
+  bool home_cancel_confirmation_failed_=false,home_interlock_failed_=false;
+  bool canceled=false, valid_pose=true;
+  int fail_leg=0, cancel_after_leg=0, stale_after_leg=0;
+  bool drift_during_heading=false;
+  std::array<double,3> pose{-2.5,0.06,3.1};
+  std::unordered_map<std::string,Station> stations_{
+    {"home",{{-4.5,-1.5,0}}},{"dispatch",{{-2.5,0,3.141592653589793}}}};
+  std::shared_ptr<Client> navigation_client_=std::make_shared<Client>(Client{1});
+  std::shared_ptr<Client> precision_navigation_client_=std::make_shared<Client>(Client{2});
+  std::vector<int> owners;
+  std::vector<std::array<double,3>> targets;
+  std::optional<std::array<double,3>> current_home_pose() {
+    if (!valid_pose) return std::nullopt;
+    return pose;
+  }
+  bool navigate_home_leg(const std::array<double,3>& target, const std::shared_ptr<Client>& client) {
+    if (canceled) return false;
+    owners.push_back(client->id); targets.push_back(target);
+    const int leg=static_cast<int>(owners.size());
+    if (leg==fail_leg) return false;
+    pose=target;
+    if (leg==1 && drift_during_heading) pose[0]-=0.10;
+    if (leg==cancel_after_leg) canceled=true;
+    if (leg==stale_after_leg) valid_pose=false;
+    return true;
+  }
+''' + body + r'''
+};
+int main() {
+  Probe success;
+  if(!success.navigate_home() || success.owners!=std::vector<int>{1,2,1}) return 1;
+  const auto & heading=success.targets[0];
+  const auto & travel=success.targets[1];
+  const auto & home=success.targets[2];
+  if(heading[0]!=-2.5 || heading[1]!=0.06 || heading[2]>-2.4 || heading[2]<-2.6 ||
+     travel[0]!=-4.5 || travel[1]!=-1.5 || std::abs(travel[2]-heading[2])>1e-9 ||
+     home!=std::array<double,3>{-4.5,-1.5,0}) return 2;
+  for (int leg : {1,2,3}) {
+    Probe failed; failed.fail_leg=leg;
+    if(failed.navigate_home() || failed.owners.size()!=static_cast<unsigned>(leg)) return 3;
+  }
+  for (int leg : {1,2}) {
+    Probe canceled; canceled.cancel_after_leg=leg;
+    if(canceled.navigate_home() || canceled.owners.size()!=static_cast<unsigned>(leg)) return 4;
+  }
+  Probe stale; stale.valid_pose=false;
+  if(stale.navigate_home() || !stale.owners.empty()) return 5;
+  Probe stale_aligned; stale_aligned.stale_after_leg=1;
+  if(stale_aligned.navigate_home() || stale_aligned.owners.size()!=1) return 6;
+  Probe drift; drift.drift_during_heading=true;
+  if(drift.navigate_home() || drift.owners.size()!=1) return 8;
+  Probe ordinary; ordinary.pose={0,2,0};
+  if(!ordinary.navigate_home() || ordinary.owners!=std::vector<int>{1} ||
+     ordinary.targets[0]!=std::array<double,3>{-4.5,-1.5,0}) return 7;
+  std::cout << "home clearance route and failed-boundary stops passed\n";
+}
+'''
+    output = _run_cpp("home_route_probe", program)
+    assert "home clearance route" in output
 
 
 def test_transport_typed_failure_precedes_cancellation_and_requires_proof():

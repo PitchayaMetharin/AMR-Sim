@@ -154,6 +154,7 @@ class MissionBehaviorContext {
       },
       [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<Compute>> goal) {
         planner_goals.push_back(goal);
+        planner_ids.push_back(goal->get_goal()->planner_id);
         if (planner_result_mode == ResultMode::SUCCEED) {
           auto result = std::make_shared<Compute::Result>();
           result->path = successful_path();
@@ -284,6 +285,7 @@ class MissionBehaviorContext {
   rclcpp_action::Client<Smooth>::SharedPtr smoother_probe;
   rclcpp_action::Client<Follow>::SharedPtr controller_probe;
   std::vector<std::shared_ptr<rclcpp_action::ServerGoalHandle<Compute>>> planner_goals;
+  std::vector<std::string> planner_ids;
   std::vector<std::shared_ptr<rclcpp_action::ServerGoalHandle<Smooth>>> smoother_goals;
   std::vector<std::shared_ptr<rclcpp_action::ServerGoalHandle<Follow>>> controller_goals;
   std::vector<std::string> controller_goal_checker_ids;
@@ -605,6 +607,8 @@ TEST(MissionSupervisorBehavior, PreciseEndpointUsesPrivateCheckerAndSharesReserv
   ASSERT_TRUE(spin_until(executor, [&]() {
     return !context.controller_goal_checker_ids.empty();
   }, 2s));
+  ASSERT_FALSE(context.planner_ids.empty());
+  EXPECT_EQ(context.planner_ids.back(), "PrecisionGridBased");
   EXPECT_EQ(context.controller_goal_checker_ids.back(), "placement_goal_checker");
   ASSERT_FALSE(context.controller_ids.empty());
   EXPECT_EQ(context.controller_ids.back(), "PlacementFollowPath");
@@ -633,6 +637,8 @@ TEST(MissionSupervisorBehavior, PreciseEndpointUsesPrivateCheckerAndSharesReserv
   ASSERT_TRUE(spin_until(executor, [&]() {
     return context.controller_goal_checker_ids.size() >= 2;
   }, 2s));
+  ASSERT_GE(context.planner_ids.size(), 2U);
+  EXPECT_EQ(context.planner_ids.back(), "PrecisionGridBased");
   EXPECT_EQ(context.controller_goal_checker_ids.back(), "retreat_goal_checker");
   EXPECT_EQ(context.controller_ids.back(), "PlacementFollowPath");
   auto retreat_cancel_future = context.retreat_client->async_cancel_goal(retreat_goal);
@@ -661,12 +667,16 @@ TEST(MissionSupervisorBehavior, PlannerSuccessThenCancellationDuringFollowing) {
       context.smoother_probe->action_server_is_ready() &&
       context.controller_probe->action_server_is_ready();
   }, 2s));
-  auto goal_future = context.client->async_send_goal(valid_goal());
+  auto translation_goal = valid_goal();
+  translation_goal.pose.pose.position.x = 1.0;
+  auto goal_future = context.client->async_send_goal(translation_goal);
   ASSERT_EQ(executor.spin_until_future_complete(goal_future, 2s),
     rclcpp::FutureReturnCode::SUCCESS);
   auto mission_goal = goal_future.get();
   ASSERT_NE(mission_goal, nullptr);
   ASSERT_TRUE(spin_until(executor, [&]() { return !context.controller_goals.empty(); }, 2s));
+  ASSERT_FALSE(context.planner_ids.empty());
+  EXPECT_EQ(context.planner_ids.back(), "GridBased");
 
   auto cancel_future = context.client->async_cancel_goal(mission_goal);
   ASSERT_EQ(executor.spin_until_future_complete(cancel_future, 2s),
@@ -680,6 +690,69 @@ TEST(MissionSupervisorBehavior, PlannerSuccessThenCancellationDuringFollowing) {
   EXPECT_EQ(result_future.get().code, rclcpp_action::ResultCode::CANCELED);
   executor.remove_node(context.peer);
   executor.remove_node(context.supervisor->get_node_base_interface());
+}
+
+TEST(MissionSupervisorBehavior, NearPositionHeadingUsesPrecisionPlannerWithoutChangingController) {
+  struct Case {
+    double distance;
+    bool have_tf;
+    const char * planner;
+  };
+  const std::vector<Case> cases{
+    {0.0, true, "PrecisionGridBased"},
+    {0.069, true, "PrecisionGridBased"},
+    {0.071, true, "GridBased"},
+    {0.0, false, "GridBased"},
+  };
+  for (std::size_t index = 0; index < cases.size(); ++index) {
+    SCOPED_TRACE(index);
+    const auto & test_case = cases[index];
+    MissionBehaviorContext context("heading_route_" + std::to_string(index), false);
+    if (test_case.have_tf) {
+      geometry_msgs::msg::TransformStamped transform;
+      transform.header.frame_id = "map";
+      transform.child_frame_id = "base_footprint";
+      transform.transform.rotation.w = 1.0;
+      ASSERT_TRUE(context.supervisor->tf_buffer_.setTransform(transform, "test", true));
+    }
+    context.planner_result_mode = MissionBehaviorContext::ResultMode::SUCCEED;
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(context.supervisor->get_node_base_interface());
+    executor.add_node(context.peer);
+    ASSERT_TRUE(spin_until(executor, [&]() {
+      return context.client->action_server_is_ready() &&
+        context.planner_probe->action_server_is_ready() &&
+        context.smoother_probe->action_server_is_ready() &&
+        context.controller_probe->action_server_is_ready();
+    }, 2s));
+    auto goal = valid_goal();
+    goal.pose.pose.position.x = test_case.distance;
+    goal.pose.pose.orientation.z = std::sin(0.5);
+    goal.pose.pose.orientation.w = std::cos(0.5);
+    auto accepted = context.client->async_send_goal(goal);
+    ASSERT_EQ(executor.spin_until_future_complete(accepted, 2s),
+      rclcpp::FutureReturnCode::SUCCESS);
+    auto handle = accepted.get();
+    ASSERT_NE(handle, nullptr);
+    ASSERT_TRUE(spin_until(executor, [&]() {
+      return !context.controller_ids.empty();
+    }, 2s));
+    ASSERT_EQ(context.planner_ids.size(), 1U);
+    EXPECT_EQ(context.planner_ids.back(), test_case.planner);
+    EXPECT_EQ(context.controller_ids.back(), "FollowPath");
+    EXPECT_EQ(context.controller_goal_checker_ids.back(), "goal_checker");
+    auto cancel = context.client->async_cancel_goal(handle);
+    ASSERT_EQ(executor.spin_until_future_complete(cancel, 2s),
+      rclcpp::FutureReturnCode::SUCCESS);
+    ASSERT_FALSE(cancel.get()->goals_canceling.empty());
+    context.finish_controller_cancel();
+    auto terminal = context.client->async_get_result(handle);
+    ASSERT_EQ(executor.spin_until_future_complete(terminal, 2s),
+      rclcpp::FutureReturnCode::SUCCESS);
+    EXPECT_EQ(terminal.get().code, rclcpp_action::ResultCode::CANCELED);
+    executor.remove_node(context.peer);
+    executor.remove_node(context.supervisor->get_node_base_interface());
+  }
 }
 
 TEST(MissionSupervisorBehavior, SequentialSuccessAndAbortReleaseMissionIdentity) {

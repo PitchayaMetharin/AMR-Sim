@@ -314,7 +314,7 @@ class _Child:
         return self.return_code
 
 
-def _execution_adapter(return_code):
+def _execution_adapter(return_code, statuses=()):
     adapter = ADAPTER.CycleSupervisor.__new__(ADAPTER.CycleSupervisor)
     adapter._lock = threading.RLock()
     now = ADAPTER.time.monotonic()
@@ -337,6 +337,10 @@ def _execution_adapter(return_code):
     adapter._child_valid = False
     adapter._child_consistent = False
     adapter._child_terminal_empty_proof = False
+    adapter._child_preparation_boot_id = 0
+    adapter._child_mass_stage_boot_id = 0
+    adapter._child_stage_started = False
+    adapter._child_stage_loaded_proof = False
     adapter._child_detail = ""
     adapter._child_boot_id = 0
     adapter._child_sequence = 0
@@ -350,9 +354,17 @@ def _execution_adapter(return_code):
     adapter._fault_latched = False
     adapter.get_logger = lambda: _Logger()
     child = _Child(return_code)
-    adapter._start_child = lambda product_id, pickup_station: child
+    def start_child(product_id, pickup_station):
+        for status in statuses:
+            adapter._internal_status_callback(status)
+        return child
+    adapter._start_child = start_child
     adapter._wait_fresh_independent_empty_stow = lambda: True
-    adapter._child_safe_empty_stow = lambda: True
+    if statuses:
+        adapter._child_safe_empty_stow = lambda: (
+            ADAPTER.CycleSupervisor._child_safe_empty_stow(adapter))
+    else:
+        adapter._child_safe_empty_stow = lambda: True
     return adapter
 
 
@@ -369,6 +381,10 @@ def _status_adapter():
     adapter._child_valid = False
     adapter._child_consistent = False
     adapter._child_terminal_empty_proof = False
+    adapter._child_preparation_boot_id = 0
+    adapter._child_mass_stage_boot_id = 0
+    adapter._child_stage_started = False
+    adapter._child_stage_loaded_proof = False
     adapter._child_detail = ""
     adapter._child_boot_id = 0
     adapter._child_sequence = 0
@@ -532,9 +548,20 @@ def test_terminal_empty_proof_survives_wrapper_teardown_but_later_status_clears_
 
     with patch.object(ADAPTER.time, "monotonic", return_value=10.0):
         adapter._internal_status_callback(_child_status(
+            state=ADAPTER.ManipulatorStatus.STARTING,
+            base_motion_allowed=False, product_attached=False,
+            product_id="", source_boot_id=7, sequence=1,
+            detail="Gate 6 mass stage is starting"))
+        assert not adapter._child_terminal_empty_proof
+        adapter._internal_status_callback(_child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+            base_motion_allowed=True, product_attached=True,
+            product_id="101", source_boot_id=7, sequence=2))
+        assert adapter._child_stage_loaded_proof
+        adapter._internal_status_callback(_child_status(
             state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
             base_motion_allowed=True, product_attached=False,
-            product_id="", sequence=1))
+            product_id="", source_boot_id=7, sequence=3))
         assert adapter._child_terminal_empty_proof
         assert adapter._child_safe_empty_stow()
 
@@ -544,9 +571,162 @@ def test_terminal_empty_proof_survives_wrapper_teardown_but_later_status_clears_
         adapter._internal_status_callback(_child_status(
             state=ADAPTER.ManipulatorStatus.FAULT,
             valid=False, base_motion_allowed=False,
-            product_attached=False, product_id="", sequence=2))
+            product_attached=False, product_id="", sequence=4))
         assert not adapter._child_terminal_empty_proof
         assert not adapter._child_safe_empty_stow()
+
+
+def test_preparation_empty_stow_never_proves_success_after_wrapper_zero():
+    adapter = _execution_adapter(0, [
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+            base_motion_allowed=True, product_attached=False,
+            product_id="", source_boot_id=5, sequence=1,
+            detail="Product 101 prepared at pickup dock"),
+    ])
+
+    goal_handle = _GoalHandle()
+    result = adapter._execute_callback(goal_handle)
+
+    assert result.outcome == ExecuteProductCycle.Result.RETAINED_PRODUCT_FAULT
+    assert not result.delivered
+    assert goal_handle.terminal_calls == ["abort"]
+
+
+def test_stage_start_loaded_terminal_empty_sequence_proves_delivery():
+    adapter = _execution_adapter(0, [
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.STARTING,
+            base_motion_allowed=False, product_attached=False,
+            product_id="", source_boot_id=7, sequence=1,
+            detail="Gate 6 mass stage is starting"),
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+            base_motion_allowed=True, product_attached=True,
+            product_id="101", source_boot_id=7, sequence=2),
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+            base_motion_allowed=True, product_attached=False,
+            product_id="", source_boot_id=7, sequence=3),
+    ])
+
+    goal_handle = _GoalHandle()
+    result = adapter._execute_callback(goal_handle)
+
+    assert result.outcome == ExecuteProductCycle.Result.SUCCESS
+    assert result.delivered
+    assert goal_handle.terminal_calls == ["succeed"]
+
+
+def test_stage_progress_boot_claim_survives_missed_start_marker():
+    adapter = _execution_adapter(0, [
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+            base_motion_allowed=True, product_attached=False,
+            product_id="", source_boot_id=5, sequence=1,
+            detail="Product 101 prepared at pickup dock"),
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.MOVING,
+            base_motion_allowed=False, product_attached=False,
+            product_id="", source_boot_id=7, sequence=12,
+            detail="Arm command inhibited pending fresh READY and 500 ms stationary evidence"),
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+            base_motion_allowed=True, product_attached=True,
+            product_id="101", source_boot_id=7, sequence=401,
+            detail="Gate 6 1.000000 kg grasp and loaded stow passed"),
+        _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+            base_motion_allowed=True, product_attached=False,
+            product_id="", source_boot_id=7, sequence=410,
+            detail="Gate 6 1.000000 kg grasp, transport, placement, and empty stow passed"),
+    ])
+
+    goal_handle = _GoalHandle()
+    result = adapter._execute_callback(goal_handle)
+
+    assert result.outcome == ExecuteProductCycle.Result.SUCCESS
+    assert result.delivered
+    assert goal_handle.terminal_calls == ["succeed"]
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        (
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STARTING,
+                base_motion_allowed=False, product_attached=False,
+                product_id="", source_boot_id=7, sequence=1,
+                detail="Gate 6 mass stage is starting"),
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+                base_motion_allowed=True, product_attached=True,
+                product_id="101", source_boot_id=8, sequence=1),
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+                base_motion_allowed=True, product_attached=False,
+                product_id="", source_boot_id=8, sequence=2),
+        ),
+        (
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+                base_motion_allowed=True, product_attached=False,
+                product_id="", source_boot_id=7, sequence=1),
+        ),
+        (
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STARTING,
+                base_motion_allowed=False, product_attached=False,
+                product_id="", source_boot_id=7, sequence=1,
+                detail="Gate 6 mass stage is starting"),
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+                base_motion_allowed=True, product_attached=False,
+                product_id="", source_boot_id=7, sequence=2),
+        ),
+        (
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STARTING,
+                base_motion_allowed=False, product_attached=False,
+                product_id="", source_boot_id=7, sequence=1,
+                detail="Gate 6 mass stage is starting"),
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+                base_motion_allowed=True, product_attached=True,
+                product_id="101", source_boot_id=7, sequence=2),
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.STOWED_EMPTY,
+                base_motion_allowed=True, product_attached=False,
+                product_id="", source_boot_id=7, sequence=3),
+            _child_status(
+                state=ADAPTER.ManipulatorStatus.FAULT,
+                valid=False, base_motion_allowed=False,
+                product_attached=False, product_id="",
+                source_boot_id=7, sequence=4),
+        ),
+    ],
+)
+def test_terminal_proof_fails_closed_without_owned_stage_sequence(statuses):
+    adapter = _execution_adapter(0, statuses)
+    goal_handle = _GoalHandle()
+
+    result = adapter._execute_callback(goal_handle)
+
+    assert result.outcome == ExecuteProductCycle.Result.RETAINED_PRODUCT_FAULT
+    assert not result.delivered
+    assert goal_handle.terminal_calls == ["abort"]
+
+
+def test_direct_child_127_remains_dependency_unavailable():
+    adapter = _execution_adapter(127)
+    goal_handle = _GoalHandle()
+
+    result = adapter._execute_callback(goal_handle)
+
+    assert result.outcome == ExecuteProductCycle.Result.DEPENDENCY_UNAVAILABLE
+    assert not result.delivered
+    assert goal_handle.terminal_calls == ["abort"]
 
 
 def test_closed_terminal_authority_denies_motion_after_idle_proof_expires():

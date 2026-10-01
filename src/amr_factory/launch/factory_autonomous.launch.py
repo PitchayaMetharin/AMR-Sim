@@ -124,7 +124,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "map_yaml", default_value=os.path.join(factory, "maps", "factory.yaml")),
         DeclareLaunchArgument("initial_x", default_value="-4.5"),
-        DeclareLaunchArgument("initial_y", default_value="0.0"),
+        DeclareLaunchArgument("initial_y", default_value="-1.5"),
         DeclareLaunchArgument("initial_yaw", default_value="0.0"),
         OpaqueFunction(function=_validate_autonomous_mode),
         localization,

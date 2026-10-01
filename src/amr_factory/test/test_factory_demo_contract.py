@@ -1,10 +1,29 @@
 import json
+import ast
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_gazebo_exit_shuts_down_only_a_running_factory_launch():
+    from types import SimpleNamespace
+    from launch.actions import Shutdown
+
+    tree = ast.parse((ROOT / "launch" / "factory_localization.launch.py").read_text())
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "_shutdown_after_gazebo_exit")
+    namespace = {"Shutdown": Shutdown}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "factory_launch_exit", "exec"), namespace)
+    callback = namespace["_shutdown_after_gazebo_exit"]
+    # Required-process protection remains active for both clean and crashed
+    # unexpected exits. Only an already-started teardown skips the new event.
+    for returncode in (0, 1, -11):
+        events = callback(SimpleNamespace(returncode=returncode), SimpleNamespace(is_shutdown=False))
+        assert len(events) == 1 and isinstance(events[0], Shutdown)
+        assert callback(SimpleNamespace(returncode=returncode), SimpleNamespace(is_shutdown=True)) == []
 
 
 def test_factory_demo_starts_existing_local_stack_and_supervisors():

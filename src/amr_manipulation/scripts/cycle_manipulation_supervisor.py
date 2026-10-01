@@ -84,6 +84,10 @@ class CycleSupervisor(Node):
         self._child_valid = False
         self._child_consistent = False
         self._child_terminal_empty_proof = False
+        self._child_preparation_boot_id = 0
+        self._child_mass_stage_boot_id = 0
+        self._child_stage_started = False
+        self._child_stage_loaded_proof = False
         self._child_status_authority_open = False
         self._child_detail = "waiting for a cycle"
         self._child_boot_id = 0
@@ -342,6 +346,17 @@ class CycleSupervisor(Node):
             time.sleep(0.02)
         return False
 
+    @staticmethod
+    def _is_mass_stage_progress(message: ManipulatorStatus, consistent: bool) -> bool:
+        if not consistent:
+            return False
+        if (message.state == ManipulatorStatus.MOVING and
+                message.detail ==
+                "Arm command inhibited pending fresh READY and 500 ms stationary evidence"):
+            return True
+        return (message.state == ManipulatorStatus.STOWED_LOADED and
+                message.detail.startswith("Gate 6 "))
+
     def _internal_status_callback(self, message: ManipulatorStatus) -> None:
         now = time.monotonic()
         with self._lock:
@@ -350,17 +365,15 @@ class CycleSupervisor(Node):
                 return
             if message.source_boot_id == 0 or message.sequence == 0:
                 return
+            # Once the exact mass-stage start marker establishes ownership,
+            # delayed preparation (or another stage) status cannot replace the
+            # live stage state or its terminal proof.
+            if (self._child_stage_started and
+                    message.source_boot_id != self._child_mass_stage_boot_id):
+                return
             if (message.source_boot_id == self._child_boot_id and
                     message.sequence <= self._child_sequence):
                 return
-            self._child_boot_id = message.source_boot_id
-            self._child_sequence = message.sequence
-            self._child_attached = bool(message.product_attached)
-            self._child_product_id = message.product_id
-            self._child_state = message.state
-            self._child_valid = bool(message.valid)
-            self._child_detail = message.detail
-            self._child_status_at = now
             expected_product = self._product_id
             known_state = message.state in (
                 ManipulatorStatus.STARTING,
@@ -385,16 +398,57 @@ class CycleSupervisor(Node):
                     ManipulatorStatus.DEPLOYED,
                     ManipulatorStatus.FAULT,
                 ) or not message.base_motion_allowed)
-            self._child_consistent = all((
+            consistent = all((
                 known_state, valid_state, product_consistent,
                 attachment_state_consistent, loaded_state_consistent,
                 base_state_consistent))
-            # The mass-stage process publishes a terminal STOWED_EMPTY proof
-            # before its launch wrapper exits. Keep that proof tied to the
-            # current child boot and clear it on every later status so a
-            # wrapper teardown delay cannot turn a successful child into a
-            # false fault while a later fault can never be hidden.
+            stage_start = all((
+                consistent,
+                message.valid,
+                message.state == ManipulatorStatus.STARTING,
+                not message.product_attached,
+                message.product_id == "",
+                not message.base_motion_allowed,
+                message.detail == "Gate 6 mass stage is starting",
+            ))
+            if not self._child_stage_started:
+                if stage_start:
+                    self._child_stage_started = True
+                    self._child_mass_stage_boot_id = message.source_boot_id
+                    self._child_stage_loaded_proof = False
+                else:
+                    if self._child_preparation_boot_id == 0:
+                        self._child_preparation_boot_id = message.source_boot_id
+                    elif message.source_boot_id != self._child_preparation_boot_id:
+                        if not self._is_mass_stage_progress(message, consistent):
+                            return
+                        self._child_stage_started = True
+                        self._child_mass_stage_boot_id = message.source_boot_id
+                        self._child_stage_loaded_proof = False
+
+            self._child_boot_id = message.source_boot_id
+            self._child_sequence = message.sequence
+            self._child_attached = bool(message.product_attached)
+            self._child_product_id = message.product_id
+            self._child_state = message.state
+            self._child_valid = bool(message.valid)
+            self._child_consistent = consistent
+            self._child_detail = message.detail
+            self._child_status_at = now
+            if (self._child_stage_started and
+                    message.source_boot_id == self._child_mass_stage_boot_id and
+                    consistent and message.valid and
+                    message.state == ManipulatorStatus.STOWED_LOADED and
+                    message.product_attached and
+                    message.product_id == expected_product):
+                self._child_stage_loaded_proof = True
+            # Preparation STOWED_EMPTY is a live status only.  Terminal proof
+            # requires the same owned stage boot after a consistent loaded
+            # proof; any later accepted status recomputes the proof.
             self._child_terminal_empty_proof = bool(
+                self._child_stage_started and
+                self._child_stage_loaded_proof and
+                message.source_boot_id == self._child_mass_stage_boot_id and
                 self._child_consistent and message.valid and
                 message.state == ManipulatorStatus.STOWED_EMPTY and
                 not message.product_attached and
@@ -516,11 +570,15 @@ class CycleSupervisor(Node):
     def _child_safe_empty_stow(self) -> bool:
         with self._lock:
             # A successful child can be followed by a short ros2-launch
-            # wrapper teardown interval. The terminal proof is recorded only
-            # from a fresh, validated child status and is invalidated by any
-            # later child status, so it remains bounded without extending the
-            # live-status freshness window used while motion is active.
-            return self._child_status_at > 0.0 and self._child_terminal_empty_proof
+            # wrapper teardown interval.  The bounded proof is recorded only
+            # from an owned mass-stage start -> loaded -> empty sequence and
+            # is invalidated by any later accepted stage status, so preparation
+            # status cannot turn a successful wrapper into delivery proof.
+            return (
+                self._child_status_at > 0.0 and
+                self._child_stage_started and
+                self._child_stage_loaded_proof and
+                self._child_terminal_empty_proof)
 
     def _make_result(self, product_id: str, outcome: int, message: str,
                      delivered: bool = False) -> ExecuteProductCycle.Result:
@@ -591,6 +649,10 @@ class CycleSupervisor(Node):
                 self._child_valid = False
                 self._child_consistent = False
                 self._child_terminal_empty_proof = False
+                self._child_preparation_boot_id = 0
+                self._child_mass_stage_boot_id = 0
+                self._child_stage_started = False
+                self._child_stage_loaded_proof = False
                 self._child_attached = False
                 self._child_product_id = ""
             self._publish_feedback(

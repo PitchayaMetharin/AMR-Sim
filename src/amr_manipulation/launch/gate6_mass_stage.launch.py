@@ -6,7 +6,8 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -166,15 +167,30 @@ def _resolve_registry(context):
     }
 
 
+def _mass_stage_exit(event, _context):
+    """Propagate the nested mass-stage result through the launch wrapper."""
+    return_code = getattr(event, "returncode", None)
+    if return_code == 0:
+        return []
+    raise RuntimeError(f"Gate 6 mass stage exited with status {return_code}")
+
+
 def _make_node(context, moveit_config):
     registry = _resolve_registry(context)
-    return [Node(
+    stage = Node(
         package="amr_manipulation",
         executable="gate6_mass_stage",
         output="screen",
         parameters=[moveit_config.to_dict(), {"use_sim_time": True, **registry}],
         remappings=[("joint_states", "/amr/base/joint_states")],
-    )]
+    )
+    return [
+        RegisterEventHandler(OnProcessExit(
+            target_action=stage,
+            on_exit=_mass_stage_exit,
+        )),
+        stage,
+    ]
 
 
 def generate_launch_description():

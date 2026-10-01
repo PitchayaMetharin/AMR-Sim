@@ -33,6 +33,15 @@ def test_payload_aware_lower_path_is_fail_closed():
     assert "placement lower trajectory postconditions: PASS" in source
 
 
+def test_delivery_completion_requires_empty_dispatch_clearance_and_slot_proof():
+    source = MASS_STAGE.read_text(encoding="utf-8")
+    tail = source[source.index('throw std::runtime_error("empty stow tolerance was not achieved")'):]
+    assert tail.index('native_attachment_state_is("detached")') < tail.index(
+        "navigate_empty_dispatch_clearance(120s)")
+    assert tail.index("navigate_empty_dispatch_clearance(120s)") < tail.index(
+        "fresh detached dispatch-slot proof failed after clearance") < tail.index("passed = true;")
+
+
 def test_gate6_analyzer_is_installed_and_has_stable_result_marker():
     source = ANALYZER.read_text(encoding="utf-8")
     cmake = (PACKAGE_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")

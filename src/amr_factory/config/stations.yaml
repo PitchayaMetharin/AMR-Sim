@@ -5,7 +5,7 @@ max_hamming: 0
 stations:
   home:
     role: home
-    approach: {x: -4.5, y: 0.0, yaw: 0.0}
+    approach: {x: -4.5, y: -1.5, yaw: 0.0}
     dock: null
   pickup_a:
     role: pickup

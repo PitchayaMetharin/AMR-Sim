@@ -2,7 +2,7 @@
   ros__parameters:
     use_sim_time: true
     expected_planner_frequency: 2.0
-    planner_plugins: [GridBased]
+    planner_plugins: [GridBased, PrecisionGridBased]
     GridBased:
       plugin: nav2_smac_planner/SmacPlannerLattice
       # Keep planner endpoints within the normal 70 mm controller goal
@@ -30,6 +30,14 @@
       rotation_penalty: 5.0
       allow_reverse_expansion: false
       cache_obstacle_heuristic: false
+    PrecisionGridBased:
+      # Docking must approach the exact goal continuously: Navfn's appended
+      # grid-to-goal diagonal can rotate the rectangular footprint into a
+      # pedestal when the external smoother recomputes its headings.
+      plugin: amr_navigation/PrecisionNavfnPlanner
+      use_astar: true
+      allow_unknown: false
+      tolerance: 0.01
 
 /amr/global_costmap/global_costmap:
   ros__parameters:

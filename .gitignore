@@ -2,6 +2,8 @@ build/
 install/
 log/
 .ros_logs/
+phase14_evidence/
+*.log
 
 __pycache__/
 .pytest_cache/

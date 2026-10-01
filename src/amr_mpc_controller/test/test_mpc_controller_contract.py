@@ -54,7 +54,7 @@ def test_placement_controller_is_collision_checked_and_can_back_away():
     assert placement["plugin"] == normal["plugin"]
     assert placement["desired_linear_vel"] == 0.10
     assert placement["use_collision_detection"] is True
-    assert placement["min_approach_linear_velocity"] == 0.01
+    assert placement["min_approach_linear_velocity"] == 0.02
     assert placement["allow_reversing"] is True
     assert placement["use_rotate_to_heading"] is False
     assert normal["allow_reversing"] is False

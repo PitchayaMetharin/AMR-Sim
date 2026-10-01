@@ -20,6 +20,7 @@ find_package(shape_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 add_library(manipulation_validation
   src/attachment_gate.cpp
@@ -54,7 +55,7 @@ ament_target_dependencies(gate6_mass_stage
   shape_msgs
   std_msgs
   std_srvs
-  trajectory_msgs)
+  trajectory_msgs tf2_ros)
 target_link_libraries(gate6_mass_stage manipulation_validation)
 
 add_executable(manipulation_supervisor_node src/manipulation_supervisor_node.cpp)
@@ -93,6 +94,15 @@ if(BUILD_TESTING)
   target_link_libraries(tag_observation_validator_test manipulation_validation)
   ament_add_gtest(attachment_gate_test test/attachment_gate_test.cpp)
   target_link_libraries(attachment_gate_test manipulation_validation)
+  ament_add_gtest(
+    gate6_pickup_retreat_behavior_test
+    test/test_gate6_pickup_retreat_behavior.cpp)
+  ament_target_dependencies(
+    gate6_pickup_retreat_behavior_test
+    amr_interfaces control_msgs moveit_msgs moveit_ros_planning_interface
+    nav2_msgs nav_msgs rclcpp rclcpp_action moveit_core ros_gz_interfaces
+    shape_msgs std_msgs std_srvs trajectory_msgs tf2_ros)
+  target_link_libraries(gate6_pickup_retreat_behavior_test manipulation_validation)
   ament_add_pytest_test(moveit_config_test test/test_moveit_config.py)
   ament_add_pytest_test(manipulation_contract_test test/test_manipulation_contract.py)
   ament_add_pytest_test(product_test_contract_test test/test_product_test_contract.py)
