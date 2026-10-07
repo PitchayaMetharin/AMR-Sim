@@ -44,6 +44,9 @@ if(BUILD_TESTING)
   target_include_directories(qos_profiles_test PRIVATE include)
   ament_target_dependencies(qos_profiles_test rclcpp)
 
+  ament_add_gtest(final_placement_stance_test test/test_final_placement_stance.cpp)
+  target_include_directories(final_placement_stance_test PRIVATE include)
+
   ament_add_pytest_test(interface_schema_test test/test_interface_schema.py)
 endif()
 

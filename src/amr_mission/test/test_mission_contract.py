@@ -21,6 +21,16 @@ def test_mission_boundary_is_managed_and_validated():
     assert "behavior_tree.empty()" in source
 
 
+def test_dispatch_routes_gate_requested_goal_before_progress():
+    source = (ROOT / "src" / "mission_supervisor_node.cpp").read_text()
+    for suffix in ("a", "b", "a_precise", "b_precise"):
+        assert f'"/amr/mission/navigate_to_pose_dispatch_{suffix}"' in source
+    assert '"ExactGoalLattice"' in source
+    assert source.count('!requested_goal_parity(result.result->path, mission->get_goal()->pose)') == 2
+    assert 'FaultClass::PLANNER_ABORT' in source
+    assert 'FaultClass::SMOOTHER_ABORT' in source
+
+
 def test_mission_sequences_planning_then_path_following():
     source = (ROOT / "src" / "mission_supervisor_node.cpp").read_text()
     assert '"/amr/compute_path_to_pose"' in source

@@ -1,0 +1,14 @@
+<library path="heading_latched_rpp">
+  <class name="amr_mpc_controller::HeadingLatchedRPP"
+    type="amr_mpc_controller::HeadingLatchedRPP" base_class_type="nav2_core::Controller">
+    <description>RPP with a measured-stop heading latch for turns above 90 degrees.</description>
+  </class>
+  <class name="amr_mpc_controller::FinalPositionRPP"
+    type="amr_mpc_controller::FinalPositionRPP" base_class_type="nav2_core::Controller">
+    <description>Private final-physical-position envelope with retained heading latch.</description>
+  </class>
+  <class name="amr_mpc_controller::FinalPositionPlacementRPP"
+    type="amr_mpc_controller::FinalPositionPlacementRPP" base_class_type="nav2_core::Controller">
+    <description>Private final-physical-position envelope with upstream reversing.</description>
+  </class>
+</library>

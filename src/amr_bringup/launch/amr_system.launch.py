@@ -18,7 +18,7 @@ def generate_launch_description():
         parameters=[{"use_sim_time": True}],
     )
     return LaunchDescription([
-        SetEnvironmentVariable("ROS_DOMAIN_ID", "1"),
+        SetEnvironmentVariable("ROS_DOMAIN_ID", "232"),
         SetEnvironmentVariable("ROS_LOCALHOST_ONLY", "1"),
         health,
         EmitEvent(event=ChangeState(

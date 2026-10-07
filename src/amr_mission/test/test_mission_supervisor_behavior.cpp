@@ -121,7 +121,8 @@ class MissionBehaviorContext {
 
   explicit MissionBehaviorContext(
     const std::string & suffix, bool broadcast_tf = true,
-    bool separate_client_peer = false)
+    bool separate_client_peer = false,
+    const std::string & endpoint = "/amr/mission/navigate_to_pose")
   : peer(std::make_shared<rclcpp::Node>("mission_behavior_peer_" + suffix)),
     client_peer(separate_client_peer ?
       std::make_shared<rclcpp::Node>("mission_behavior_client_" + suffix) : peer),
@@ -157,7 +158,7 @@ class MissionBehaviorContext {
         planner_ids.push_back(goal->get_goal()->planner_id);
         if (planner_result_mode == ResultMode::SUCCEED) {
           auto result = std::make_shared<Compute::Result>();
-          result->path = successful_path();
+          result->path = planner_path(goal->get_goal()->goal);
           goal->succeed(result);
         }
       });
@@ -175,6 +176,7 @@ class MissionBehaviorContext {
         smoother_goals.push_back(goal);
         auto result = std::make_shared<Smooth::Result>();
         result->path = goal->get_goal()->path;
+        if (smoother_mutation) smoother_mutation(result->path);
         result->was_completed = true;
         goal->succeed(result);
       });
@@ -210,7 +212,12 @@ class MissionBehaviorContext {
       throw std::runtime_error("mission supervisor lifecycle setup failed");
     }
     client = rclcpp_action::create_client<Navigate>(
-      client_peer, "/amr/mission/navigate_to_pose");
+      client_peer, endpoint);
+    status_subscription = peer->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+      "/amr/mission/status", rclcpp::QoS(10),
+      [this](diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr message) {
+        for (const auto & status : message->status) statuses.push_back(status);
+      });
     precise_client = rclcpp_action::create_client<Navigate>(
       client_peer, "/amr/mission/navigate_to_pose_precise");
     retreat_client = rclcpp_action::create_client<Navigate>(
@@ -237,6 +244,13 @@ class MissionBehaviorContext {
     pose.header.frame_id = "map";
     pose.pose.orientation.w = 1.0;
     path.poses.push_back(pose);
+    return path;
+  }
+
+  nav_msgs::msg::Path planner_path(const geometry_msgs::msg::PoseStamped & requested) {
+    auto path = successful_path();
+    if (match_requested_goal) path.poses.push_back(requested);
+    if (planner_mutation) planner_mutation(path);
     return path;
   }
 
@@ -307,6 +321,10 @@ class MissionBehaviorContext {
   bool broadcast_tf;
   ResultMode planner_result_mode{ResultMode::HOLD};
   ResultMode controller_result_mode{ResultMode::HOLD};
+  bool match_requested_goal{false};
+  std::function<void(nav_msgs::msg::Path &)> planner_mutation, smoother_mutation;
+  rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr status_subscription;
+  std::vector<diagnostic_msgs::msg::DiagnosticStatus> statuses;
 };
 
 TEST(MissionSupervisorBehavior, ControllerCollisionLogPredicateIsExact) {
@@ -327,6 +345,213 @@ static nav2_msgs::action::NavigateToPose::Goal valid_goal() {
   goal.pose.header.frame_id = "map";
   goal.pose.pose.orientation.w = 1.0;
   return goal;
+}
+
+struct DispatchRoute {
+  const char * endpoint;
+  const char * planner;
+  const char * checker;
+  const char * controller;
+};
+
+static const std::vector<DispatchRoute> dispatch_routes{
+  {"/amr/mission/navigate_to_pose_dispatch_a", "ExactGoalLattice", "goal_checker", "FinalPositionFollowPathA"},
+  {"/amr/mission/navigate_to_pose_dispatch_b", "ExactGoalLattice", "goal_checker", "FinalPositionFollowPathB"},
+  {"/amr/mission/navigate_to_pose_dispatch_a_precise", "PrecisionGridBased", "placement_goal_checker", "FinalPositionPlacementFollowPathA"},
+  {"/amr/mission/navigate_to_pose_dispatch_b_precise", "PrecisionGridBased", "placement_goal_checker", "FinalPositionPlacementFollowPathB"},
+  {"/amr/mission/navigate_to_pose_dispatch_b_clear_approach", "PrecisionGridBased", "retreat_goal_checker", "FinalPositionPlacementFollowPathB"},
+};
+
+static std::string status_value(const diagnostic_msgs::msg::DiagnosticStatus & status, const char * key) {
+  for (const auto & value : status.values) if (value.key == key) return value.value;
+  return {};
+}
+
+TEST(MissionSupervisorBehavior, DispatchRoutesKeepIdentityAndAcceptEquivalentQuaternion) {
+  for (const auto & route : dispatch_routes) {
+    for (double distance : {0.0, 1.0}) {
+      SCOPED_TRACE(route.endpoint);
+      SCOPED_TRACE(distance);
+      MissionBehaviorContext context("dispatch_positive", false, false, route.endpoint);
+      context.match_requested_goal = true;
+      context.planner_result_mode = MissionBehaviorContext::ResultMode::SUCCEED;
+      context.controller_result_mode = MissionBehaviorContext::ResultMode::SUCCEED;
+      context.planner_mutation = [](nav_msgs::msg::Path & path) {
+        path.poses.back().pose.orientation.z *= -1.0;
+        path.poses.back().pose.orientation.w *= -1.0;
+      };
+      geometry_msgs::msg::TransformStamped transform;
+      transform.header.frame_id="map"; transform.child_frame_id="base_footprint";
+      transform.transform.rotation.w=1.0;
+      ASSERT_TRUE(context.supervisor->tf_buffer_.setTransform(transform,"test",true));
+      rclcpp::executors::SingleThreadedExecutor executor;
+      executor.add_node(context.supervisor->get_node_base_interface()); executor.add_node(context.peer);
+      ASSERT_TRUE(spin_until(executor,[&] {return context.client->action_server_is_ready() &&
+        context.planner_probe->action_server_is_ready() && context.smoother_probe->action_server_is_ready() &&
+        context.controller_probe->action_server_is_ready();},2s));
+      auto goal=valid_goal(); goal.pose.pose.position.x=distance;
+      goal.pose.pose.orientation.z=std::sin(0.5); goal.pose.pose.orientation.w=std::cos(0.5);
+      auto sent=context.client->async_send_goal(goal);
+      ASSERT_EQ(executor.spin_until_future_complete(sent,2s),rclcpp::FutureReturnCode::SUCCESS);
+      ASSERT_NE(sent.get(),nullptr);
+      auto terminal=context.client->async_get_result(sent.get());
+      ASSERT_EQ(executor.spin_until_future_complete(terminal,2s),rclcpp::FutureReturnCode::SUCCESS);
+      ASSERT_EQ(terminal.get().code,rclcpp_action::ResultCode::SUCCEEDED);
+      ASSERT_EQ(context.planner_ids.size(),1u);
+      EXPECT_EQ(context.planner_ids[0],distance==0.0 ? "PrecisionGridBased" : route.planner);
+      ASSERT_EQ(context.controller_ids.size(),1u);
+      EXPECT_EQ(context.controller_ids[0],route.controller);
+      EXPECT_EQ(context.controller_goal_checker_ids[0],route.checker);
+      EXPECT_EQ(context.supervisor->state_,amr_mission::MissionSupervisorNode::MissionState::IDLE);
+      executor.remove_node(context.peer); executor.remove_node(context.supervisor->get_node_base_interface());
+    }
+  }
+}
+
+TEST(MissionSupervisorBehavior, DispatchParityRejectsBeforeDownstreamStatusAndPublicDriftIsUnchanged) {
+  const std::vector<std::function<void(nav_msgs::msg::Path &)>> mutations{
+    [](auto & p) {p.poses.back().pose.position.x+=0.01;},
+    [](auto & p) {p.poses.back().pose.orientation.z=std::sin(0.01); p.poses.back().pose.orientation.w=std::cos(0.01);},
+    [](auto & p) {p.header.frame_id="odom";},
+    [](auto & p) {p.poses.front().header.frame_id="odom";},
+    [](auto & p) {p.poses.front().pose.orientation.w=0.0;},
+    [](auto & p) {p.poses.front().pose.position.x=std::numeric_limits<double>::quiet_NaN();},
+    [](auto & p) {p.poses.clear();},
+    [](auto & p) {p.poses.front().pose.position.z=0.01;},
+  };
+  for (const auto & route : dispatch_routes) {
+    for (bool smooth : {false,true}) {
+      for (std::size_t index=0;index<mutations.size();++index) {
+        SCOPED_TRACE(route.endpoint);
+        SCOPED_TRACE(smooth);
+        SCOPED_TRACE(index);
+        MissionBehaviorContext context("dispatch_reject",false,false,route.endpoint);
+        context.match_requested_goal=true;
+        context.planner_result_mode=MissionBehaviorContext::ResultMode::SUCCEED;
+        context.controller_result_mode=MissionBehaviorContext::ResultMode::SUCCEED;
+        (smooth ? context.smoother_mutation : context.planner_mutation)=mutations[index];
+        rclcpp::executors::SingleThreadedExecutor executor;
+        executor.add_node(context.supervisor->get_node_base_interface()); executor.add_node(context.peer);
+        ASSERT_TRUE(spin_until(executor,[&] {return context.client->action_server_is_ready() &&
+          context.planner_probe->action_server_is_ready() && context.smoother_probe->action_server_is_ready() &&
+          context.controller_probe->action_server_is_ready();},2s));
+        auto goal=valid_goal(); goal.pose.pose.position.x=1.0;
+        auto sent=context.client->async_send_goal(goal);
+        ASSERT_EQ(executor.spin_until_future_complete(sent,2s),rclcpp::FutureReturnCode::SUCCESS);
+        ASSERT_NE(sent.get(),nullptr);
+        auto terminal=context.client->async_get_result(sent.get());
+        ASSERT_EQ(executor.spin_until_future_complete(terminal,2s),rclcpp::FutureReturnCode::SUCCESS);
+        ASSERT_EQ(terminal.get().code,rclcpp_action::ResultCode::ABORTED);
+        ASSERT_TRUE(spin_until(executor,[&] {return !context.statuses.empty() &&
+          status_value(context.statuses.back(),"stage")=="TERMINAL";},2s));
+        EXPECT_EQ(context.smoother_goals.size(),smooth ? 1u : 0u);
+        EXPECT_TRUE(context.controller_goals.empty());
+        for (const auto & status : context.statuses) {
+          EXPECT_NE(status_value(status,"stage"),"FOLLOWING");
+          if (!smooth) EXPECT_NE(status_value(status,"stage"),"SMOOTHING");
+        }
+        EXPECT_EQ(status_value(context.statuses.back(),"fault_class"),smooth ? "SMOOTHER_ABORT" : "PLANNER_ABORT");
+        EXPECT_EQ(status_value(context.statuses.back(),"blockage_confirmed"),"false");
+        EXPECT_EQ(context.supervisor->state_,amr_mission::MissionSupervisorNode::MissionState::IDLE);
+        EXPECT_FALSE(context.supervisor->mission_goal_);
+        executor.remove_node(context.peer); executor.remove_node(context.supervisor->get_node_base_interface());
+      }
+    }
+  }
+  // Same endpoint drift remains admissible on the existing public route.
+  MissionBehaviorContext context("public_drift",false);
+  context.match_requested_goal=true;
+  context.planner_result_mode=MissionBehaviorContext::ResultMode::SUCCEED;
+  context.controller_result_mode=MissionBehaviorContext::ResultMode::SUCCEED;
+  context.planner_mutation=mutations[0]; context.smoother_mutation=mutations[0];
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(context.supervisor->get_node_base_interface()); executor.add_node(context.peer);
+  ASSERT_TRUE(spin_until(executor,[&] {return context.client->action_server_is_ready() &&
+    context.planner_probe->action_server_is_ready() && context.smoother_probe->action_server_is_ready() &&
+    context.controller_probe->action_server_is_ready();},2s));
+  auto sent=context.client->async_send_goal(valid_goal());
+  ASSERT_EQ(executor.spin_until_future_complete(sent,2s),rclcpp::FutureReturnCode::SUCCESS);
+  ASSERT_NE(sent.get(),nullptr);
+  auto terminal=context.client->async_get_result(sent.get());
+  ASSERT_EQ(executor.spin_until_future_complete(terminal,2s),rclcpp::FutureReturnCode::SUCCESS);
+  EXPECT_EQ(terminal.get().code,rclcpp_action::ResultCode::SUCCEEDED);
+  EXPECT_EQ(context.controller_goals.size(),1u);
+  executor.remove_node(context.peer); executor.remove_node(context.supervisor->get_node_base_interface());
+}
+
+TEST(MissionSupervisorBehavior, EveryDispatchAndPublicRouteSharesReservationUntilTerminalProof) {
+  std::vector<std::string> endpoints{"/amr/mission/navigate_to_pose",
+    "/amr/mission/navigate_to_pose_precise", "/amr/mission/navigate_to_pose_retreat"};
+  for (const auto & route : dispatch_routes) endpoints.push_back(route.endpoint);
+  for (const auto & owner : endpoints) {
+    SCOPED_TRACE(owner);
+    MissionBehaviorContext context("dispatch_reservation",false,false,owner);
+    std::vector<rclcpp_action::Client<MissionBehaviorContext::Navigate>::SharedPtr> clients;
+    for (const auto & endpoint : endpoints) clients.push_back(
+      rclcpp_action::create_client<MissionBehaviorContext::Navigate>(context.peer,endpoint));
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(context.supervisor->get_node_base_interface()); executor.add_node(context.peer);
+    ASSERT_TRUE(spin_until(executor,[&] {
+      for (const auto & client : clients) if (!client->action_server_is_ready()) return false;
+      return context.planner_probe->action_server_is_ready() && context.smoother_probe->action_server_is_ready() &&
+        context.controller_probe->action_server_is_ready();},2s));
+    auto sent=context.client->async_send_goal(valid_goal());
+    ASSERT_EQ(executor.spin_until_future_complete(sent,2s),rclcpp::FutureReturnCode::SUCCESS);
+    ASSERT_NE(sent.get(),nullptr);
+    ASSERT_TRUE(spin_until(executor,[&] {return !context.planner_goals.empty();},2s));
+    auto cancel=context.client->async_cancel_goal(sent.get());
+    ASSERT_EQ(executor.spin_until_future_complete(cancel,2s),rclcpp::FutureReturnCode::SUCCESS);
+    ASSERT_FALSE(cancel.get()->goals_canceling.empty());
+    ASSERT_TRUE(spin_until(executor,[&] {return context.planner_cancel_requested.load();},2s));
+    for (const auto & client : clients) {
+      auto rejected=client->async_send_goal(valid_goal());
+      ASSERT_EQ(executor.spin_until_future_complete(rejected,2s),rclcpp::FutureReturnCode::SUCCESS);
+      EXPECT_EQ(rejected.get(),nullptr);
+    }
+    context.finish_planner_cancel();
+    auto terminal=context.client->async_get_result(sent.get());
+    ASSERT_EQ(executor.spin_until_future_complete(terminal,2s),rclcpp::FutureReturnCode::SUCCESS);
+    EXPECT_EQ(terminal.get().code,rclcpp_action::ResultCode::CANCELED);
+    EXPECT_EQ(context.supervisor->state_,amr_mission::MissionSupervisorNode::MissionState::IDLE);
+    executor.remove_node(context.peer); executor.remove_node(context.supervisor->get_node_base_interface());
+  }
+}
+
+TEST(MissionSupervisorBehavior, DispatchPendingLateAcceptanceAndCancelWinsMalformedTerminal) {
+  for (const auto & route : dispatch_routes) {
+    SCOPED_TRACE(route.endpoint);
+    MissionBehaviorContext context("dispatch_late",false,true,route.endpoint);
+    context.hold_planner_acceptance=true;
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(context.supervisor->get_node_base_interface());
+    executor.add_node(context.peer); executor.add_node(context.client_peer);
+    ExecutorSpinGuard guard(executor,[&] {context.release_planner_acceptance_request();});
+    ASSERT_TRUE(wait_until([&] {return context.client->action_server_is_ready() &&
+      context.planner_probe->action_server_is_ready() && context.smoother_probe->action_server_is_ready() &&
+      context.controller_probe->action_server_is_ready();},2s));
+    auto sent=context.client->async_send_goal(valid_goal());
+    ASSERT_TRUE(wait_until([&] {return sent.wait_for(0ms)==std::future_status::ready;},2s));
+    ASSERT_NE(sent.get(),nullptr);
+    ASSERT_TRUE(wait_until([&] {return context.planner_acceptance_has_started();},2s));
+    auto cancel=context.client->async_cancel_goal(sent.get());
+    ASSERT_TRUE(wait_until([&] {return cancel.wait_for(0ms)==std::future_status::ready;},2s));
+    ASSERT_FALSE(cancel.get()->goals_canceling.empty());
+    auto terminal=context.client->async_get_result(sent.get());
+    EXPECT_EQ(terminal.wait_for(0ms),std::future_status::timeout);
+    context.release_planner_acceptance_request();
+    ASSERT_TRUE(wait_until([&] {return context.planner_cancel_requested.load();},2s));
+    EXPECT_EQ(context.planner_cancel_calls.load(),1);
+    EXPECT_EQ(terminal.wait_for(0ms),std::future_status::timeout);
+    // A successful malformed path still loses to the already-owned cancellation.
+    ASSERT_TRUE(context.planner_cancel_goal);
+    auto result=std::make_shared<MissionBehaviorContext::Compute::Result>();
+    result->path=MissionBehaviorContext::successful_path();
+    result->path.header.frame_id="odom";
+    context.planner_cancel_goal->succeed(result);
+    ASSERT_TRUE(wait_until([&] {return terminal.wait_for(0ms)==std::future_status::ready;},2s));
+    EXPECT_EQ(terminal.get().code,rclcpp_action::ResultCode::CANCELED);
+    EXPECT_TRUE(context.smoother_goals.empty()); EXPECT_TRUE(context.controller_goals.empty());
+  }
 }
 
 TEST(MissionSupervisorBehavior, RepeatedTfFeedbackRetainsCancellationObligation) {
@@ -701,7 +926,12 @@ TEST(MissionSupervisorBehavior, NearPositionHeadingUsesPrecisionPlannerWithoutCh
   const std::vector<Case> cases{
     {0.0, true, "PrecisionGridBased"},
     {0.069, true, "PrecisionGridBased"},
-    {0.071, true, "GridBased"},
+    // Short GridBased goals: the 0.5 m-radius lattice turned 0.30-0.45 m
+    // approaches into 2.7-2.9 m loops (Native46 dock B, Native47 dock A).
+    {0.071, true, "PrecisionGridBased"},
+    {0.45, true, "PrecisionGridBased"},
+    {0.99, true, "PrecisionGridBased"},
+    {1.0, true, "GridBased"},
     {0.0, false, "GridBased"},
   };
   for (std::size_t index = 0; index < cases.size(); ++index) {

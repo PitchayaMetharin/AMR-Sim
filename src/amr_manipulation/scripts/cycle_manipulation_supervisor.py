@@ -9,6 +9,7 @@ does not depend on the factory package at runtime.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import signal
@@ -43,6 +44,19 @@ STOW_TOLERANCE_RAD = 0.01
 JOINT_STATUS_MAX_AGE_S = 0.2
 INTERNAL_STATUS_MAX_AGE_S = 0.2
 BOOTSTRAP_PROOF_MAX_AGE_S = 0.75
+OWNERSHIP_SCHEMA = "AMR_CYCLE_OWNERSHIP_V1"
+OWNERSHIP_LOG_PREFIX = OWNERSHIP_SCHEMA + " "
+OWNERSHIP_MAX_RECORDS = 64
+OWNERSHIP_MAX_RECORD_BYTES = 4096
+OWNERSHIP_HISTORY_REASONS = frozenset({
+    "owned_status_unreadable", "invalid_initial_stage_claim",
+    "wrong_product_stage_claim", "contradictory_stage_ownership",
+    "foreign_stage_claim", "owned_sequence_rollback", "owned_status_invalid",
+    "accepted_child_snapshot_unavailable", "public_boundary_snapshot_unavailable",
+    "first_start_boundary_unqualified", "first_loaded_boundary_unqualified",
+    "first_empty_boundary_unqualified",
+    "record_capacity_exhausted", "observation_unavailable",
+})
 
 
 class MappingError(ValueError):
@@ -93,6 +107,7 @@ class CycleSupervisor(Node):
         self._child_boot_id = 0
         self._child_sequence = 0
         self._child_status_at = 0.0
+        self._ownership_epoch = None
         self._state = ManipulatorStatus.STARTING
         self._base_motion_allowed = False
         self._product_attached = False
@@ -357,11 +372,384 @@ class CycleSupervisor(Node):
         return (message.state == ManipulatorStatus.STOWED_LOADED and
                 message.detail.startswith("Gate 6 "))
 
+    @staticmethod
+    def _status_evidence_snapshot(message):
+        """Copy one status message into immutable primitive evidence fields."""
+        try:
+            stamp = message.header.stamp
+            return {
+                "header": {
+                    "stamp": {"sec": int(stamp.sec), "nanosec": int(stamp.nanosec)},
+                    "frame_id": str(message.header.frame_id),
+                },
+                "source_boot_id": int(message.source_boot_id),
+                "sequence": int(message.sequence),
+                "valid": bool(message.valid),
+                "state": int(message.state),
+                "base_motion_allowed": bool(message.base_motion_allowed),
+                "product_attached": bool(message.product_attached),
+                "product_id": str(message.product_id),
+                "detail": str(message.detail),
+            }
+        except Exception:  # evidence failure must never change action behavior
+            return None
+
+    @staticmethod
+    def _new_ownership_epoch(goal_handle, product_id: str, public_boot_id: int):
+        """Create an execution-local observer from the accepted action UUID."""
+        try:
+            goal_uuid = bytes(int(value) for value in goal_handle.goal_id.uuid)
+            if len(goal_uuid) != 16 or not any(goal_uuid):
+                return None
+            if type(product_id) is not str or not product_id:
+                return None
+            return {
+                "execution_uuid": goal_uuid.hex(),
+                "product_id": product_id,
+                "public_source_boot_id": int(public_boot_id),
+                "record_count": 0,
+                "history": set(),
+                "latest_child": None,
+                "latest_child_received_monotonic_s": None,
+                "first_start_attempted": False,
+                "first_loaded_attempted": False,
+                "first_empty_attempted": False,
+                "first_start": None,
+                "first_loaded": None,
+                "first_empty": None,
+                "initial_claim_seen": False,
+                "sealed": False,
+            }
+        except Exception:  # missing goal identity disables only augmentation
+            return None
+
+    def _mark_ownership_observation_unavailable_locked(self) -> None:
+        """Fail closed for corroboration without crossing into action behavior."""
+        try:
+            epoch = getattr(self, "_ownership_epoch", None)
+            if epoch is not None and not epoch.get("sealed"):
+                epoch["history"].add("observation_unavailable")
+        except Exception:
+            return
+
+    def _observe_safely_locked(self, observer, *args):
+        """Run only an added observer hook; its failures cannot affect the cycle."""
+        try:
+            return observer(*args)
+        except Exception:
+            self._mark_ownership_observation_unavailable_locked()
+            return None
+
+    def _observe_child_before_filters_locked(self, message) -> None:
+        """Latch bounded evidence guards before legacy callback early returns."""
+        epoch = getattr(self, "_ownership_epoch", None)
+        if epoch is None or epoch.get("sealed") or self._active_goal is None:
+            return
+        try:
+            boot_id = int(message.source_boot_id)
+            sequence = int(message.sequence)
+            state = int(message.state)
+            valid = bool(message.valid)
+            attached = bool(message.product_attached)
+            product_id = str(message.product_id)
+            detail = str(message.detail)
+        except Exception:
+            epoch["history"].add("owned_status_unreadable")
+            return
+
+        owned_boot_id = int(getattr(self, "_child_mass_stage_boot_id", 0))
+        stage_started = bool(getattr(self, "_child_stage_started", False))
+        stage_claim = any((
+            detail == "Gate 6 mass stage is starting",
+            state == ManipulatorStatus.MOVING and detail ==
+            "Arm command inhibited pending fresh READY and 500 ms stationary evidence",
+            state == ManipulatorStatus.STOWED_LOADED and detail.startswith("Gate 6 "),
+            state == ManipulatorStatus.STOWED_LOADED and attached,
+        ))
+        if not stage_claim and not (stage_started and boot_id == owned_boot_id):
+            return
+
+        identity_valid = boot_id > 0 and sequence > 0
+        expected_product = epoch["product_id"]
+        known_state = state in (
+            ManipulatorStatus.STARTING,
+            ManipulatorStatus.STOWED_EMPTY,
+            ManipulatorStatus.STOWED_LOADED,
+            ManipulatorStatus.MOVING,
+            ManipulatorStatus.DEPLOYED,
+            ManipulatorStatus.FAULT,
+        )
+        product_consistent = product_id == (expected_product if attached else "")
+        state_consistent = all((
+            known_state,
+            valid == (state != ManipulatorStatus.FAULT),
+            product_consistent,
+            state != ManipulatorStatus.STOWED_EMPTY or not attached,
+            state != ManipulatorStatus.STOWED_LOADED or attached,
+            state not in (
+                ManipulatorStatus.STARTING,
+                ManipulatorStatus.MOVING,
+                ManipulatorStatus.DEPLOYED,
+                ManipulatorStatus.FAULT,
+            ) or not bool(message.base_motion_allowed),
+        ))
+        if stage_claim:
+            if not identity_valid or not state_consistent or state == ManipulatorStatus.FAULT:
+                epoch["history"].add("invalid_initial_stage_claim")
+            if not product_consistent:
+                epoch["history"].add("wrong_product_stage_claim")
+            if not epoch["initial_claim_seen"]:
+                epoch["initial_claim_seen"] = True
+            elif (not stage_started and
+                  boot_id != int(epoch.get("initial_claim_boot_id", boot_id))):
+                epoch["history"].add("contradictory_stage_ownership")
+            if epoch.get("initial_claim_boot_id") is None and identity_valid:
+                epoch["initial_claim_boot_id"] = boot_id
+
+        if not identity_valid:
+            if stage_started:
+                epoch["history"].add("owned_status_unreadable")
+            return
+        if stage_started and boot_id != owned_boot_id:
+            if stage_claim:
+                epoch["history"].add("foreign_stage_claim")
+                epoch["history"].add("contradictory_stage_ownership")
+        if ((stage_started and boot_id == owned_boot_id) or
+                (stage_claim and boot_id == int(getattr(self, "_child_boot_id", 0)))):
+            if (boot_id == getattr(self, "_child_boot_id", 0) and
+                    sequence <= getattr(self, "_child_sequence", 0)):
+                epoch["history"].add("owned_sequence_rollback")
+            if not state_consistent or state == ManipulatorStatus.FAULT:
+                epoch["history"].add("owned_status_invalid")
+
+    def _observe_accepted_child_locked(self, message, received_monotonic_s: float) -> None:
+        epoch = getattr(self, "_ownership_epoch", None)
+        if epoch is None or epoch.get("sealed") or self._active_goal is None:
+            return
+        try:
+            snapshot = self._status_evidence_snapshot(message)
+            if snapshot is None:
+                epoch["history"].add("accepted_child_snapshot_unavailable")
+                return
+            epoch["latest_child"] = snapshot
+            epoch["latest_child_received_monotonic_s"] = float(received_monotonic_s)
+        except Exception:
+            epoch["history"].add("observation_unavailable")
+
+    def _ownership_record_locked(self, epoch, event: str, now: float,
+                                 public_status=None, extra=None):
+        if epoch is None or epoch.get("sealed"):
+            return None
+        if epoch["record_count"] >= OWNERSHIP_MAX_RECORDS:
+            epoch["history"].add("record_capacity_exhausted")
+            return None
+        epoch["record_count"] += 1
+        received = epoch["latest_child_received_monotonic_s"]
+        child_age = None if received is None else float(now) - received
+        record = {
+            "schema": OWNERSHIP_SCHEMA,
+            "version": 1,
+            "event": event,
+            "record_index": epoch["record_count"],
+            "execution_uuid": epoch["execution_uuid"],
+            "product_id": epoch["product_id"],
+            "public_source_boot_id": epoch["public_source_boot_id"],
+            "captured_monotonic_s": float(now),
+            "public": public_status,
+            "child": epoch["latest_child"],
+            "child_received_monotonic_s": received,
+            "child_age_s": child_age,
+            "owned_child_boot_id": int(getattr(self, "_child_mass_stage_boot_id", 0)),
+            "owned_child_sequence": (
+                int(epoch["latest_child"]["sequence"])
+                if epoch["latest_child"] is not None else None),
+            "child_consistent": bool(getattr(self, "_child_consistent", False)),
+            "authority_open": bool(getattr(self, "_child_status_authority_open", False)),
+            "stage_started": bool(getattr(self, "_child_stage_started", False)),
+            "stage_loaded_proof": bool(getattr(self, "_child_stage_loaded_proof", False)),
+            "terminal_empty_proof": bool(getattr(self, "_child_terminal_empty_proof", False)),
+            "fault_latched": bool(getattr(self, "_fault_latched", False)),
+            "cancel_requested": bool(getattr(self, "_cancel_requested", threading.Event()).is_set()),
+            "observed_history_violations": sorted(epoch["history"]),
+        }
+        if extra:
+            record.update(extra)
+        return record
+
+    def _capture_boundary_locked(self, message, now: float):
+        epoch = getattr(self, "_ownership_epoch", None)
+        if (epoch is None or epoch.get("sealed") or self._active_goal is None or
+                not self._child_status_authority_open):
+            return None
+        event = None
+        if message.detail == "Gate 6 mass stage is starting":
+            if epoch["first_start_attempted"]:
+                return None
+            epoch["first_start_attempted"] = True
+            event = "START"
+        elif (message.state == ManipulatorStatus.STOWED_LOADED and
+              bool(getattr(self, "_child_stage_started", False)) and
+              int(getattr(self, "_child_boot_id", 0)) ==
+              int(getattr(self, "_child_mass_stage_boot_id", -1))):
+            if epoch["first_loaded_attempted"]:
+                return None
+            epoch["first_loaded_attempted"] = True
+            event = "LOADED"
+        elif (message.state == ManipulatorStatus.STOWED_EMPTY and
+              bool(getattr(self, "_child_terminal_empty_proof", False))):
+            if epoch["first_empty_attempted"]:
+                return None
+            event = "EMPTY"
+        else:
+            return None
+
+        public = self._status_evidence_snapshot(message)
+        if public is None:
+            epoch["history"].add("public_boundary_snapshot_unavailable")
+            return None
+        child = epoch["latest_child"]
+        received = epoch["latest_child_received_monotonic_s"]
+        age = None if received is None else now - received
+        fresh_owned_child = all((
+            child is not None,
+            received is not None,
+            age is not None and math.isfinite(age) and 0.0 <= age <= INTERNAL_STATUS_MAX_AGE_S,
+            bool(getattr(self, "_child_consistent", False)),
+            bool(getattr(self, "_child_valid", False)),
+            bool(getattr(self, "_child_stage_started", False)),
+            int(getattr(self, "_child_mass_stage_boot_id", 0)) > 0,
+            int(getattr(self, "_child_boot_id", 0)) == int(getattr(self, "_child_mass_stage_boot_id", -1)),
+            child is not None and child["source_boot_id"] == int(getattr(self, "_child_mass_stage_boot_id", -1)),
+            int(message.source_boot_id) == epoch["public_source_boot_id"],
+            not bool(getattr(self, "_fault_latched", False)),
+            not bool(getattr(self, "_cancel_requested", threading.Event()).is_set()),
+            not epoch["history"],
+        ))
+        if event == "START":
+            qualifies = all((
+                fresh_owned_child,
+                public["valid"], public["state"] == ManipulatorStatus.STARTING,
+                not public["base_motion_allowed"], not public["product_attached"],
+                public["product_id"] == "", public["detail"] == "Gate 6 mass stage is starting",
+                child is not None and child["valid"] and child["state"] == ManipulatorStatus.STARTING,
+                child is not None and not child["base_motion_allowed"] and
+                not child["product_attached"] and child["product_id"] == "" and
+                child["detail"] == "Gate 6 mass stage is starting",
+                not bool(getattr(self, "_child_stage_loaded_proof", False)),
+                not bool(getattr(self, "_child_terminal_empty_proof", False)),
+            ))
+        elif event == "LOADED":
+            qualifies = all((
+                epoch["first_start"] is not None,
+                fresh_owned_child,
+                public["valid"], public["state"] == ManipulatorStatus.STOWED_LOADED,
+                public["base_motion_allowed"], public["product_attached"],
+                public["product_id"] == epoch["product_id"],
+                child is not None and child["valid"] and child["state"] == ManipulatorStatus.STOWED_LOADED,
+                child is not None and child["base_motion_allowed"] and child["product_attached"] and
+                child["product_id"] == epoch["product_id"],
+                bool(getattr(self, "_child_stage_loaded_proof", False)),
+                not bool(getattr(self, "_child_terminal_empty_proof", False)),
+            ))
+        else:  # first qualifying owned EMPTY boundary
+            qualifies = all((
+                epoch["first_start"] is not None,
+                epoch["first_loaded"] is not None,
+                fresh_owned_child,
+                public["valid"], public["state"] == ManipulatorStatus.STOWED_EMPTY,
+                public["base_motion_allowed"], not public["product_attached"],
+                public["product_id"] == "",
+                child is not None and child["valid"] and child["state"] == ManipulatorStatus.STOWED_EMPTY,
+                child is not None and child["base_motion_allowed"] and
+                not child["product_attached"] and child["product_id"] == "",
+                bool(getattr(self, "_child_stage_loaded_proof", False)),
+                bool(getattr(self, "_child_terminal_empty_proof", False)),
+            ))
+        if not qualifies:
+            if event == "START":
+                epoch["history"].add("first_start_boundary_unqualified")
+            elif event == "LOADED":
+                epoch["history"].add("first_loaded_boundary_unqualified")
+            return None
+        record = self._ownership_record_locked(epoch, event, now, public_status=public)
+        if record is None:
+            return None
+        identity = {
+            "record_index": record["record_index"],
+            "source_boot_id": public["source_boot_id"],
+            "sequence": public["sequence"],
+        }
+        if event == "START":
+            epoch["first_start"] = identity
+        elif event == "LOADED":
+            epoch["first_loaded"] = identity
+        else:
+            epoch["first_empty_attempted"] = True
+            epoch["first_empty"] = identity
+        return record
+
+    def _capture_close_locked(self, epoch, goal_handle, result, child,
+                              child_alive: bool, child_return_code, now: float):
+        if epoch is None or epoch.get("sealed"):
+            return None
+        child_reference_consistent = (
+            self._child is child if child_alive else self._child is None)
+        result_product = getattr(result, "product_id", None)
+        result_outcome = getattr(result, "outcome", None)
+        result_delivered = getattr(result, "delivered", None)
+        extra = {
+            "active_owner_match": self._active_goal is goal_handle,
+            "goal_reserved": bool(self._goal_reserved),
+            "public_sequence_high_water": int(self._sequence),
+            "current_state": int(self._state),
+            "current_detail": str(self._detail),
+            "current_base_motion_allowed": bool(self._base_motion_allowed),
+            "current_product_attached": bool(self._product_attached),
+            "current_product_id": str(self._product_id),
+            "child_exit_code": child_return_code if type(child_return_code) is int else None,
+            "child_alive": bool(child_alive),
+            "callback_child_present": child is not None,
+            "child_reference_consistent": bool(child_reference_consistent),
+            "result_product_id": result_product if type(result_product) is str else None,
+            "result_outcome": int(result_outcome) if type(result_outcome) is int else None,
+            "result_delivered": result_delivered if type(result_delivered) is bool else None,
+            "first_boundaries": {
+                "START": epoch["first_start"],
+                "LOADED": epoch["first_loaded"],
+                "EMPTY": epoch["first_empty"],
+            },
+            "captured_record_count": epoch["record_count"] + 1,
+        }
+        record = self._ownership_record_locked(epoch, "CLOSE", now, extra=extra)
+        epoch["sealed"] = True
+        return record
+
+    def _emit_ownership_record(self, record) -> None:
+        """Emit a frozen, bounded observation without affecting action behavior."""
+        try:
+            encoded = json.dumps(
+                record, ensure_ascii=True, allow_nan=False,
+                sort_keys=True, separators=(",", ":"))
+            text = OWNERSHIP_LOG_PREFIX + encoded
+            if len(text.encode("utf-8")) > OWNERSHIP_MAX_RECORD_BYTES:
+                return
+            self.get_logger().info(text)
+        except Exception:  # logging is observational and must remain best effort
+            return
+
+    def _emit_ownership_record_safely(self, record) -> None:
+        try:
+            self._emit_ownership_record(record)
+        except Exception:  # defensive boundary around the diagnostic channel
+            return
+
     def _internal_status_callback(self, message: ManipulatorStatus) -> None:
         now = time.monotonic()
         with self._lock:
-            if (self._active_goal is None or
-                    not self._child_status_authority_open or self._fault_latched):
+            if self._active_goal is None:
+                return
+            self._observe_safely_locked(self._observe_child_before_filters_locked, message)
+            if not self._child_status_authority_open or self._fault_latched:
                 return
             if message.source_boot_id == 0 or message.sequence == 0:
                 return
@@ -426,6 +814,9 @@ class CycleSupervisor(Node):
                         self._child_mass_stage_boot_id = message.source_boot_id
                         self._child_stage_loaded_proof = False
 
+            self._observe_safely_locked(
+                self._observe_accepted_child_locked, message, now)
+
             self._child_boot_id = message.source_boot_id
             self._child_sequence = message.sequence
             self._child_attached = bool(message.product_attached)
@@ -468,6 +859,7 @@ class CycleSupervisor(Node):
     def _publish_status(self) -> None:
         self._request_bootstrap_proof()
         message = ManipulatorStatus()
+        ownership_record = None
         with self._lock:
             now = time.monotonic()
             if self._fault_latched:
@@ -513,7 +905,11 @@ class CycleSupervisor(Node):
             message.product_id = (
                 self._product_id if self._product_attached or self._state == ManipulatorStatus.FAULT else "")
             message.detail = self._detail
+            ownership_record = self._observe_safely_locked(
+                self._capture_boundary_locked, message, now)
         self._status_pub.publish(message)
+        if ownership_record is not None:
+            self._emit_ownership_record_safely(ownership_record)
 
     def _publish_feedback(self, goal_handle, phase: int, phase_name: str) -> None:
         if not goal_handle.is_active:
@@ -622,6 +1018,9 @@ class CycleSupervisor(Node):
         goal = goal_handle.request
         product_id = self._product_by_station.get(goal.pickup_station_id, "")
         child: Optional[subprocess.Popen] = None
+        result = None
+        child_return_code = None
+        ownership_epoch = None
         cancel_sent = False
         cooperative_cancel_proven = False
         cancel_sent_at = 0.0
@@ -655,6 +1054,12 @@ class CycleSupervisor(Node):
                 self._child_stage_loaded_proof = False
                 self._child_attached = False
                 self._child_product_id = ""
+                try:
+                    ownership_epoch = self._new_ownership_epoch(
+                        goal_handle, product_id, self._boot_id)
+                except Exception:
+                    ownership_epoch = None
+                self._ownership_epoch = ownership_epoch
             self._publish_feedback(
                 goal_handle, ExecuteProductCycle.Feedback.PREPARING, "PREPARING")
             if self._cancel_requested.is_set():
@@ -705,6 +1110,7 @@ class CycleSupervisor(Node):
                         goal_handle, ExecuteProductCycle.Feedback.EXECUTING, "EXECUTING")
                 time.sleep(0.05)
             return_code = child.wait()
+            child_return_code = return_code
             canceled = self._cancel_requested.is_set() or return_code == 130
             independent_proof = self._wait_fresh_independent_empty_stow()
             child_empty_proof = self._child_safe_empty_stow()
@@ -798,6 +1204,7 @@ class CycleSupervisor(Node):
             if child_alive and child is not None:
                 self._terminate_child_fallback(child)
                 child_alive = child.poll() is None
+            close_record = None
             with self._lock:
                 self._child_status_authority_open = False
                 if child_alive:
@@ -810,6 +1217,14 @@ class CycleSupervisor(Node):
                     self._detail = "Gate 6 child remains alive after cleanup fallback"
                 elif self._child is child:
                     self._child = None
+                try:
+                    close_record = self._capture_close_locked(
+                        ownership_epoch, goal_handle, result, child, child_alive,
+                        child_return_code, time.monotonic())
+                except Exception:
+                    self._mark_ownership_observation_unavailable_locked()
+                if getattr(self, "_ownership_epoch", None) is ownership_epoch:
+                    self._ownership_epoch = None
                 if not child_alive:
                     self._goal_reserved = False
                     if self._active_goal is goal_handle:
@@ -817,6 +1232,8 @@ class CycleSupervisor(Node):
                     self._cancel_requested.clear()
                     if self._state != ManipulatorStatus.FAULT:
                         self._product_id = ""
+            if close_record is not None:
+                self._emit_ownership_record_safely(close_record)
 
 
 def main() -> None:

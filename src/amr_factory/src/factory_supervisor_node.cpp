@@ -452,16 +452,90 @@ class FactorySupervisorNode final : public rclcpp::Node {
   rclcpp_action::GoalResponse handle_transport_goal(
     const std::shared_ptr<const Transport::Goal> & goal)
   {
-    if (!goal || !registry_valid_ || !valid_pickup(goal->pickup_station_id) ||
-      !valid_destination(goal->destination_station_id)) return rclcpp_action::GoalResponse::REJECT;
+    const char * reason = "accepted";
+    const auto reject_if = [&reason](bool rejected, const char * selected) {
+      if (rejected) reason = selected;
+      return rejected;
+    };
+    bool ready_evaluated = false, ready = false;
+    bool duplicate_evaluated = false, duplicate = false;
+    double ready_age_before_ms = -1.0, ready_age_after_ms = -1.0;
+    const auto receipt_age_ms = [this]() {
+      return have_manipulator_status_ ? std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - manipulator_received_).count() : -1.0;
+    };
+    const auto trace_locked = [&](const char * decision) {
+      const auto & status = manipulator_status_;
+      const auto printable64 = [](const std::string & value) {
+        std::string copy = value.substr(0, 64);
+        for (char & byte : copy) {
+          const auto value = static_cast<unsigned char>(byte);
+          if (value < 0x20 || value > 0x7e) byte = '?';
+        }
+        return copy;
+      };
+      const auto pickup = printable64(goal ? goal->pickup_station_id : "<null>");
+      const auto destination = printable64(goal ? goal->destination_station_id : "<null>");
+      const auto product = printable64(status.product_id);
+      RCLCPP_INFO(get_logger(),
+        "transport_admission decision=%s reason=%s pickup64=%.64s destination64=%.64s "
+        "registry=%d stopping=%d fault=%d sequence_active=%d sequence_reserved=%d "
+        "home_active=%d home_reserved=%d pending=%d active=%d queue=%zu mode=%u "
+        "held=%d current_attached=%d ready_evaluated=%d ready=%d "
+        "duplicate_evaluated=%d duplicate=%d have_status=%d "
+        "ready_age_before_ms=%.6f ready_age_after_ms=%.6f snapshot_age_ms=%.6f "
+        "boot=%u seq=%u valid=%d state=%u base_allowed=%d attached=%d "
+        "product_empty=%d product64=%.64s stamp_sec=%d stamp_nsec=%u",
+        decision, reason, pickup.c_str(), destination.c_str(), registry_valid_,
+        stopping_, fault_latched_, sequence_active_, sequence_reserved_, home_active_,
+        home_reserved_, pending_transport_reservation_, static_cast<bool>(active_goal_),
+        queue_.size(), static_cast<unsigned>(mode_), held_product_, current_product_attached_,
+        ready_evaluated, ready, duplicate_evaluated, duplicate, have_manipulator_status_,
+        ready_age_before_ms, ready_age_after_ms, receipt_age_ms(), status.source_boot_id,
+        status.sequence, status.valid, static_cast<unsigned>(status.state),
+        status.base_motion_allowed, status.product_attached, status.product_id.empty(),
+        product.c_str(), status.header.stamp.sec, status.header.stamp.nanosec);
+    };
+    if (reject_if(!goal, "null_goal") || reject_if(!registry_valid_, "invalid_registry") ||
+      reject_if(!valid_pickup(goal->pickup_station_id), "invalid_pickup") ||
+      reject_if(!valid_destination(goal->destination_station_id), "invalid_destination"))
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      trace_locked("REJECTED");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
     const auto record = products_by_station_.at(goal->pickup_station_id);
     std::lock_guard<std::mutex> lock(mutex_);
-    if (record.product_id == "103" || stopping_ || fault_latched_ || sequence_active_ ||
-      home_active_ || pending_transport_reservation_ || active_goal_ || !queue_.empty() ||
-      !manipulator_ready_locked() || duplicate_product_locked(record.product_id))
+    const auto not_ready = [&]() {
+      ready_evaluated = true;
+      ready_age_before_ms = receipt_age_ms();
+      ready = manipulator_ready_locked();
+      ready_age_after_ms = receipt_age_ms();
+      return !ready;
+    };
+    const auto is_duplicate = [&]() {
+      duplicate_evaluated = true;
+      duplicate = duplicate_product_locked(record.product_id);
+      return duplicate;
+    };
+    if (reject_if(record.product_id == "103", "disabled_product") ||
+      reject_if(stopping_, "stopping") || reject_if(fault_latched_, "fault_latched") ||
+      reject_if(sequence_active_, "sequence_active") || reject_if(home_active_, "home_active") ||
+      reject_if(pending_transport_reservation_, "pending_transport_reservation") ||
+      reject_if(static_cast<bool>(active_goal_), "active_goal") ||
+      reject_if(!queue_.empty(), "nonempty_queue") ||
+      reject_if(not_ready(), "manipulator_not_ready") || reject_if(is_duplicate(), "duplicate_product"))
+    {
+      trace_locked("REJECTED");
       return rclcpp_action::GoalResponse::REJECT;
+    }
     const std::size_t capacity = mode_ == FactoryStatus::AUTONOMOUS ? 3U : 1U;
-    if ((active_goal_ ? 1U : 0U) + queue_.size() >= capacity) return rclcpp_action::GoalResponse::REJECT;
+    if ((active_goal_ ? 1U : 0U) + queue_.size() >= capacity) {
+      reason = "capacity";
+      trace_locked("REJECTED");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    trace_locked("ACCEPTED");  // Snapshot precedes the unchanged reservation mutation.
     pending_transport_reservation_ = true;
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }

@@ -9,16 +9,19 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "amr_interfaces/final_placement_stance.hpp"
 #include "amr_interfaces/msg/base_status.hpp"
 #include "amr_interfaces/msg/manipulator_status.hpp"
 #include "amr_interfaces/qos_profiles.hpp"
 #include "amr_manipulation/attachment_gate.hpp"
+#include "amr_manipulation/product102_arm_branch.hpp"
 #include "builtin_interfaces/msg/duration.hpp"
 #include "control_msgs/action/gripper_command.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -46,6 +49,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_srvs/srv/empty.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
@@ -75,6 +79,27 @@ struct ProductSpec {
   std::string status_topic;
   std::string cancel_service;
 };
+
+struct CurrentTfEvidence {
+  geometry_msgs::msg::TransformStamped transform;
+  std::array<double, 3> pose{};
+  double age_s{-1.0};
+  int32_t stamp_sec{0};
+  uint32_t stamp_nsec{0};
+};
+
+struct Product102CenteredDockEvidence {
+  geometry_msgs::msg::PoseStamped physical;
+  CurrentTfEvidence localized;
+};
+
+enum class CenteredBAlignmentAdmission { REJECT, DOCK_ONLY };
+
+CenteredBAlignmentAdmission centered_b_alignment_admission(double residual_m)
+{
+  return std::isfinite(residual_m) && residual_m >= 0.0 && residual_m <= 0.010 ?
+    CenteredBAlignmentAdmission::DOCK_ONLY : CenteredBAlignmentAdmission::REJECT;
+}
 
 template<typename ActionT>
 struct PendingActionGoal {
@@ -202,8 +227,22 @@ class MassStageNode final : public rclcpp::Node {
     precise_navigation_client_ =
       rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
       this, "/amr/mission/navigate_to_pose_precise");
+    if (product_.id == 101 || product_.id == 102) {
+      dispatch_endpoint_ = product_.id == 101 ? "/amr/mission/navigate_to_pose_dispatch_a" :
+        "/amr/mission/navigate_to_pose_dispatch_b";
+      dispatch_precise_endpoint_ = dispatch_endpoint_ + "_precise";
+      dispatch_navigation_client_ = rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+        this, dispatch_endpoint_);
+      dispatch_precise_navigation_client_ = rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+        this, dispatch_precise_endpoint_);
+    }
     egress_client_ = rclcpp_action::create_client<nav2_msgs::action::BackUp>(
       this, "/amr/control/dock_egress");
+    if (product_.id == 102) {
+      dispatch_b_clear_approach_client_ =
+        rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+        this, "/amr/mission/navigate_to_pose_dispatch_b_clear_approach");
+    }
     bootstrap_client_ = create_client<std_srvs::srv::Trigger>(
       "/amr/simulation/attachment_bootstrap/verify");
     status_timer_ = create_wall_timer(50ms, [this]() { publish_status(); });
@@ -607,7 +646,10 @@ class MassStageNode final : public rclcpp::Node {
     return true;
   }
 
-  bool use_fresh_amcl_terminal_pose(const std::array<double, 3> & target) {
+  bool use_fresh_amcl_terminal_pose(
+    const std::array<double, 3> & target,
+    SteadyTime received_after = {}, int64_t acquired_after = -1)
+  {
     geometry_msgs::msg::PoseWithCovarianceStamped amcl_pose;
     {
       std::lock_guard<std::mutex> lock(evidence_mutex_);
@@ -622,6 +664,16 @@ class MassStageNode final : public rclcpp::Node {
         !std::isfinite(amcl_pose_.pose.pose.orientation.w))
       {
         return false;
+      }
+      if (acquired_after >= 0) {
+        const auto & stamp = amcl_pose_.header.stamp;
+        const int64_t acquired = static_cast<int64_t>(stamp.sec) * 1000000000 + stamp.nanosec;
+        if (amcl_pose_received_ <= received_after || stamp.sec < 0 ||
+          stamp.nanosec >= 1000000000 || acquired <= acquired_after ||
+          acquired <= 0 || acquired > this->now().nanoseconds())
+        {
+          return false;
+        }
       }
       amcl_pose = amcl_pose_;
     }
@@ -660,26 +712,156 @@ class MassStageNode final : public rclcpp::Node {
   bool wait_for_amcl_terminal_pose(
     const std::array<double, 3> & target, std::chrono::milliseconds timeout = 5s)
   {
-    // Nav2's terminal TF feedback can precede the next AMCL publication.
-    // Observe that publication within the existing feedback horizon instead
-    // of rejecting the pre-turn cache or changing the terminal tolerances.
     const auto started = std::chrono::steady_clock::now();
     const auto deadline = started + timeout;
+    const int64_t terminal_clock = now().nanoseconds();
+    SteadyTime received_after = started;
+    int64_t acquired_after = std::max<int64_t>(0, terminal_clock);
+    bool entry_have_amcl = false;
+    int32_t entry_stamp_sec = 0;
+    uint32_t entry_stamp_nsec = 0;
+    SteadyTime entry_receipt;
+    bool request_sent = false;
+    {
+      std::lock_guard<std::mutex> lock(evidence_mutex_);
+      received_after = std::max(received_after, amcl_pose_received_);
+      const auto & stamp = amcl_pose_.header.stamp;
+      entry_have_amcl = have_amcl_pose_;
+      entry_stamp_sec = stamp.sec;
+      entry_stamp_nsec = stamp.nanosec;
+      entry_receipt = amcl_pose_received_;
+      if (have_amcl_pose_ && stamp.sec >= 0 && stamp.nanosec < 1000000000) {
+        acquired_after = std::max(acquired_after,
+          static_cast<int64_t>(stamp.sec) * 1000000000 + stamp.nanosec);
+      }
+    }
+    const auto trace_wait_exit = [&](const char * outcome, bool accepted) {
+      geometry_msgs::msg::PoseWithCovarianceStamped latest;
+      geometry_msgs::msg::PoseStamped proof;
+      SteadyTime receipt, snapshot_wall;
+      bool have_amcl, have_proof, have_attachment, attached;
+      const auto selected = selected_product_index();
+      {
+        std::lock_guard<std::mutex> lock(evidence_mutex_);
+        latest = amcl_pose_;
+        receipt = amcl_pose_received_;
+        have_amcl = have_amcl_pose_;
+        proof = navigation_feedback_pose_;
+        have_proof = navigation_feedback_received_ && !navigation_feedback_invalid_;
+        have_attachment = attachment_state_received_[selected] != SteadyTime{};
+        attached = have_attachment && attachment_states_[selected] == "attached";
+        snapshot_wall = std::chrono::steady_clock::now();
+      }
+      const int64_t snapshot_clock = now().nanoseconds();
+      const auto & pose = latest.pose.pose;
+      const bool finite = std::isfinite(pose.position.x) && std::isfinite(pose.position.y) &&
+        std::isfinite(pose.orientation.x) && std::isfinite(pose.orientation.y) &&
+        std::isfinite(pose.orientation.z) && std::isfinite(pose.orientation.w);
+      const double yaw = std::atan2(2.0 * pose.orientation.w * pose.orientation.z,
+        1.0 - 2.0 * pose.orientation.z * pose.orientation.z);
+      const double xy_error = std::hypot(pose.position.x - target[0], pose.position.y - target[1]);
+      const double yaw_error = std::abs(std::remainder(yaw - target[2], 2.0 * std::acos(-1.0)));
+      const auto & stamp = latest.header.stamp;
+      const int64_t acquired = static_cast<int64_t>(stamp.sec) * 1000000000 + stamp.nanosec;
+      const bool canonical_stamp = stamp.sec >= 0 && stamp.nanosec < 1000000000;
+      const auto steady_ns = [](SteadyTime value) {
+        return static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          value.time_since_epoch()).count());
+      };
+      RCLCPP_INFO(get_logger(),
+        "amcl_admission_wait outcome=%s accepted=%d request_sent=%d "
+        "entry_ros_ns=%lld entry_steady_ns=%lld entry_have_amcl=%d "
+        "entry_stamp_sec=%d entry_stamp_nsec=%u entry_receipt_ns=%lld "
+        "received_after_ns=%lld acquired_after_ns=%lld snapshot_not_guard=1 "
+        "snapshot_ros_ns=%lld snapshot_steady_ns=%lld elapsed_s=%.6f "
+        "have_amcl=%d have_receipt=%d receipt_ns=%lld receipt_age_s=%.6f "
+        "new_receipt=%d frame_map=%d finite=%d x=%.9f y=%.9f yaw=%.9f "
+        "xy_error_m=%.9f yaw_error_rad=%.9f receipt_within_6s=%d "
+        "stamp_sec=%d stamp_nsec=%u canonical_stamp=%d positive_stamp=%d "
+        "acquired_after_boundary=%d acquired_not_future=%d "
+        "proof_present=%d proof_stamp_sec=%d proof_stamp_nsec=%u proof_frame_map=%d "
+        "ok_snapshot=%d cancel_snapshot=%d have_attachment=%d attached_snapshot=%d",
+        outcome, accepted, request_sent, static_cast<long long>(terminal_clock),
+        steady_ns(started), entry_have_amcl, entry_stamp_sec, entry_stamp_nsec,
+        steady_ns(entry_receipt), steady_ns(received_after), static_cast<long long>(acquired_after),
+        static_cast<long long>(snapshot_clock), steady_ns(snapshot_wall),
+        std::chrono::duration<double>(snapshot_wall - started).count(), have_amcl,
+        receipt != SteadyTime{}, steady_ns(receipt), receipt != SteadyTime{} ?
+        std::chrono::duration<double>(snapshot_wall - receipt).count() : -1.0,
+        have_amcl && receipt > received_after, have_amcl && latest.header.frame_id == "map",
+        have_amcl && finite, pose.position.x, pose.position.y, yaw, xy_error, yaw_error,
+        have_amcl && snapshot_wall - receipt <= 6s, stamp.sec, stamp.nanosec,
+        have_amcl && canonical_stamp, have_amcl && acquired > 0,
+        have_amcl && acquired > acquired_after, have_amcl && acquired <= snapshot_clock,
+        accepted && have_proof, proof.header.stamp.sec, proof.header.stamp.nanosec,
+        accepted && have_proof && proof.header.frame_id == "map", rclcpp::ok(),
+        cancellation_requested(), have_attachment, attached);
+    };
+    if (!rclcpp::ok() || started >= deadline || cancellation_requested() ||
+      !native_attachment_state_is("attached")) {
+      trace_wait_exit("entry_guard", false);
+      return false;
+    }
+    if (use_fresh_amcl_terminal_pose(target)) {
+      if (!rclcpp::ok() || std::chrono::steady_clock::now() >= deadline ||
+        cancellation_requested() || !native_attachment_state_is("attached"))
+      {
+        reset_navigation_feedback();
+        trace_wait_exit("cached_final_guard", false);
+        return false;
+      }
+      trace_wait_exit("cached_accepted", true);
+      return true;  // Preserve the valid-cache path without requesting an update.
+    }
+    // Sub-threshold terminal motion need not produce another AMCL publication.
+    // Request one update, but only a new post-terminal pose can grant proof.
+    using UpdateClient = rclcpp::Client<std_srvs::srv::Empty>;
+    struct PendingUpdate {
+      UpdateClient::SharedPtr client;
+      std::optional<UpdateClient::FutureAndRequestId> request;
+      ~PendingUpdate() {
+        if (request) client->remove_pending_request(*request);
+      }
+    } update{create_client<std_srvs::srv::Empty>("/amr/request_nomotion_update"), std::nullopt};
+    int64_t previous_clock = terminal_clock;
     while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
-      if (cancellation_requested() || !native_attachment_state_is("attached")) return false;
+      if (cancellation_requested() || !native_attachment_state_is("attached")) {
+        trace_wait_exit("ownership_guard", false);
+        return false;
+      }
+      const int64_t current_clock = now().nanoseconds();
+      if (current_clock < previous_clock) {
+        reset_navigation_feedback();
+        trace_wait_exit("clock_rollback", false);
+        return false;
+      }
+      previous_clock = current_clock;
       SteadyTime observed_receipt;
       {
         std::lock_guard<std::mutex> lock(evidence_mutex_);
         observed_receipt = amcl_pose_received_;
       }
-      if (use_fresh_amcl_terminal_pose(target)) {
-        if (cancellation_requested() || !native_attachment_state_is("attached")) {
+      if (use_fresh_amcl_terminal_pose(target, received_after, acquired_after)) {
+        if (!rclcpp::ok() || std::chrono::steady_clock::now() >= deadline ||
+          now().nanoseconds() < current_clock || cancellation_requested() ||
+          !native_attachment_state_is("attached"))
+        {
           reset_navigation_feedback();
+          trace_wait_exit("refreshed_final_guard", false);
           return false;
         }
         RCLCPP_INFO(get_logger(), "AMCL terminal observation accepted after %.3f s",
           std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+        trace_wait_exit("refreshed_accepted", true);
         return true;
+      }
+      if (!update.request && update.client->service_is_ready() &&
+        std::chrono::steady_clock::now() < deadline &&
+        !cancellation_requested() && native_attachment_state_is("attached"))
+      {
+        update.request.emplace(update.client->async_send_request(
+          std::make_shared<std_srvs::srv::Empty::Request>()));
+        request_sent = true;
       }
       std::unique_lock<std::mutex> lock(evidence_mutex_);
       // Notifications wake on new AMCL/attachment/cancellation evidence.
@@ -691,6 +873,7 @@ class MassStageNode final : public rclcpp::Node {
             attachment_states_[selected_product_index()] != "attached";
         });
     }
+    trace_wait_exit(rclcpp::ok() ? "timeout" : "shutdown", false);
     return false;
   }
 
@@ -859,18 +1042,26 @@ class MassStageNode final : public rclcpp::Node {
   bool navigate_to_with_client(
     const std::array<double, 3> & target, std::chrono::seconds timeout,
     const rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr & navigation_client,
-    const char * endpoint, bool require_detached = false)
+    const char * endpoint, bool require_detached = false,
+    std::function<bool()> guard = {})
   {
     using Action = nav2_msgs::action::NavigateToPose;
-    if (cancellation_requested() || (require_detached && !native_attachment_state_is("detached")) ||
-      !navigation_client ||
-      !navigation_client->wait_for_action_server(5s))
+    if (guard && !guard()) return false;
+    if (cancellation_requested() ||
+      (require_detached && !native_attachment_state_is("detached")) || !navigation_client)
     {
       RCLCPP_ERROR(
         get_logger(), "Navigation action server unavailable: %s",
         endpoint ? endpoint : "(unknown endpoint)");
       return false;
     }
+    if (!navigation_client->wait_for_action_server(5s)) {
+      RCLCPP_ERROR(
+        get_logger(), "Navigation action server unavailable: %s",
+        endpoint ? endpoint : "(unknown endpoint)");
+      return false;
+    }
+    if (guard && !guard()) return false;
     reset_navigation_feedback();
     {
       std::lock_guard<std::mutex> lock(evidence_mutex_);
@@ -912,6 +1103,7 @@ class MassStageNode final : public rclcpp::Node {
     const auto monitoring_started = std::chrono::steady_clock::now();
     if (require_detached &&
       (cancellation_requested() || !native_attachment_state_is("detached"))) return false;
+    if (guard && !guard()) return false;
     navigation_client->async_send_goal(goal, options);
     bool canceled_before_acceptance = false;
     const auto acceptance_deadline = std::chrono::steady_clock::now() + 5s;
@@ -919,6 +1111,16 @@ class MassStageNode final : public rclcpp::Node {
       std::unique_lock<std::mutex> pending_lock(pending->mutex);
       if (pending->response_ready) break;
       pending_lock.unlock();
+      if (guard && !guard()) {
+        bool response_ready = false;
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          response_ready = pending->response_ready;
+          if (!response_ready) pending->abandoned = true;
+        }
+        if (!response_ready) return false;
+        continue;
+      }
       if (cancellation_requested()) {
         canceled_before_acceptance = true;
         std::lock_guard<std::mutex> lock(pending->mutex);
@@ -945,19 +1147,36 @@ class MassStageNode final : public rclcpp::Node {
       return false;
     }
     auto result = navigation_client->async_get_result(goal_handle);
+    const auto reject_guarded_goal = [&]() {
+        if (result.wait_for(0s) == std::future_status::ready) {
+          const auto terminal = result.get();
+          log_navigation_terminal(target, terminal.code);
+          return false;
+        }
+        const bool canceled = cancel_navigation_goal(navigation_client, goal_handle, result);
+        if (!canceled && result.wait_for(0s) == std::future_status::ready) {
+          const auto terminal = result.get();
+          log_navigation_terminal(target, terminal.code);
+        }
+        return false;
+      };
     if (canceled_before_acceptance) {
       (void)cancel_navigation_goal(navigation_client, goal_handle, result);
       return false;
     }
+    if (guard && !guard()) return reject_guarded_goal();
     const auto simulation_limit_ns =
       std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
     while (rclcpp::ok()) {
+      if (guard && !guard()) return reject_guarded_goal();
       if (require_detached && !native_attachment_state_is("detached")) {
         RCLCPP_ERROR(get_logger(), "Dispatch clearance lost native detached proof");
         (void)cancel_navigation_goal(navigation_client, goal_handle, result);
         return false;
       }
-      if (result.wait_for(50ms) == std::future_status::ready) break;
+      const auto wait_status = result.wait_for(50ms);
+      if (guard && !guard()) return reject_guarded_goal();
+      if (wait_status == std::future_status::ready) break;
       if (cancellation_requested()) {
         RCLCPP_WARN(get_logger(), "Canceling active navigation goal on cycle request");
         (void)cancel_navigation_goal(navigation_client, goal_handle, result);
@@ -995,6 +1214,10 @@ class MassStageNode final : public rclcpp::Node {
     }
     if (!rclcpp::ok() || result.wait_for(0s) != std::future_status::ready) return false;
     const auto wrapped = result.get();
+    if (guard && !guard()) {
+      log_navigation_terminal(target, wrapped.code);
+      return false;
+    }
     bool no_navigation_feedback = false;
     {
       std::lock_guard<std::mutex> lock(evidence_mutex_);
@@ -1009,6 +1232,7 @@ class MassStageNode final : public rclcpp::Node {
       (void)use_fresh_amcl_terminal_pose(target);
     }
     log_navigation_terminal(target, wrapped.code);
+    if (guard && !guard()) return false;
     bool have_feedback = false;
     bool feedback_invalid = false;
     {
@@ -1102,8 +1326,75 @@ class MassStageNode final : public rclcpp::Node {
       target, timeout, precise_navigation_client_, "/amr/mission/navigate_to_pose_precise");
   }
 
+  bool navigate_to_dispatch(const std::array<double, 3> & target, std::chrono::seconds timeout)
+  {
+    if (product_.id == 103) return navigate_to(target, timeout);
+    return navigate_to_with_client(
+      target, timeout, dispatch_navigation_client_, dispatch_endpoint_.c_str());
+  }
+
+  bool navigate_to_dispatch_precise(const std::array<double, 3> & target, std::chrono::seconds timeout)
+  {
+    if (product_.id == 103) return navigate_to_precise(target, timeout);
+    return navigate_to_with_client(
+      target, timeout, dispatch_precise_navigation_client_, dispatch_precise_endpoint_.c_str());
+  }
+
+  bool latest_current_tf_pose(CurrentTfEvidence & evidence)
+  {
+    evidence = CurrentTfEvidence{};
+    try {
+      evidence.transform = tf_buffer_.lookupTransform(
+        "map", "base_footprint", tf2::TimePointZero);
+    } catch (const tf2::TransformException &) {
+      return false;
+    }
+    const auto & stamp = evidence.transform.header.stamp;
+    evidence.stamp_sec = stamp.sec;
+    evidence.stamp_nsec = stamp.nanosec;
+    if (stamp.sec < 0 || stamp.nanosec >= 1000000000U) return false;
+    const int64_t acquired = static_cast<int64_t>(stamp.sec) * 1000000000LL + stamp.nanosec;
+    const int64_t current = now().nanoseconds();
+    evidence.age_s = static_cast<double>(current - acquired) / 1e9;
+    const auto & position = evidence.transform.transform.translation;
+    const auto & orientation = evidence.transform.transform.rotation;
+    const double norm_squared = orientation.x * orientation.x +
+      orientation.y * orientation.y + orientation.z * orientation.z +
+      orientation.w * orientation.w;
+    if (acquired <= 0 || !std::isfinite(evidence.age_s) || evidence.age_s < 0.0 ||
+      evidence.age_s > 0.30 || !std::isfinite(position.x) || !std::isfinite(position.y) ||
+      !std::isfinite(position.z) || !std::isfinite(orientation.x) ||
+      !std::isfinite(orientation.y) || !std::isfinite(orientation.z) ||
+      !std::isfinite(orientation.w) || !std::isfinite(norm_squared) ||
+      std::abs(norm_squared - 1.0) > 1e-6)
+    {
+      return false;
+    }
+    evidence.pose = {position.x, position.y,
+      std::atan2(2.0 * orientation.w * orientation.z,
+        1.0 - 2.0 * orientation.z * orientation.z)};
+    return std::isfinite(evidence.pose[2]);
+  }
+
+  bool unit_pose_yaw(const geometry_msgs::msg::Pose & pose, double & yaw) const
+  {
+    const auto & p = pose.position;
+    const auto & q = pose.orientation;
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+      !std::isfinite(q.x) || !std::isfinite(q.y) ||
+      !std::isfinite(q.z) || !std::isfinite(q.w))
+    {
+      return false;
+    }
+    const double norm_squared = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    if (!std::isfinite(norm_squared) || std::abs(norm_squared - 1.0) > 1e-6) return false;
+    yaw = std::atan2(2.0 * q.w * q.z, 1.0 - 2.0 * q.z * q.z);
+    return std::isfinite(yaw);
+  }
+
   bool navigate_to_aligned_precision(
-    const std::array<double, 3> & target, std::chrono::seconds timeout)
+    const std::array<double, 3> & target, std::chrono::seconds timeout,
+    bool use_dispatch_profile = false)
   {
     geometry_msgs::msg::PoseStamped start;
     if (cancellation_requested() || !native_attachment_state_is("attached") ||
@@ -1121,10 +1412,399 @@ class MassStageNode final : public rclcpp::Node {
     if (heading_error > 0.15) {
       const std::array<double, 3> heading_target{
         start.pose.position.x, start.pose.position.y, target[2]};
-      if (!navigate_to(heading_target, timeout)) return false;
+      if (!(use_dispatch_profile ? navigate_to_dispatch(heading_target, timeout) :
+        navigate_to(heading_target, timeout))) return false;
     }
     if (cancellation_requested() || !native_attachment_state_is("attached")) return false;
-    return navigate_to_precise(target, timeout);
+    return use_dispatch_profile ? navigate_to_dispatch_precise(target, timeout) :
+      navigate_to_precise(target, timeout);
+  }
+
+  bool navigate_product102_clear_approach(
+    const std::array<double, 3> & target, std::chrono::seconds timeout)
+  {
+    const int64_t started = now().nanoseconds();
+    const int64_t limit = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
+    int64_t previous = started;
+    const char * stage = "entry";
+    double xy_error = std::numeric_limits<double>::infinity();
+    double yaw_error = std::numeric_limits<double>::infinity();
+    double tf_age = -1.0, displacement = std::numeric_limits<double>::infinity();
+    bool tf_valid = false;
+    int32_t proof_sec = 0;
+    uint32_t proof_nsec = 0;
+    const auto finish = [&](bool success, const char * reason) {
+      RCLCPP_INFO(get_logger(),
+        "clear_approach_b_proof outcome=%s stage=%s reason=%s "
+        "xy_error_m=%.9f yaw_error_rad=%.9f tf_valid=%d tf_age_s=%.9f "
+        "stamp_sec=%d stamp_nsec=%u physical_displacement_m=%.9f "
+        "attached_snapshot=%d cancel_snapshot=%d",
+        success ? "PASS" : "FAIL", stage, reason, xy_error, yaw_error,
+        tf_valid, tf_age, proof_sec, proof_nsec, displacement,
+        native_attachment_state_is("attached"), cancellation_requested());
+      return success;
+    };
+    const auto remaining_ns = [&]() -> int64_t {
+      const int64_t current = now().nanoseconds();
+      if (!rclcpp::ok() || current < previous || current - started >= limit) return 0;
+      previous = current;
+      return limit - (current - started);
+    };
+    geometry_msgs::msg::PoseStamped physical_start, localized_start;
+    if (product_.id != 102 || timeout <= 0s || cancellation_requested() ||
+      !native_attachment_state_is("attached") || !dispatch_b_clear_approach_client_ ||
+      !std::isfinite(target[0]) || !std::isfinite(target[1]) || !std::isfinite(target[2]) ||
+      !latest_robot_pose(physical_start) || !latest_navigation_feedback_pose(localized_start))
+      return finish(false, "entry_evidence");
+    const double registered_error = std::hypot(
+      physical_start.pose.position.x - product_.dispatch_approach[0],
+      physical_start.pose.position.y - product_.dispatch_approach[1]);
+    const double translation = std::hypot(target[0] - localized_start.pose.position.x,
+      target[1] - localized_start.pose.position.y);
+    if (!std::isfinite(registered_error) || registered_error > 0.155 ||
+      !std::isfinite(translation) || translation > 0.15)
+      return finish(false, "translation_bounds");
+    const auto physical_ready = [&]() {
+      geometry_msgs::msg::PoseStamped physical;
+      if (cancellation_requested() || !native_attachment_state_is("attached") ||
+        !latest_robot_pose(physical)) return false;
+      displacement = std::hypot(physical.pose.position.x - physical_start.pose.position.x,
+        physical.pose.position.y - physical_start.pose.position.y);
+      return std::isfinite(displacement) && displacement <= 0.15;
+    };
+    const auto current_tf = [&](std::array<double, 3> & pose) {
+      CurrentTfEvidence evidence;
+      tf_valid = latest_current_tf_pose(evidence);
+      proof_sec = evidence.stamp_sec;
+      proof_nsec = evidence.stamp_nsec;
+      tf_age = evidence.age_s;
+      if (!tf_valid) return false;
+      pose = evidence.pose;
+      return tf_valid;
+    };
+    const auto run_stage = [&](const std::array<double, 3> & goal,
+      const rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr & client,
+      const char * endpoint)
+    {
+      const auto budget = std::chrono::seconds(remaining_ns() / 1000000000);
+      if (budget <= 0s || !physical_ready() ||
+        !navigate_to_with_client(goal, budget, client, endpoint)) return false;
+      return remaining_ns() > 0 && physical_ready();
+    };
+    const auto & q = localized_start.pose.orientation;
+    const double yaw = std::atan2(2.0*q.w*q.z, 1.0-2.0*q.z*q.z);
+    const double heading_error = std::abs(std::remainder(target[2] - yaw, 2.0*std::acos(-1.0)));
+    if (!std::isfinite(yaw) || !std::isfinite(heading_error)) return finish(false, "initial_heading");
+    if (heading_error > 0.15) {
+      stage = "initial_heading";
+      if (!run_stage({localized_start.pose.position.x, localized_start.pose.position.y, target[2]},
+        dispatch_navigation_client_, dispatch_endpoint_.c_str())) return finish(false, "stage_failed");
+    }
+    stage = "translation";
+    if (!run_stage(target, dispatch_b_clear_approach_client_,
+      "/amr/mission/navigate_to_pose_dispatch_b_clear_approach")) return finish(false, "stage_failed");
+    std::array<double, 3> achieved;
+    if (!current_tf(achieved)) return finish(false, "current_tf_unavailable");
+    stage = "terminal_heading";
+    if (!run_stage({achieved[0], achieved[1], target[2]}, dispatch_navigation_client_,
+      dispatch_endpoint_.c_str())) return finish(false, "stage_failed");
+    stage = "final_proof";
+    if (!current_tf(achieved) || !physical_ready() || remaining_ns() <= 0)
+      return finish(false, "final_evidence");
+    xy_error = std::hypot(achieved[0] - target[0], achieved[1] - target[1]);
+    yaw_error = std::abs(std::remainder(achieved[2] - target[2], 2.0*std::acos(-1.0)));
+    const bool proven = std::isfinite(xy_error) && std::isfinite(yaw_error) &&
+      xy_error <= 0.01 && yaw_error <= 0.15;
+    return finish(proven, proven ? "simultaneous_pose" : "pose_outside_gate");
+  }
+
+  bool navigate_product102_centered_dock(
+    const std::array<double, 3> & stance, std::chrono::seconds timeout,
+    Product102CenteredDockEvidence & dock_evidence)
+  {
+    struct Snapshot {
+      geometry_msgs::msg::PoseStamped physical;
+      CurrentTfEvidence localized;
+      double physical_yaw{0.0};
+      double bias_x{0.0};
+      double bias_y{0.0};
+      double bias_yaw{0.0};
+    };
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kClearPositionTolerance = 0.01;
+    constexpr double kHeadingTolerance = 0.15;
+    constexpr double kRegisteredApproachAdmission = 0.155;
+    constexpr double kClearAreaDisplacement = 0.15;
+    const auto wrap_yaw = [](double value) {
+        return std::remainder(value, 2.0 * std::acos(-1.0));
+      };
+    const auto fail = [this](const char * stage, const char * reason) {
+        RCLCPP_ERROR(get_logger(), "Product 102 centered dock failed stage=%s reason=%s",
+          stage, reason);
+        return false;
+      };
+    if (product_.id != 102 || product_.selected_slot_index < 0 ||
+      product_.selected_slot_index >= static_cast<int>(product_.dispatch_slots.size()) ||
+      timeout <= 0s || cancellation_requested() ||
+      !native_attachment_state_is("attached") || !dispatch_navigation_client_ ||
+      !dispatch_b_clear_approach_client_ || !dispatch_precise_navigation_client_)
+    {
+      return fail("entry", "product_branch_or_action_admission");
+    }
+    const auto expected_stance = amr_interfaces::placement::final_placement_stance(
+      product_.id, product_.dispatch_dock,
+      product_.dispatch_slots.at(static_cast<std::size_t>(product_.selected_slot_index)));
+    if (!expected_stance.product102_center_slot ||
+      !std::isfinite(stance[0]) || !std::isfinite(stance[1]) || !std::isfinite(stance[2]) ||
+      std::abs(stance[0] - expected_stance.physical[0]) > 1e-9 ||
+      std::abs(stance[1] - expected_stance.physical[1]) > 1e-9 ||
+      std::abs(wrap_yaw(stance[2] - expected_stance.physical[2])) > 1e-9)
+    {
+      return fail("entry", "centered_stance_mismatch");
+    }
+    for (const auto & value : {product_.dispatch_approach, product_.dispatch_dock}) {
+      if (!std::isfinite(value[0]) || !std::isfinite(value[1]) || !std::isfinite(value[2]))
+        return fail("entry", "registered_geometry_nonfinite");
+    }
+
+    const int64_t started_ns = now().nanoseconds();
+    const int64_t limit_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
+    int64_t previous_ns = started_ns;
+    const auto remaining_ns = [&]() -> int64_t {
+        const int64_t current_ns = now().nanoseconds();
+        if (!rclcpp::ok() || current_ns < previous_ns || current_ns - started_ns >= limit_ns)
+          return 0;
+        previous_ns = current_ns;
+        return limit_ns - (current_ns - started_ns);
+      };
+    const auto remaining_timeout = [&]() {
+        const int64_t value = remaining_ns();
+        if (value <= 0) return 0s;
+        constexpr int64_t kSecondNs = 1000000000LL;
+        const auto seconds = (value + kSecondNs - 1) / kSecondNs;
+        return std::chrono::seconds(std::min<int64_t>(seconds, timeout.count()));
+      };
+
+    const auto sample_physical = [this](geometry_msgs::msg::PoseStamped & physical,
+        double & yaw) {
+        {
+          std::lock_guard<std::mutex> lock(evidence_mutex_);
+          const auto wall_now = std::chrono::steady_clock::now();
+          if (!have_robot_pose_ || robot_pose_received_ == SteadyTime{} ||
+            wall_now < robot_pose_received_ || wall_now - robot_pose_received_ > 200ms)
+          {
+            return false;
+          }
+          physical = robot_pose_;
+        }
+        return physical.header.frame_id == "factory_world" &&
+          unit_pose_yaw(physical.pose, yaw);
+      };
+    geometry_msgs::msg::PoseStamped initial_physical;
+    double initial_yaw = 0.0;
+    if (!sample_physical(initial_physical, initial_yaw))
+      return fail("entry", "fresh_factory_world_physical_pose_unavailable");
+    const std::array<double, 2> original_clear_reference{
+      initial_physical.pose.position.x, initial_physical.pose.position.y};
+    const double registered_error = std::hypot(
+      original_clear_reference[0] - product_.dispatch_approach[0],
+      original_clear_reference[1] - product_.dispatch_approach[1]);
+    if (!std::isfinite(registered_error) || registered_error > kRegisteredApproachAdmission)
+      return fail("entry", "registered_approach_distance_exceeded");
+
+    const double axis_x = std::cos(stance[2]);
+    const double axis_y = std::sin(stance[2]);
+    const double approach_delta_x = product_.dispatch_approach[0] - stance[0];
+    const double approach_delta_y = product_.dispatch_approach[1] - stance[1];
+    const double projection = approach_delta_x * axis_x + approach_delta_y * axis_y;
+    const std::array<double, 2> clear_point{
+      stance[0] + projection * axis_x, stance[1] + projection * axis_y};
+    if (!std::isfinite(axis_x) || !std::isfinite(axis_y) ||
+      !std::isfinite(approach_delta_x) || !std::isfinite(approach_delta_y) ||
+      !std::isfinite(projection) || !std::isfinite(clear_point[0]) ||
+      !std::isfinite(clear_point[1]))
+    {
+      return fail("entry", "clear_line_projection_nonfinite");
+    }
+
+    const auto check_guard = [&](bool enforce_clear_reference) {
+        if (remaining_ns() <= 0 || cancellation_requested() ||
+          !native_attachment_state_is("attached")) return false;
+        geometry_msgs::msg::PoseStamped physical;
+        double physical_yaw = 0.0;
+        if (!sample_physical(physical, physical_yaw)) return false;
+        if (enforce_clear_reference) {
+          const double displacement = std::hypot(
+            physical.pose.position.x - original_clear_reference[0],
+            physical.pose.position.y - original_clear_reference[1]);
+          if (!std::isfinite(displacement) || displacement > kClearAreaDisplacement) return false;
+        }
+        return true;
+      };
+    const auto capture = [&](Snapshot & snapshot, bool enforce_clear_reference) {
+        if (!check_guard(enforce_clear_reference)) return false;
+        if (!sample_physical(snapshot.physical, snapshot.physical_yaw)) return false;
+        if (enforce_clear_reference) {
+          const double displacement = std::hypot(
+            snapshot.physical.pose.position.x - original_clear_reference[0],
+            snapshot.physical.pose.position.y - original_clear_reference[1]);
+          if (!std::isfinite(displacement) || displacement > kClearAreaDisplacement) return false;
+        }
+        if (!latest_current_tf_pose(snapshot.localized)) return false;
+        snapshot.bias_x = snapshot.physical.pose.position.x - snapshot.localized.pose[0];
+        snapshot.bias_y = snapshot.physical.pose.position.y - snapshot.localized.pose[1];
+        snapshot.bias_yaw = wrap_yaw(snapshot.physical_yaw - snapshot.localized.pose[2]);
+        return std::isfinite(snapshot.bias_x) && std::isfinite(snapshot.bias_y) &&
+          std::isfinite(snapshot.bias_yaw);
+      };
+    const auto wait_stopped = [&](bool enforce_clear_reference) {
+        const auto wall_started = std::chrono::steady_clock::now();
+        const auto wall_deadline = wall_started + 8s;
+        SteadyTime stationary_since{};
+        while (rclcpp::ok() && std::chrono::steady_clock::now() < wall_deadline) {
+          if (!check_guard(enforce_clear_reference)) return false;
+          const auto wall_now = std::chrono::steady_clock::now();
+          bool stationary = false;
+          {
+            std::lock_guard<std::mutex> lock(evidence_mutex_);
+            const bool base_fresh = have_base_ && base_received_ != SteadyTime{} &&
+              wall_now >= base_received_ && wall_now - base_received_ <= 200ms;
+            const bool odometry_fresh = have_odometry_ && odometry_received_ != SteadyTime{} &&
+              wall_now >= odometry_received_ && wall_now - odometry_received_ <= 200ms;
+            const auto & twist = odometry_.twist.twist;
+            stationary = base_fresh && odometry_fresh && base_status_.valid &&
+              base_status_.source_boot_id != 0U && base_status_.sequence != 0U &&
+              base_status_.state == amr_interfaces::msg::BaseStatus::READY &&
+              base_status_.reason == amr_interfaces::msg::BaseStatus::REASON_READY &&
+              std::isfinite(twist.linear.x) && std::isfinite(twist.linear.y) &&
+              std::isfinite(twist.angular.z) && std::abs(twist.linear.x) <= 0.01 &&
+              std::abs(twist.linear.y) <= 0.01 && std::abs(twist.angular.z) <= 0.01;
+          }
+          stationary_since = stationary ?
+            (stationary_since == SteadyTime{} ? wall_now : stationary_since) : SteadyTime{};
+          if (stationary_since != SteadyTime{} && wall_now - stationary_since >= 500ms)
+            return true;
+          std::this_thread::sleep_for(20ms);
+        }
+        return false;
+      };
+    const auto run_goal = [&](const std::array<double, 3> & goal,
+        const rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr & client,
+        const char * endpoint, bool enforce_clear_reference) {
+        const auto budget = remaining_timeout();
+        if (budget <= 0s || !check_guard(enforce_clear_reference) ||
+          !std::isfinite(goal[0]) || !std::isfinite(goal[1]) || !std::isfinite(goal[2]))
+        {
+          return false;
+        }
+        return navigate_to_with_client(goal, budget, client, endpoint, false,
+          [&, enforce_clear_reference]() {return check_guard(enforce_clear_reference);});
+      };
+    const auto observe_and_capture = [&](Snapshot & snapshot, bool enforce_clear_reference) {
+        return wait_stopped(enforce_clear_reference) &&
+          capture(snapshot, enforce_clear_reference);
+      };
+
+    Snapshot current;
+    if (!capture(current, true)) return fail("entry", "current_tf_or_physical_capture_failed");
+    if (!wait_stopped(true) || !capture(current, true))
+      return fail("entry", "initial_stationary_evidence_failed");
+    bool clear_proven = false;
+    for (int attempt = 0; attempt < 2 && !clear_proven; ++attempt) {
+      const double clear_dx = clear_point[0] - current.physical.pose.position.x;
+      const double clear_dy = clear_point[1] - current.physical.pose.position.y;
+      const double clear_distance = std::hypot(clear_dx, clear_dy);
+      if (!std::isfinite(clear_distance)) return fail("clear", "clear_distance_nonfinite");
+      if (clear_distance > kClearPositionTolerance) {
+        const double forward_yaw = std::atan2(clear_dy, clear_dx);
+        const double reverse_yaw = wrap_yaw(forward_yaw + kPi);
+        const double forward_error = std::abs(wrap_yaw(forward_yaw - current.physical_yaw));
+        const double reverse_error = std::abs(wrap_yaw(reverse_yaw - current.physical_yaw));
+        const double tangent_yaw = forward_error <= reverse_error ? forward_yaw : reverse_yaw;
+        const std::array<double, 3> tangent_heading{
+          current.localized.pose[0], current.localized.pose[1],
+          wrap_yaw(tangent_yaw - current.bias_yaw)};
+        if (!std::isfinite(forward_yaw) || !std::isfinite(reverse_yaw) ||
+          !std::isfinite(tangent_yaw) || !std::isfinite(tangent_heading[2]) ||
+          !run_goal(tangent_heading, dispatch_navigation_client_,
+            dispatch_endpoint_.c_str(), true) || !observe_and_capture(current, true))
+        {
+          return fail("tangent_heading", "action_or_stop_capture_failed");
+        }
+        if (std::abs(wrap_yaw(current.physical_yaw - tangent_yaw)) > kHeadingTolerance)
+          return fail("tangent_heading", "physical_heading_proof_failed");
+        const std::array<double, 3> clear_target{
+          clear_point[0] - current.bias_x, clear_point[1] - current.bias_y,
+          wrap_yaw(tangent_yaw - current.bias_yaw)};
+        const double commanded_distance = std::hypot(
+          clear_target[0] - current.localized.pose[0],
+          clear_target[1] - current.localized.pose[1]);
+        const double physical_command_distance = std::hypot(
+          clear_point[0] - current.physical.pose.position.x,
+          clear_point[1] - current.physical.pose.position.y);
+        if (!std::isfinite(commanded_distance) ||
+          !std::isfinite(physical_command_distance) ||
+          commanded_distance > kClearAreaDisplacement ||
+          physical_command_distance > kClearAreaDisplacement)
+        {
+          return fail("clear_translation", "clear_translation_bound_exceeded");
+        }
+        if (!run_goal(clear_target, dispatch_b_clear_approach_client_,
+            "/amr/mission/navigate_to_pose_dispatch_b_clear_approach", true) ||
+          !observe_and_capture(current, true))
+        {
+          return fail("clear_translation", "action_or_stop_capture_failed");
+        }
+      }
+
+      const std::array<double, 3> arrival_heading{
+        current.localized.pose[0], current.localized.pose[1],
+        wrap_yaw(stance[2] - current.bias_yaw)};
+      if (!run_goal(arrival_heading, dispatch_navigation_client_,
+          dispatch_endpoint_.c_str(), true) || !observe_and_capture(current, true))
+      {
+        return fail("arrival_heading", "action_or_stop_capture_failed");
+      }
+      const double physical_clear_error = std::hypot(
+        current.physical.pose.position.x - clear_point[0],
+        current.physical.pose.position.y - clear_point[1]);
+      const double physical_heading_error =
+        std::abs(wrap_yaw(current.physical_yaw - stance[2]));
+      if (!std::isfinite(physical_clear_error) || !std::isfinite(physical_heading_error))
+        return fail("clear_proof", "physical_proof_nonfinite");
+      if (physical_heading_error > kHeadingTolerance)
+        return fail("clear_proof", "arrival_heading_outside_tolerance");
+      clear_proven = physical_clear_error <= kClearPositionTolerance;
+      if (!clear_proven && attempt != 0)
+        return fail("clear_proof", "single_repair_did_not_converge");
+    }
+    if (!clear_proven) return fail("clear_proof", "clear_area_not_proven");
+
+    const std::array<double, 3> dock_target{
+      stance[0] - current.bias_x, stance[1] - current.bias_y,
+      wrap_yaw(stance[2] - current.bias_yaw)};
+    if (!run_goal(dock_target, dispatch_precise_navigation_client_,
+        dispatch_precise_endpoint_.c_str(), false) || !observe_and_capture(current, false))
+    {
+      return fail("dock", "precision_action_or_post_dock_capture_failed");
+    }
+    const double dock_residual = std::hypot(
+      current.physical.pose.position.x - stance[0],
+      current.physical.pose.position.y - stance[1]);
+    if (!std::isfinite(dock_residual) || dock_residual > kClearPositionTolerance)
+      return fail("dock", "physical_stance_xy_outside_tolerance");
+    const int64_t final_budget_remaining_ns = remaining_ns();
+    if (!check_guard(false))
+      return fail("dock", "final_admission_guard_failed");
+    dock_evidence.physical = current.physical;
+    dock_evidence.localized = current.localized;
+    RCLCPP_INFO(get_logger(),
+      "Product 102 centered dock proof PASS physical_xy_error_m=%.9f bias=(%.6f, %.6f, %.6f) "
+      "tf_age_s=%.6f budget_remaining_s=%.3f",
+      dock_residual, current.bias_x, current.bias_y, current.bias_yaw,
+      current.localized.age_s, static_cast<double>(final_budget_remaining_ns) / 1e9);
+    return true;
   }
 
   bool bounded_reverse(
@@ -1490,6 +2170,10 @@ class MassStageNode final : public rclcpp::Node {
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr navigation_client_;
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr retreat_navigation_client_;
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr precise_navigation_client_;
+  rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr dispatch_navigation_client_;
+  rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr dispatch_precise_navigation_client_;
+  rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr dispatch_b_clear_approach_client_;
+  std::string dispatch_endpoint_, dispatch_precise_endpoint_;
   rclcpp_action::Client<nav2_msgs::action::BackUp>::SharedPtr egress_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr bootstrap_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_service_;
@@ -2253,7 +2937,11 @@ int main(int argc, char ** argv) {
       // explicitly and let the collision-aware planner connect from the
       // validated pre-grasp state.  The product and pedestal remain active
       // obstacles; only the intentional-contact handle was removed above.
-      const std::vector<double> grasp_seed{
+      // Prefer the upright branch next to the pre-grasp (no joint 4/6 spin);
+      // keep the previous flipped seed as a fallback if it cannot be planned.
+      const auto upright_seed = amr_manipulation::product102_grasp_seed(
+        pregrasp_ik_solution.at(0));
+      const std::vector<double> legacy_flipped_grasp_seed{
         0.026650000, -0.770740000, 0.924890000,
         -2.969660000, 0.156420000, 2.971710000};
       auto grasp_ik_state = arm.getCurrentState(3.0);
@@ -2263,30 +2951,64 @@ int main(int argc, char ** argv) {
         grasp_ik_state->getJointModelGroup("manipulator");
       if (!grasp_manipulator_group ||
         grasp_manipulator_group->getVariableNames() != expected_pregrasp_joint_names ||
-        grasp_manipulator_group->getVariableCount() != grasp_seed.size())
+        grasp_manipulator_group->getVariableCount() != legacy_flipped_grasp_seed.size())
       {
         throw std::runtime_error("grasp IK manipulator joint order was invalid");
       }
-      if (!finite_pregrasp_joint_values(grasp_seed))
-        throw std::runtime_error("grasp IK seed was invalid");
-      grasp_ik_state->setJointGroupPositions(grasp_manipulator_group, grasp_seed);
-      grasp_ik_state->update();
-      if (!grasp_ik_state->setFromIK(
-          grasp_manipulator_group, grasp, "gripper_tcp", 0.5) ||
-        !grasp_ik_state->satisfiesBounds(grasp_manipulator_group))
-      {
-        throw std::runtime_error("exact seeded grasp IK preflight failed");
-      }
       std::vector<double> grasp_ik_solution;
-      grasp_ik_state->copyJointGroupPositions(
-        grasp_manipulator_group, grasp_ik_solution);
-      if (!finite_pregrasp_joint_values(grasp_ik_solution))
-        throw std::runtime_error("grasp IK preflight returned invalid joints");
-      arm.setStartStateToCurrentState();
-      if (!arm.setJointValueTarget(grasp_ik_solution))
-        throw std::runtime_error("exact grasp joint target was rejected");
-      if (arm.plan(approach_plan) != moveit::core::MoveItErrorCode::SUCCESS)
-        throw std::runtime_error("collision-aware grasp approach planning failed");
+      bool upright_grasp_planned = false;
+      {
+        const std::vector<double> seed(upright_seed.begin(), upright_seed.end());
+        if (!finite_pregrasp_joint_values(seed))
+          throw std::runtime_error("grasp IK seed was invalid");
+        grasp_ik_state->setJointGroupPositions(grasp_manipulator_group, seed);
+        grasp_ik_state->update();
+        const moveit::core::GroupStateValidityCallbackFn upright_only =
+          [](moveit::core::RobotState *, const moveit::core::JointModelGroup *,
+            const double * joints) { return amr_manipulation::product102_upright_wrist(joints); };
+        if (grasp_ik_state->setFromIK(
+            grasp_manipulator_group, grasp, "gripper_tcp", 0.5, upright_only) &&
+          grasp_ik_state->satisfiesBounds(grasp_manipulator_group))
+        {
+          grasp_ik_state->copyJointGroupPositions(grasp_manipulator_group, grasp_ik_solution);
+          if (finite_pregrasp_joint_values(grasp_ik_solution) &&
+            amr_manipulation::product102_upright_wrist(grasp_ik_solution.data()))
+          {
+            arm.setStartStateToCurrentState();
+            if (!arm.setJointValueTarget(grasp_ik_solution))
+              throw std::runtime_error("exact grasp joint target was rejected");
+            arm.setPathConstraints(pregrasp_wrist_constraints);
+            upright_grasp_planned =
+              arm.plan(approach_plan) == moveit::core::MoveItErrorCode::SUCCESS;
+            arm.clearPathConstraints();
+          }
+        }
+        RCLCPP_INFO(
+          node->get_logger(), "Product102 upright grasp branch %s",
+          upright_grasp_planned ? "planned" : "unavailable; using legacy flipped seed");
+      }
+      if (!upright_grasp_planned) {
+        if (!finite_pregrasp_joint_values(legacy_flipped_grasp_seed))
+          throw std::runtime_error("grasp IK seed was invalid");
+        grasp_ik_state->setJointGroupPositions(
+          grasp_manipulator_group, legacy_flipped_grasp_seed);
+        grasp_ik_state->update();
+        if (!grasp_ik_state->setFromIK(
+            grasp_manipulator_group, grasp, "gripper_tcp", 0.5) ||
+          !grasp_ik_state->satisfiesBounds(grasp_manipulator_group))
+        {
+          throw std::runtime_error("exact seeded grasp IK preflight failed");
+        }
+        grasp_ik_state->copyJointGroupPositions(
+          grasp_manipulator_group, grasp_ik_solution);
+        if (!finite_pregrasp_joint_values(grasp_ik_solution))
+          throw std::runtime_error("grasp IK preflight returned invalid joints");
+        arm.setStartStateToCurrentState();
+        if (!arm.setJointValueTarget(grasp_ik_solution))
+          throw std::runtime_error("exact grasp joint target was rejected");
+        if (arm.plan(approach_plan) != moveit::core::MoveItErrorCode::SUCCESS)
+          throw std::runtime_error("collision-aware grasp approach planning failed");
+      }
       const auto & approach_joint_names =
         approach_plan.trajectory_.joint_trajectory.joint_names;
       const auto & approach_points = approach_plan.trajectory_.joint_trajectory.points;
@@ -2596,6 +3318,12 @@ int main(int argc, char ** argv) {
     if (!amr_manipulation::pickup_station_admission_proof(
         node, product, product_attached, pickup_station_achieved, dispatch_translation_start))
       throw std::runtime_error("pickup station admission proof failed");
+    // Establish one immutable physical reference before loaded dispatch travel;
+    // placement below reuses it rather than deriving a different endpoint.
+    const auto final_placement_stance = amr_interfaces::placement::final_placement_stance(
+      product.id, product.dispatch_dock,
+      product.dispatch_slots.at(product.selected_slot_index));
+    const bool product102_center_slot = final_placement_stance.product102_center_slot;
     const double dispatch_translation_heading = std::atan2(
       product.dispatch_approach[1] - dispatch_translation_start.pose.position.y,
       product.dispatch_approach[0] - dispatch_translation_start.pose.position.x);
@@ -2604,7 +3332,7 @@ int main(int argc, char ** argv) {
     const std::array<double, 3> dispatch_translation_target{
       product.dispatch_approach[0], product.dispatch_approach[1],
       dispatch_translation_heading};
-    if (!node->navigate_to(dispatch_translation_target, 120s))
+    if (!node->navigate_to_dispatch(dispatch_translation_target, 120s))
       throw std::runtime_error("navigation to dispatch approach translation failed");
     if (!product_attached || !node->native_attachment_state_is("attached"))
       throw std::runtime_error("attachment proof failed after dispatch approach translation");
@@ -2616,88 +3344,66 @@ int main(int argc, char ** argv) {
       dispatch_heading_start.pose.position.x,
       dispatch_heading_start.pose.position.y,
       product.dispatch_approach[2]};
-    if (!node->navigate_to(dispatch_heading_target, 120s))
+    if (!node->navigate_to_dispatch(dispatch_heading_target, 120s))
       throw std::runtime_error("navigation to dispatch approach heading failed");
     if (!product_attached || !node->native_attachment_state_is("attached"))
       throw std::runtime_error("attachment proof failed after dispatch approach heading");
-    constexpr double kDesiredProduct102SlotBaseX = 0.755000000;
-    constexpr double kDesiredProduct102SlotBaseY = 0.100000000;
     constexpr double kFinalHeadingGoalMargin = 0.03;
-    const auto entry_slot = product.dispatch_slots.at(product.selected_slot_index);
-    const bool prealigned_product102_entry =
-      product.id == 102 && entry_slot[1] == product.dispatch_dock[1];
-    std::array<double, 3> dispatch_entry_physical = product.dispatch_dock;
-    if (prealigned_product102_entry) {
-      dispatch_entry_physical = {
-        entry_slot[0] - std::cos(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseX +
-        std::sin(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseY,
-        entry_slot[1] - std::sin(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseX -
-        std::cos(product.dispatch_dock[2]) * kDesiredProduct102SlotBaseY,
-        product.dispatch_dock[2] - kFinalHeadingGoalMargin};
-      // Turn and establish lateral alignment at the clear approach, then
-      // follow the validated arrival heading into the existing stance.
-      const double approach_y = dispatch_entry_physical[1] -
-        (dispatch_entry_physical[0] - product.dispatch_approach[0]) *
-        std::tan(dispatch_entry_physical[2]);
-      geometry_msgs::msg::PoseStamped physical_start, localized_start;
-      if (!node->latest_robot_pose(physical_start) ||
-        !node->latest_navigation_feedback_pose(localized_start))
-        throw std::runtime_error("fresh Product 102 approach alignment evidence unavailable");
-      const double dx = product.dispatch_approach[0] - physical_start.pose.position.x;
-      const double dy = approach_y - physical_start.pose.position.y;
-      const auto yaw = [](const geometry_msgs::msg::Quaternion & q) {
-          return std::atan2(2*q.w*q.z, 1-2*q.z*q.z);
-        };
-      const double bias_yaw = std::remainder(
-        yaw(physical_start.pose.orientation) - yaw(localized_start.pose.orientation),
-        2*std::acos(-1.0));
-      if (!std::isfinite(approach_y) || !std::isfinite(dx) || !std::isfinite(dy) ||
-        !std::isfinite(bias_yaw) || std::hypot(dx,dy) > 0.15 ||
-        std::hypot(physical_start.pose.position.x-product.dispatch_approach[0],
-          physical_start.pose.position.y-product.dispatch_approach[1]) > 0.155)
-        throw std::runtime_error("Product 102 clear approach alignment exceeded existing bounds");
-      const std::array<double, 3> approach_alignment{
-        localized_start.pose.position.x + dx, localized_start.pose.position.y + dy,
-        std::remainder(std::atan2(dy,dx)-bias_yaw, 2*std::acos(-1.0))};
-      if (!node->navigate_to_aligned_precision(approach_alignment, 120s) ||
-        !node->native_attachment_state_is("attached"))
-        throw std::runtime_error("Product 102 clear approach lateral alignment failed");
-      geometry_msgs::msg::PoseStamped achieved_approach;
-      if (!node->latest_robot_pose(achieved_approach) ||
-        std::hypot(achieved_approach.pose.position.x-physical_start.pose.position.x,
-          achieved_approach.pose.position.y-physical_start.pose.position.y) > 0.15)
-        throw std::runtime_error("Product 102 achieved approach segment exceeded 0.15 m");
-      RCLCPP_INFO(node->get_logger(), "Product 102 lateral entry alignment established at clear approach Y %.4f", approach_y);
-    }
+    const std::array<double, 3> dispatch_entry_physical = product102_center_slot ?
+      final_placement_stance.physical : product.dispatch_dock;
     geometry_msgs::msg::PoseStamped dispatch_dock_bias_ground_truth;
     geometry_msgs::msg::PoseStamped dispatch_dock_bias_localized;
-    if (!node->latest_robot_pose(dispatch_dock_bias_ground_truth) ||
-      !node->latest_navigation_feedback_pose(dispatch_dock_bias_localized))
-    {
-      throw std::runtime_error("fresh dispatch dock bias evidence was unavailable");
+    if (product102_center_slot) {
+      amr_manipulation::Product102CenteredDockEvidence centered_dock;
+      if (!node->navigate_product102_centered_dock(
+          final_placement_stance.physical, 120s, centered_dock))
+      {
+        throw std::runtime_error("Product 102 centered clear-and-dock proof failed");
+      }
+      dispatch_dock_bias_ground_truth = centered_dock.physical;
+      const auto & localized_tf = centered_dock.localized.transform;
+      dispatch_dock_bias_localized.header.frame_id = "map";
+      dispatch_dock_bias_localized.header.stamp = localized_tf.header.stamp;
+      dispatch_dock_bias_localized.pose.position.x = localized_tf.transform.translation.x;
+      dispatch_dock_bias_localized.pose.position.y = localized_tf.transform.translation.y;
+      dispatch_dock_bias_localized.pose.position.z = localized_tf.transform.translation.z;
+      dispatch_dock_bias_localized.pose.orientation = localized_tf.transform.rotation;
+    } else {
+      if (!node->latest_robot_pose(dispatch_dock_bias_ground_truth) ||
+        !node->latest_navigation_feedback_pose(dispatch_dock_bias_localized))
+      {
+        throw std::runtime_error("fresh dispatch dock bias evidence was unavailable");
+      }
+      const double dispatch_dock_bias_x =
+        dispatch_dock_bias_ground_truth.pose.position.x -
+        dispatch_dock_bias_localized.pose.position.x;
+      const double dispatch_dock_bias_y =
+        dispatch_dock_bias_ground_truth.pose.position.y -
+        dispatch_dock_bias_localized.pose.position.y;
+      if (!std::isfinite(dispatch_dock_bias_x) || !std::isfinite(dispatch_dock_bias_y))
+        throw std::runtime_error("dispatch dock localization bias was non-finite");
+      const std::array<double, 3> dispatch_dock_corrected_target{
+        dispatch_entry_physical[0] - dispatch_dock_bias_x,
+        dispatch_entry_physical[1] - dispatch_dock_bias_y,
+        dispatch_entry_physical[2]};
+      // Coarse stateful arrival can pass dock admission but leave the selected
+      // stance beyond the unchanged placement-motion cap. Use the existing
+      // heading-aligned precision route for non-centered registered approaches.
+      if (!node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s, true))
+        throw std::runtime_error("navigation to dispatch dock failed");
+      if (!product_attached || !node->native_attachment_state_is("attached"))
+        throw std::runtime_error("attachment proof failed after dispatch dock");
     }
-    const double dispatch_dock_bias_x =
-      dispatch_dock_bias_ground_truth.pose.position.x - dispatch_dock_bias_localized.pose.position.x;
-    const double dispatch_dock_bias_y =
-      dispatch_dock_bias_ground_truth.pose.position.y - dispatch_dock_bias_localized.pose.position.y;
-    if (!std::isfinite(dispatch_dock_bias_x) || !std::isfinite(dispatch_dock_bias_y))
-      throw std::runtime_error("dispatch dock localization bias was non-finite");
-    const std::array<double, 3> dispatch_dock_corrected_target{
-      dispatch_entry_physical[0] - dispatch_dock_bias_x,
-      dispatch_entry_physical[1] - dispatch_dock_bias_y,
-      dispatch_entry_physical[2]};
-    // Coarse stateful arrival can pass dock admission but leave the selected
-    // stance beyond the unchanged placement-motion cap. Use the existing
-    // heading-aligned precision route for the registered dock approach.
-    if (!node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s))
-      throw std::runtime_error("navigation to dispatch dock failed");
     if (!product_attached || !node->native_attachment_state_is("attached"))
       throw std::runtime_error("attachment proof failed after dispatch dock");
     if (!node->dock_pose_within_tolerance(5s))
       throw std::runtime_error("fresh dispatch dock ground-truth pose was out of tolerance");
     geometry_msgs::msg::PoseStamped dock_alignment_ground_truth;
     geometry_msgs::msg::PoseStamped dock_alignment_localized;
-    if (!node->latest_robot_pose(dock_alignment_ground_truth) ||
+    if (product102_center_slot) {
+      dock_alignment_ground_truth = dispatch_dock_bias_ground_truth;
+      dock_alignment_localized = dispatch_dock_bias_localized;
+    } else if (!node->latest_robot_pose(dock_alignment_ground_truth) ||
       !node->latest_navigation_feedback_pose(dock_alignment_localized))
     {
       throw std::runtime_error("fresh dock ground-truth or localized pose was unavailable");
@@ -2707,16 +3413,6 @@ int main(int argc, char ** argv) {
     // put the selected slot at the proven reachable base-frame offset; do not
     // add another registry pose or silently exceed the bounded segment cap.
     const auto selected_slot = product.dispatch_slots.at(product.selected_slot_index);
-    // Use the existing upper/off-center radial stance, mirror its lateral sign
-    // for a lower slot, and use a forward stance for a centered slot. Reach
-    // the selected stance through bounded navigation segments; each segment
-    // remains at or below the existing 0.15 m alignment bound.
-    constexpr double kDesiredSlotBaseX = 0.520000000;
-    constexpr double kDesiredSlotBaseY = -0.580000000;
-    // The current-source 1 kg run exposed a narrow arm_link_4/base_link
-    // clearance boundary at the upper-slot terminal pose. Keep the same
-    // radial reach while biasing only the upper-slot stance farther outward.
-    constexpr double kDesiredUpperSlotBaseY = -0.640000000;
     // Product 102's centered slot has a narrow collision-free placement
     // branch. Exact loaded-scene replay clears this stance and its 1 cm
     // neighborhood, unlike the old nominal stance that collided with the
@@ -2733,11 +3429,7 @@ int main(int argc, char ** argv) {
     constexpr double kMaxPlacementAlignmentPositionError = 0.07;
     constexpr double kMaxPlacementAlignmentYawError = 0.15;
     constexpr double kMaxPlacementReleaseRadius = 0.785;
-    constexpr double kPlacementReachReserve = 0.005;
     constexpr double kPrePlaceRadialClearance = 0.080;
-    constexpr double kDesiredSlotBaseRadius =
-      kMaxPlacementReleaseRadius - kMaxPlacementAlignmentPositionError -
-      kPlacementReachReserve;
     // Keep the unchanged 0.15 rad acceptance envelope, but command the final
     // same-position heading goal 0.03 rad inside it so Nav2 cannot accept the
     // already-near-heading state without making the required rotation.
@@ -2749,59 +3441,32 @@ int main(int argc, char ** argv) {
     // parameters or safety limits change.
     constexpr double kMaxPlacementCommandDisplacement =
       kMaxPlacementAlignmentSegmentDisplacement - kMaxPlacementAlignmentPositionError;
-    const double selected_slot_lateral_offset =
-      selected_slot[1] - product.dispatch_dock[1];
+    const double selected_slot_lateral_offset = final_placement_stance.lateral_offset;
     if (!std::isfinite(selected_slot_lateral_offset))
       throw std::runtime_error("desired placement stance lateral offset was non-finite");
-    const bool product102_center_slot =
-      product.id == 102 && selected_slot_lateral_offset == 0.0;
     // Match the existing precision goal checker for the narrow centered-slot
     // reach branch; keep the separate physical 0.07 m acceptance gate below.
     const double placement_translation_position_tolerance =
       product102_center_slot ? 0.01 : kMaxPlacementAlignmentPositionError;
-    double desired_slot_direction_x;
-    double desired_slot_direction_y;
-    if (product102_center_slot) {
-      desired_slot_direction_x = kDesiredProduct102SlotBaseX;
-      desired_slot_direction_y = kDesiredProduct102SlotBaseY;
-    } else if (selected_slot_lateral_offset > 0.0) {
-      desired_slot_direction_x = kDesiredSlotBaseX;
-      desired_slot_direction_y = kDesiredUpperSlotBaseY;
-    } else if (selected_slot_lateral_offset < 0.0) {
-      desired_slot_direction_x = kDesiredSlotBaseX;
-      desired_slot_direction_y = -kDesiredSlotBaseY;
-    } else {
-      desired_slot_direction_x = 1.0;
-      desired_slot_direction_y = 0.0;
-    }
-    const double desired_slot_direction_radius =
-      std::hypot(desired_slot_direction_x, desired_slot_direction_y);
-    const double desired_slot_base_radius = product102_center_slot ?
-      desired_slot_direction_radius : kDesiredSlotBaseRadius;
+    const double desired_slot_direction_radius = final_placement_stance.direction_radius;
+    const double desired_slot_base_radius = final_placement_stance.base_radius;
     if (!std::isfinite(desired_slot_direction_radius) || desired_slot_direction_radius <= 0.0 ||
       !std::isfinite(desired_slot_base_radius) || desired_slot_base_radius <= 0.0)
     {
       throw std::runtime_error("desired placement stance radius was invalid");
     }
-    const double desired_slot_scale = desired_slot_base_radius / desired_slot_direction_radius;
-    const double desired_slot_base_x = desired_slot_direction_x * desired_slot_scale;
-    const double desired_slot_base_y = desired_slot_direction_y * desired_slot_scale;
+    const double desired_slot_scale = final_placement_stance.scale;
+    const double desired_slot_base_x = final_placement_stance.base_x;
+    const double desired_slot_base_y = final_placement_stance.base_y;
     if (!std::isfinite(desired_slot_scale) || !std::isfinite(desired_slot_base_x) ||
       !std::isfinite(desired_slot_base_y))
     {
       throw std::runtime_error("desired placement stance scaling was non-finite");
     }
     const double dispatch_yaw = product.dispatch_dock[2];
-    const double desired_slot_map_x =
-      std::cos(dispatch_yaw) * desired_slot_base_x -
-      std::sin(dispatch_yaw) * desired_slot_base_y;
-    const double desired_slot_map_y =
-      std::sin(dispatch_yaw) * desired_slot_base_x +
-      std::cos(dispatch_yaw) * desired_slot_base_y;
-    const std::array<double, 3> placement_alignment_physical{
-      selected_slot[0] - desired_slot_map_x,
-      selected_slot[1] - desired_slot_map_y,
-      dispatch_yaw};
+    const double desired_slot_map_x = final_placement_stance.map_x;
+    const double desired_slot_map_y = final_placement_stance.map_y;
+    const auto placement_alignment_physical = final_placement_stance.physical;
     const auto placement_alignment_target_physical = placement_alignment_physical;
     const auto yaw_from_pose = [](const geometry_msgs::msg::Pose & pose) {
         return std::atan2(
@@ -2827,7 +3492,11 @@ int main(int argc, char ** argv) {
     const double alignment_dy =
       placement_alignment_target_physical[1] - dock_alignment_ground_truth.pose.position.y;
     const double alignment_displacement = std::hypot(alignment_dx, alignment_dy);
-    const auto alignment_segments = static_cast<std::size_t>(
+    const bool centered_dock_only_admitted = product102_center_slot &&
+      amr_manipulation::centered_b_alignment_admission(alignment_displacement) ==
+      amr_manipulation::CenteredBAlignmentAdmission::DOCK_ONLY;
+    const auto alignment_segments = centered_dock_only_admitted ? 0U :
+      static_cast<std::size_t>(
       std::ceil(alignment_displacement / kMaxPlacementCommandDisplacement));
     const bool alignment_geometry_finite =
       std::isfinite(dispatch_yaw) &&
@@ -2844,8 +3513,9 @@ int main(int argc, char ** argv) {
       std::isfinite(alignment_displacement) &&
       std::isfinite(localization_bias_x) && std::isfinite(localization_bias_y) &&
       std::isfinite(localization_bias_yaw) &&
-      alignment_segments > 0 && alignment_segments <= 8;
-    if (!alignment_geometry_finite || alignment_displacement <= 0.0 ||
+      (centered_dock_only_admitted || (alignment_segments > 0 && alignment_segments <= 8));
+    if (!alignment_geometry_finite ||
+      (product102_center_slot ? !centered_dock_only_admitted : alignment_displacement <= 0.0) ||
       alignment_displacement > kMaxPlacementAlignmentTotalDisplacement)
     {
       throw std::runtime_error(
@@ -2867,7 +3537,7 @@ int main(int argc, char ** argv) {
     geometry_msgs::msg::PoseStamped previous_alignment_pose = dock_alignment_ground_truth;
     std::size_t alignment_segment_count = 0;
     double remaining_alignment_distance = alignment_displacement;
-    while (alignment_segment_count < 8) {
+    while (!centered_dock_only_admitted && alignment_segment_count < 8) {
       geometry_msgs::msg::PoseStamped current_alignment_ground_truth;
       geometry_msgs::msg::PoseStamped current_alignment_localized;
       if (!node->latest_robot_pose(current_alignment_ground_truth) ||
@@ -2928,8 +3598,8 @@ int main(int argc, char ** argv) {
       const geometry_msgs::msg::PoseStamped segment_start_pose =
         current_alignment_ground_truth;
       const bool segment_succeeded = product102_center_slot ?
-        node->navigate_to_precise(segment_target, 120s) :
-        node->navigate_to_aligned_precision(segment_target, 120s);
+        node->navigate_to_dispatch_precise(segment_target, 120s) :
+        node->navigate_to_aligned_precision(segment_target, 120s, true);
       if (!segment_succeeded)
         throw std::runtime_error("navigation to dispatch placement alignment segment failed");
       if (!product_attached || !node->native_attachment_state_is("attached"))
@@ -2964,7 +3634,23 @@ int main(int argc, char ** argv) {
     // the ground-truth pose just outside the unchanged physical XY envelope.
     geometry_msgs::msg::PoseStamped final_heading_ground_truth;
     geometry_msgs::msg::PoseStamped final_heading_localized;
-    if (!node->latest_robot_pose(final_heading_ground_truth) ||
+    if (product102_center_slot) {
+      amr_manipulation::CurrentTfEvidence final_heading_tf;
+      double checked_physical_yaw = 0.0;
+      if (!node->latest_robot_pose(final_heading_ground_truth) ||
+        final_heading_ground_truth.header.frame_id != "factory_world" ||
+        !node->unit_pose_yaw(final_heading_ground_truth.pose, checked_physical_yaw) ||
+        !node->latest_current_tf_pose(final_heading_tf))
+      {
+        throw std::runtime_error("fresh centered final heading physical/current-TF bias was unavailable");
+      }
+      final_heading_localized.header.frame_id = "map";
+      final_heading_localized.header.stamp = final_heading_tf.transform.header.stamp;
+      final_heading_localized.pose.position.x = final_heading_tf.transform.transform.translation.x;
+      final_heading_localized.pose.position.y = final_heading_tf.transform.transform.translation.y;
+      final_heading_localized.pose.position.z = final_heading_tf.transform.transform.translation.z;
+      final_heading_localized.pose.orientation = final_heading_tf.transform.transform.rotation;
+    } else if (!node->latest_robot_pose(final_heading_ground_truth) ||
       !node->latest_navigation_feedback_pose(final_heading_localized))
     {
       throw std::runtime_error("fresh final heading bias evidence was unavailable");
@@ -3001,7 +3687,7 @@ int main(int argc, char ** argv) {
       placement_alignment_physical[1] - final_heading_bias_y,
       wrap_yaw(placement_alignment_physical[2] - final_heading_bias_yaw -
         kFinalHeadingGoalMargin)};
-    if (!node->navigate_to(final_heading_target, 120s))
+    if (!node->navigate_to_dispatch(final_heading_target, 120s))
       throw std::runtime_error("navigation to final dispatch heading failed");
     if (!product_attached || !node->native_attachment_state_is("attached"))
       throw std::runtime_error("attachment proof failed during final dispatch heading");

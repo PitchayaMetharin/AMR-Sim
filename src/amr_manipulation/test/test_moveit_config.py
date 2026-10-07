@@ -11,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 MASS_STAGE_LAUNCH = ROOT / "launch" / "gate6_mass_stage.launch.py"
+STANCE_HEADER = ROOT.parent / "amr_interfaces" / "include" / "amr_interfaces" / "final_placement_stance.hpp"
 
 
 def _assert_fail_closed_block(helper, condition, next_stage):
@@ -43,6 +44,13 @@ def _assert_guarded_throw_block(source, condition, message):
         + r"\s*(?:\})?"
     )
     assert re.fullmatch(pattern, block), condition
+
+
+def _main_placement_alignment_loop(source):
+    alignment_count = source.index("std::size_t alignment_segment_count = 0;")
+    loop_start = source.index("while (", alignment_count)
+    loop_end = source.index("// Finish the bounded translation", loop_start)
+    return source[loop_start:loop_end]
 
 
 def _load_mass_stage_launch():
@@ -289,14 +297,25 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "native_attachment_state_is(\"attached\")" in mass_source
     assert '"/amr/mission/navigate_to_pose_precise"' in mass_source
     assert "precise_navigation_client_" in mass_source
-    assert mass_source.count("node->navigate_to_aligned_precision(") == 3
+    assert mass_source.count("node->navigate_to_aligned_precision(") == 2
+    assert mass_source.count("node->navigate_product102_clear_approach(") == 0
+    assert mass_source.count("node->navigate_product102_centered_dock(") == 1
+    centered_method_start = mass_source.index("bool navigate_product102_centered_dock(")
+    centered_method_end = mass_source.index("bool bounded_reverse(", centered_method_start)
+    centered_method = mass_source[centered_method_start:centered_method_end]
+    assert "factory_world" in centered_method
+    assert "latest_current_tf_pose" in centered_method
+    assert "dispatch_b_clear_approach_client_" in centered_method
+    assert "wait_stopped" in centered_method and "wall_started + 8s" in centered_method
+    assert "wall_now - stationary_since >= 500ms" in centered_method
+    assert "physical_stance_xy_outside_tolerance" in centered_method
     assert "bool precise" not in mass_source
     assert "precise ?" not in mass_source
     assert "navigation_client_" in mass_source
     assert 'geometry_msgs/msg/pose_with_covariance_stamped.hpp' in mass_source
     assert '"/amr/amcl_pose"' in mass_source
     navigation_start = mass_source.index("bool navigate_to_with_client(")
-    navigation_end = mass_source.index("bool bounded_reverse(", navigation_start)
+    navigation_end = mass_source.index("bool navigate_to(", navigation_start)
     navigation_source = mass_source[navigation_start:navigation_end]
     assert "use_fresh_amcl_terminal_pose" in navigation_source
     assert "wrapped.code == rclcpp_action::ResultCode::SUCCEEDED" in navigation_source
@@ -335,7 +354,7 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     caller_translation_heading = pickup_caller.index(
         "const double dispatch_translation_heading = std::atan2(", caller_failure)
     caller_navigation = pickup_caller.index(
-        "node->navigate_to(dispatch_translation_target, 120s)", caller_heading)
+        "node->navigate_to_dispatch(dispatch_translation_target, 120s)", caller_heading)
     assert caller_retreat < caller_heading < caller_admission < caller_failure
     assert caller_failure < caller_translation_heading < caller_navigation
     assert "node, product, product_attached, pickup_station_achieved, dispatch_translation_start" in pickup_caller[caller_admission:caller_failure]
@@ -416,7 +435,7 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
         pickup_retreat)
     dispatch_translation_bearing = dispatch_translation_start
     dispatch_translation_navigation = mass_source.index(
-        "node->navigate_to(dispatch_translation_target, 120s)",
+        "node->navigate_to_dispatch(dispatch_translation_target, 120s)",
         dispatch_translation_bearing)
     translation_attachment = mass_source.index(
         "attachment proof failed after dispatch approach translation",
@@ -424,7 +443,7 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     dispatch_heading_start = mass_source.index(
         "dispatch_heading_start", translation_attachment)
     dispatch_heading_navigation = mass_source.index(
-        "node->navigate_to(dispatch_heading_target, 120s)", dispatch_heading_start)
+        "node->navigate_to_dispatch(dispatch_heading_target, 120s)", dispatch_heading_start)
     heading_attachment = mass_source.index(
         "attachment proof failed after dispatch approach heading",
         dispatch_heading_navigation)
@@ -470,16 +489,16 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     dock_target = mass_source.index(
         "dispatch_dock_corrected_target{", dock_bias_finite)
     dock_navigation = mass_source.index(
-        "node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s)", dock_target)
+        "node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s, true)", dock_target)
     dock_attachment = mass_source.index(
         "attachment proof failed after dispatch dock", dock_navigation)
     registered_dock_check = mass_source.index(
         "node->dock_pose_within_tolerance(5s)", dock_attachment)
     alignment_goal = mass_source.index("placement_alignment{")
     alignment_segment_navigation = mass_source.index(
-        "node->navigate_to_aligned_precision(segment_target, 120s)")
+        "node->navigate_to_aligned_precision(segment_target, 120s, true)")
     alignment_navigation = mass_source.index(
-        "node->navigate_to_aligned_precision(segment_target, 120s)")
+        "node->navigate_to_aligned_precision(segment_target, 120s, true)")
     alignment_finite = mass_source.index("alignment_geometry_finite")
     alignment_bound = mass_source.index(
         "alignment_displacement > kMaxPlacementAlignmentTotalDisplacement")
@@ -520,13 +539,17 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "pickup_approach_distance > product.pickup_egress_max_distance_m" in mass_source
     assert "pickup_station_xy_error > 0.07" in mass_source
     assert "pickup_station_yaw_error > 0.15" in mass_source
-    assert "node->navigate_to(dispatch_translation_target, 120s)" in mass_source
-    assert "node->navigate_to(dispatch_heading_target, 120s)" in mass_source
+    assert "node->navigate_to_dispatch(dispatch_translation_target, 120s)" in mass_source
+    assert "node->navigate_to_dispatch(dispatch_heading_target, 120s)" in mass_source
     assert mass_source.count(
-        "node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s)") == 1
+        "node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s, true)") == 1
     assert "node->navigate_to(product.dispatch_dock, 120s)" not in mass_source
     assert "node->navigate_to(product.dispatch_dock, 120s, true)" not in mass_source
-    assert "dispatch_entry_physical = product.dispatch_dock" in mass_source
+    assert re.search(
+        r"const std::array<double, 3> dispatch_entry_physical = product102_center_slot \?\s*"
+        r"final_placement_stance\.physical : product\.dispatch_dock;",
+        mass_source,
+    )
     assert "dispatch_entry_physical[0] - dispatch_dock_bias_x" in mass_source
     assert "dispatch_entry_physical[1] - dispatch_dock_bias_y" in mass_source
     assert "fresh dispatch dock bias evidence was unavailable" in mass_source
@@ -547,8 +570,9 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "ground_truth_yaw" in terminal_log
     assert "ground_truth.pose.position.z" not in terminal_log
     assert "const double dispatch_yaw = product.dispatch_dock[2]" in mass_source
-    assert "std::cos(dispatch_yaw)" in mass_source
-    assert "std::sin(dispatch_yaw)" in mass_source
+    stance_source = STANCE_HEADER.read_text()
+    assert "std::cos(dispatch_yaw)" in stance_source
+    assert "std::sin(dispatch_yaw)" in stance_source
     assert "std::isfinite(placement_alignment[0])" in mass_source
     assert "std::isfinite(placement_alignment[1])" in mass_source
     assert "std::isfinite(placement_alignment[2])" in mass_source
@@ -563,16 +587,16 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "achieved_alignment_displacement > kMaxPlacementAlignmentTotalDisplacement" in mass_source
     assert "fresh product attachment evidence failed after placement alignment" in mass_source
     assert "measured_attachment_evidence" in mass_source[alignment_navigation:release_geometry]
-    assert "kDesiredSlotBaseX = 0.520000000" in mass_source
-    assert "kDesiredSlotBaseY = -0.580000000" in mass_source
-    assert "kPlacementReachReserve = 0.005" in mass_source
-    assert "kDesiredSlotBaseRadius =" in mass_source
-    assert "kMaxPlacementReleaseRadius - kMaxPlacementAlignmentPositionError" in mass_source
-    assert "desired_slot_direction_radius =" in mass_source
-    assert "const double desired_slot_base_radius = product102_center_slot ?" in mass_source
-    assert "desired_slot_scale = desired_slot_base_radius / desired_slot_direction_radius" in mass_source
-    assert "desired_slot_base_x = desired_slot_direction_x * desired_slot_scale" in mass_source
-    assert "desired_slot_base_y = desired_slot_direction_y * desired_slot_scale" in mass_source
+    assert "kDesiredSlotBaseX = 0.520000000" in stance_source
+    assert "kDesiredSlotBaseY = -0.580000000" in stance_source
+    assert "kPlacementReachReserve = 0.005" in stance_source
+    assert "kDesiredSlotBaseRadius =" in stance_source
+    assert "kMaxPlacementReleaseRadius - kMaxPlacementAlignmentPositionError" in stance_source
+    assert "desired_slot_direction_radius =" in stance_source
+    assert "const double desired_slot_base_radius = product102_center_slot ?" in stance_source
+    assert "desired_slot_scale = desired_slot_base_radius / desired_slot_direction_radius" in stance_source
+    assert "desired_slot_base_x = desired_slot_direction_x * desired_slot_scale" in stance_source
+    assert "desired_slot_base_y = desired_slot_direction_y * desired_slot_scale" in stance_source
     assert "desired placement stance radius was invalid" in mass_source
     assert "desired placement stance scaling was non-finite" in mass_source
     assert "placement_alignment_physical" in mass_source
@@ -601,7 +625,7 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "placement_alignment_physical[2] - final_heading_bias_yaw" in mass_source
     assert "navigation to final dispatch heading failed" in mass_source
     final_heading_navigation = mass_source.index(
-        "node->navigate_to(final_heading_target, 120s)")
+        "node->navigate_to_dispatch(final_heading_target, 120s)")
     assert alignment_segment_navigation < final_heading_navigation
     assert "final dispatch heading moved beyond the alignment segment bound" in mass_source
     assert "geometry_msgs::msg::Pose pre_place = grasp" in mass_source
@@ -735,23 +759,88 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     assert "placement lower trajectory postconditions: PASS" in mass_source
 
 
-def test_product102_entry_aligns_at_clear_approach_without_dockside_turn():
+def test_product102_centered_entry_uses_stopped_current_tf_clear_and_dock():
     source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
-    begin = source.index("if (prealigned_product102_entry)")
-    end = source.index("geometry_msgs::msg::PoseStamped dispatch_dock_bias_ground_truth", begin)
+    begin = source.index("bool navigate_product102_centered_dock(")
+    end = source.index("bool bounded_reverse(", begin)
     route = source[begin:end]
-    assert "product.dispatch_approach[0]" in route
-    assert "std::tan(dispatch_entry_physical[2])" in route
-    assert "latest_robot_pose(physical_start)" in route
-    assert "latest_navigation_feedback_pose(localized_start)" in route
-    assert "std::hypot(dx,dy) > 0.15" in route
-    assert "navigate_to_aligned_precision(approach_alignment, 120s)" in route
-    assert 'native_attachment_state_is("attached")' in route
-    assert "product102_center_slot ?\n        node->navigate_to_precise(segment_target, 120s)" in source
-    heading = math.pi - 0.03
-    approach_y = 0.1 - (-3.345 + 2.5) * math.tan(heading)
-    assert 0.07 < approach_y < 0.08
-    assert math.hypot(-3.345 + 3.4, 0.1) < 0.155
+    assert "product_.dispatch_approach[0]" in route
+    assert "product_.dispatch_approach[1]" in route
+    assert "const double projection" in route
+    assert "clear_point" in route
+    assert "dispatch_b_clear_approach_client_" in route
+    assert "dispatch_precise_navigation_client_" in route
+    assert "navigate_to_aligned_precision" not in route
+    assert "latest_navigation_feedback_pose" not in route
+    assert "kFinalHeadingGoalMargin" not in route
+    assert "factory_world" in route
+    assert "original_clear_reference" in route
+    assert "kClearAreaDisplacement = 0.15" in route
+    assert "kRegisteredApproachAdmission = 0.155" in route
+    assert "physical_clear_error <= kClearPositionTolerance" in route
+    assert "attempt != 0" in route
+
+    main_start = source.index("const auto final_placement_stance")
+    centered_route_start = source.index("if (product102_center_slot) {", main_start)
+    centered_route_end = source.index("} else {", centered_route_start)
+    centered_route = source[centered_route_start:centered_route_end]
+    assert "navigate_product102_centered_dock(" in centered_route
+    assert "final_placement_stance.physical" in centered_route
+    assert "dispatch_dock_bias_ground_truth = centered_dock.physical" in centered_route
+    assert "while (!centered_dock_only_admitted && alignment_segment_count < 8)" in " ".join(
+        source.split())
+
+
+def test_product102_centered_admission_skips_entire_main_translation_loop():
+    source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
+
+    admission_start = source.index(
+        "CenteredBAlignmentAdmission centered_b_alignment_admission(")
+    admission_end = source.index("\ntemplate<typename ActionT>", admission_start)
+    admission = source[admission_start:admission_end]
+    assert "std::isfinite(residual_m)" in admission
+    assert "residual_m >= 0.0" in admission
+    assert "residual_m <= 0.010" in admission
+    assert "CenteredBAlignmentAdmission::DOCK_ONLY" in admission
+
+    main_admission_start = source.index(
+        "const bool centered_dock_only_admitted =")
+    segments_start = source.index("const auto alignment_segments =", main_admission_start)
+    main_admission = source[main_admission_start:segments_start]
+    assert "product102_center_slot &&" in main_admission
+    assert "centered_b_alignment_admission(alignment_displacement)" in main_admission
+    assert "CenteredBAlignmentAdmission::DOCK_ONLY" in main_admission
+
+    segments_end = source.index("const bool alignment_geometry_finite =", segments_start)
+    alignment_segments = source[segments_start:segments_end]
+    assert "centered_dock_only_admitted ? 0U :" in alignment_segments
+
+    finite_gate = source.index("if (!alignment_geometry_finite ||", segments_end)
+    attachment_gate = source.index(
+        'if (!product_attached || !node->native_attachment_state_is("attached"))',
+        finite_gate,
+    )
+    loop_start = source.index("while (", attachment_gate)
+    loop_open = source.index("{", loop_start)
+    loop_condition = " ".join(source[loop_start:loop_open].split())
+    assert loop_condition == (
+        "while (!centered_dock_only_admitted && alignment_segment_count < 8)"
+    ), "admitted centered B must skip the entire short-translation loop"
+    assert finite_gate < attachment_gate < loop_start
+    assert "alignment_displacement > kMaxPlacementAlignmentTotalDisplacement" in source[
+        finite_gate:attachment_gate]
+
+    loop_end = source.index("// Finish the bounded translation", loop_start)
+    convergence = source.index(
+        "if (remaining_alignment_distance > placement_translation_position_tolerance)",
+        loop_start,
+        loop_end,
+    )
+    final_heading = source.index(
+        "geometry_msgs::msg::PoseStamped final_heading_ground_truth;", loop_end)
+    require_permission = source.index("require_motion_permission()", final_heading)
+    assert loop_start < convergence < loop_end < final_heading < require_permission
+    assert "alignment_segment_count < 8" in loop_condition
 
 
 def test_stage_start_waits_for_real_public_boundary_before_motion_permission():
@@ -769,12 +858,13 @@ def test_stage_start_waits_for_real_public_boundary_before_motion_permission():
 
 def test_dispatch_stance_is_slot_aware_and_keeps_center_alignment_bounded():
     source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
-    stance_start = source.index("const double selected_slot_lateral_offset")
-    stance_end = source.index("const double dispatch_yaw", stance_start)
-    stance = source[stance_start:stance_end]
-    assert "selected_slot[1] - product.dispatch_dock[1]" in stance
+    stance_source = STANCE_HEADER.read_text()
+    stance_start = stance_source.index("const double selected_slot_lateral_offset")
+    stance_end = stance_source.index("const double dispatch_yaw", stance_start)
+    stance = stance_source[stance_start:stance_end]
+    assert "selected_slot[1] - dispatch_dock[1]" in stance
     assert "const bool product102_center_slot =" in stance
-    assert "product.id == 102 && selected_slot_lateral_offset == 0.0" in stance
+    assert "product_id == 102 && selected_slot_lateral_offset == 0.0" in stance
     product102_start = stance.index("if (product102_center_slot)")
     upper_start = stance.index("} else if (selected_slot_lateral_offset > 0.0)", product102_start)
     product102_branch = stance[product102_start:upper_start]
@@ -787,7 +877,7 @@ def test_dispatch_stance_is_slot_aware_and_keeps_center_alignment_bounded():
     center_branch = stance[center_start:]
     assert "desired_slot_direction_x = kDesiredSlotBaseX;" in upper_branch
     assert "desired_slot_direction_y = kDesiredUpperSlotBaseY;" in upper_branch
-    assert "constexpr double kDesiredUpperSlotBaseY = -0.640000000;" in source
+    assert "constexpr double kDesiredUpperSlotBaseY = -0.640000000;" in stance_source
     assert "desired_slot_direction_x = kDesiredSlotBaseX;" in lower_branch
     assert "desired_slot_direction_y = -kDesiredSlotBaseY;" in lower_branch
     assert "desired_slot_direction_x = 1.0;" in center_branch
@@ -797,8 +887,18 @@ def test_dispatch_stance_is_slot_aware_and_keeps_center_alignment_bounded():
     assert "const double desired_slot_base_y = desired_slot_direction_y * desired_slot_scale;" in stance
     assert "const double desired_slot_base_x = kDesiredSlotBaseX * desired_slot_scale;" not in stance
     assert "const double desired_slot_base_y = kDesiredSlotBaseY * desired_slot_scale;" not in stance
-    assert "kDesiredProduct102SlotBaseX = 0.755000000" in source
-    assert "kDesiredProduct102SlotBaseY = 0.100000000" in source
+    assert "kDesiredProduct102SlotBaseX = 0.748000000" in stance_source
+    assert "kDesiredProduct102SlotBaseY = 0.100000000" in stance_source
+    helper_call = source.index("const auto final_placement_stance = amr_interfaces::placement::final_placement_stance(")
+    transport = source.index("node->navigate_to_dispatch(dispatch_translation_target, 120s)")
+    physical = source.index("const auto placement_alignment_physical = final_placement_stance.physical;")
+    assert helper_call < transport < physical
+    assert "product.id, product.dispatch_dock,\n      product.dispatch_slots.at(product.selected_slot_index)" in source
+    assert "const double desired_slot_direction_radius = final_placement_stance.direction_radius;" in source
+    assert "const double desired_slot_base_radius = final_placement_stance.base_radius;" in source
+    assert "const double desired_slot_scale = final_placement_stance.scale;" in source
+    assert "const double desired_slot_base_x = final_placement_stance.base_x;" in source
+    assert "const double desired_slot_base_y = final_placement_stance.base_y;" in source
     assert "kProduct102PlacementLeadMapY" not in source
     assert "kProduct102PrePlaceZOffset = 0.100000000" in source
     assert "kProduct102PlacementYawOffset = 1.530000000" in source
@@ -814,14 +914,14 @@ def test_dispatch_stance_is_slot_aware_and_keeps_center_alignment_bounded():
     assert math.isclose(center_alignment, 0.058034, abs_tol=0.0005)
     assert center_alignment < 0.35
 
-    product102_radius = math.hypot(0.755, 0.100)
-    product102_stance = (-4.10 + 0.755, 0.100)
+    product102_radius = math.hypot(0.748, 0.100)
+    product102_stance = (-4.10 + 0.748, 0.100)
     product102_alignment = math.hypot(
         product102_stance[0] - observed_dock[0],
         product102_stance[1] - observed_dock[1])
     assert product102_radius < 0.785
-    assert math.isclose(product102_radius, 0.761593724, abs_tol=1e-9)
-    assert math.isclose(product102_alignment, 0.098858484, abs_tol=1e-9)
+    assert math.isclose(product102_radius, 0.754654888, abs_tol=1e-9)
+    assert math.isclose(product102_alignment, 0.100019998, abs_tol=1e-9)
     assert product102_alignment < 0.35
     # Run15 accepted this pose near the obsolete coarse-route lead. It is
     # inside the physical XY envelope but outside the unchanged reach gate.
@@ -928,7 +1028,7 @@ def test_post_grasp_pickup_retreat_uses_registered_navigation_and_terminal_proof
     caller_translation_heading = caller.index(
         "const double dispatch_translation_heading = std::atan2(", caller_failure)
     caller_navigation = caller.index(
-        "node->navigate_to(dispatch_translation_target, 120s)", caller_heading)
+        "node->navigate_to_dispatch(dispatch_translation_target, 120s)", caller_heading)
     assert caller_retreat < caller_heading < caller_admission < caller_failure
     assert caller_failure < caller_translation_heading < caller_navigation
     assert "node, product, product_attached, pickup_station_achieved, dispatch_translation_start" in caller[caller_admission:caller_failure]
@@ -1008,29 +1108,83 @@ def test_post_grasp_pickup_retreat_uses_registered_navigation_and_terminal_proof
     assert "using fresh AMCL terminal pose within existing tolerance" in source
     assert "Navigation succeeded without feedback" not in source
 
-    assert source.count("node->navigate_to(dispatch_translation_target, 120s)") == 1
-    assert source.count("node->navigate_to(dispatch_heading_target, 120s)") == 1
-    assert source.count("node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s)") == 1
-    assert source.count("node->navigate_to_aligned_precision(segment_target, 120s)") == 1
-    assert source.count("node->navigate_to(final_heading_target, 120s)") == 1
+    assert source.count("node->navigate_to_dispatch(dispatch_translation_target, 120s)") == 1
+    assert source.count("node->navigate_to_dispatch(dispatch_heading_target, 120s)") == 1
+    assert source.count("node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s, true)") == 1
+    assert source.count("node->navigate_to_aligned_precision(segment_target, 120s, true)") == 1
+    assert source.count("node->navigate_to_dispatch(final_heading_target, 120s)") == 1
 
     navigation_start = source.index("bool navigate_to_with_client(")
-    navigation_end = source.index("bool bounded_reverse(", navigation_start)
+    navigation_end = source.index("bool navigate_to(", navigation_start)
     navigation = source[navigation_start:navigation_end]
     assert "navigation_client->wait_for_action_server(5s)" in navigation
     assert "navigation_client->async_send_goal(goal, options)" in navigation
     assert "[this, pending, navigation_client]" in navigation
     assert "navigation_client->async_get_result(goal_handle)" in navigation
+    entry_guard = navigation.index("if (guard && !guard())")
+    server_wait = navigation.index("navigation_client->wait_for_action_server(5s)")
+    guard_after_server_wait = navigation.index(
+        "if (guard && !guard())", server_wait)
+    send_goal = navigation.index("navigation_client->async_send_goal(goal, options)")
+    guard_before_send = navigation.rindex("if (guard && !guard())", 0, send_goal)
+    assert entry_guard < server_wait < guard_after_server_wait < guard_before_send < send_goal
+
+    acceptance_deadline = navigation.index(
+        "const auto acceptance_deadline = std::chrono::steady_clock::now() + 5s")
+    acceptance_loop = navigation.index("while (rclcpp::ok()) {", acceptance_deadline)
+    acceptance_guard = navigation.index("if (guard && !guard())", acceptance_loop)
+    abandoned_pending = navigation.index("pending->abandoned = true;", acceptance_guard)
+    acceptance_wait = navigation.index(
+        "pending->condition.wait_for(pending_lock, 50ms)", abandoned_pending)
+    assert send_goal < acceptance_loop < acceptance_guard < abandoned_pending < acceptance_wait
+
     assert navigation.count(
-        "cancel_navigation_goal(navigation_client, goal_handle, result)") == 4
+        "cancel_navigation_goal(navigation_client, goal_handle, result)") == 5
+    assert navigation.count(
+        "(void)cancel_navigation_goal(navigation_client, goal_handle, result)") == 4
+
+    cancel_start = source.index("bool cancel_navigation_goal(")
+    cancel_helper = source[cancel_start:navigation_start]
+    assert "async_cancel_goal(goal_handle)" in cancel_helper
+    assert "goal_info.goal_id.uuid == goal_id" in cancel_helper
+    assert "terminal.code != rclcpp_action::ResultCode::CANCELED" in cancel_helper
+
+    guarded_rejection = navigation.index("const auto reject_guarded_goal =")
+    ready_branch = navigation.index(
+        "if (result.wait_for(0s) == std::future_status::ready)", guarded_rejection)
+    consumed_result = navigation.index("const auto terminal = result.get();", ready_branch)
+    logged_terminal = navigation.index(
+        "log_navigation_terminal(target, terminal.code);", consumed_result)
+    ready_reject = navigation.index("return false;", logged_terminal)
+    assert ready_branch < consumed_result < logged_terminal < ready_reject
+    assert "cancel_navigation_goal" not in navigation[ready_branch:ready_reject]
+    active_cancel = navigation.index(
+        "const bool canceled = cancel_navigation_goal(", ready_reject)
+    assert active_cancel > ready_reject
+    assert "const bool canceled = cancel_navigation_goal(navigation_client, goal_handle, result);" in navigation
+
     detached_guard = navigation.index('if (require_detached && !native_attachment_state_is("detached")) {')
-    detached_end = navigation.index('if (result.wait_for(50ms) == std::future_status::ready) break;', detached_guard)
+    detached_end = navigation.index(
+        "const auto wait_status = result.wait_for(50ms);", detached_guard)
     detached_block = " ".join(navigation[detached_guard:detached_end].split())
     assert re.fullmatch(
         r'if \(require_detached && !native_attachment_state_is\("detached"\)\) '
         r'\{ RCLCPP_ERROR\([^;{}]*\); '
         r'\(void\)cancel_navigation_goal\(navigation_client, goal_handle, result\); '
         r'return false; \}', detached_block)
+    simulation_limit = navigation.index("const auto simulation_limit_ns =")
+    active_guard = navigation.index("while (rclcpp::ok()) {", simulation_limit)
+    guard_before_wait = navigation.index(
+        "if (guard && !guard()) return reject_guarded_goal();", active_guard)
+    guard_after_wait = navigation.index("if (guard && !guard()) return reject_guarded_goal();", detached_end)
+    ready_break = navigation.index("if (wait_status == std::future_status::ready) break;", guard_after_wait)
+    assert active_guard < detached_guard < detached_end < guard_after_wait < ready_break
+    assert active_guard < guard_before_wait < detached_guard
+    terminal_guard = navigation.index("if (guard && !guard()) {", navigation.index("const auto wrapped = result.get();"))
+    terminal_log = navigation.index("log_navigation_terminal(target, wrapped.code);", terminal_guard)
+    terminal_admission_guard = navigation.index(
+        "if (guard && !guard()) return false;", terminal_log)
+    assert ready_break < terminal_guard < terminal_log < terminal_admission_guard
     assert "return navigate_to_with_client(" in source
 
 
@@ -1098,23 +1252,21 @@ def test_pickup_geometry_uses_fresh_relative_lateral_pose():
 
 def test_gate6_bounded_placement_translation_uses_existing_precision_route():
     source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
-    alignment = source[source.index("while (alignment_segment_count < 8)"):
-                       source.index("// Finish the bounded translation")]
-    assert "node->navigate_to_aligned_precision(segment_target, 120s)" in alignment
+    alignment = _main_placement_alignment_loop(source)
+    assert "node->navigate_to_aligned_precision(segment_target, 120s, true)" in alignment
     assert "node->navigate_to(segment_target, 120s)" not in alignment
     assert "achieved_segment_displacement > kMaxPlacementAlignmentSegmentDisplacement" in alignment
     assert "attachment proof failed during placement alignment" in alignment
-    assert "node->navigate_to(final_heading_target, 120s)" in source
+    assert "node->navigate_to_dispatch(final_heading_target, 120s)" in source
 
 
 def test_gate6_lateral_precision_translation_aligns_heading_before_travel():
     source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
-    alignment = source[source.index("while (alignment_segment_count < 8)"):
-                       source.index("// Finish the bounded translation")]
-    assert "node->navigate_to_aligned_precision(segment_target, 120s)" in alignment
+    alignment = _main_placement_alignment_loop(source)
+    assert "node->navigate_to_aligned_precision(segment_target, 120s, true)" in alignment
     assert "const double segment_heading" in alignment
     assert "segment_heading - current_bias_yaw" in alignment
-    assert "node->navigate_to(final_heading_target, 120s)" in source
+    assert "node->navigate_to_dispatch(final_heading_target, 120s)" in source
 
 
 def test_product102_precision_alignment_targets_reachable_physical_stance():
@@ -1122,12 +1274,11 @@ def test_product102_precision_alignment_targets_reachable_physical_stance():
     assert "kProduct102PlacementLeadMapY" not in source
     assert "placement_alignment_target_physical = placement_alignment_physical" in source
     assert "product102_center_slot ? 0.01 : kMaxPlacementAlignmentPositionError" in source
-    alignment = source[source.index("while (alignment_segment_count < 8)"):
-                       source.index("// Finish the bounded translation")]
+    alignment = _main_placement_alignment_loop(source)
     assert "remaining_alignment_distance <= placement_translation_position_tolerance" in alignment
     assert "remaining_alignment_distance > placement_translation_position_tolerance" in alignment
-    assert "kDesiredProduct102SlotBaseX = 0.755000000" in source
-    assert "kDesiredProduct102SlotBaseY = 0.100000000" in source
+    assert "kDesiredProduct102SlotBaseX = 0.748000000" in STANCE_HEADER.read_text()
+    assert "kDesiredProduct102SlotBaseY = 0.100000000" in STANCE_HEADER.read_text()
     assert "release_radius > kMaxPlacementReleaseRadius" in source
     assert "kMaxPlacementReleaseRadius = 0.785" in source
 
@@ -1136,8 +1287,8 @@ def test_product102_precision_stance_matches_collision_verified_branch():
     source = (ROOT / "src" / "gate6_mass_stage.cpp").read_text()
     # Recorded run16 geometry collided with the fixed lidar/base. The exact
     # loaded-scene replay clears this target and its 1 cm neighborhood.
-    assert "kDesiredProduct102SlotBaseX = 0.755000000" in source
-    assert "kDesiredProduct102SlotBaseY = 0.100000000" in source
+    assert "kDesiredProduct102SlotBaseX = 0.748000000" in STANCE_HEADER.read_text()
+    assert "kDesiredProduct102SlotBaseY = 0.100000000" in STANCE_HEADER.read_text()
     assert "kProduct102PlacementYawOffset = 1.530000000" in source
     assert "product102_center_slot ? 0.01 : kMaxPlacementAlignmentPositionError" in source
     assert "release_radius > kMaxPlacementReleaseRadius" in source
@@ -1149,7 +1300,7 @@ def test_dispatch_dock_uses_precision_arrival_before_bounded_alignment():
     start = source.index("const std::array<double, 3> dispatch_dock_corrected_target{")
     end = source.index("const auto selected_slot", start)
     dock = source[start:end]
-    assert "node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s)" in dock
+    assert "node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s, true)" in dock
     assert "node->navigate_to(dispatch_dock_corrected_target, 120s)" not in dock
     assert "node->dock_pose_within_tolerance(5s)" in dock
     assert "attachment proof failed after dispatch dock" in dock

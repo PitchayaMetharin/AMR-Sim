@@ -6,9 +6,9 @@
     manipulator_status_timeout_ms: 200
     output_frequency: 20.0
     max_linear_velocity: 0.50
-    max_angular_velocity: 0.40
+    max_angular_velocity: 0.64
     max_linear_acceleration: 0.50
-    max_angular_acceleration: 0.40
+    max_angular_acceleration: 1.0
     egress_max_distance_m: 0.50
     egress_max_speed_mps: 0.10
     egress_time_limit_s: 60.0

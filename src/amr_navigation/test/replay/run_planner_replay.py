@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend-lattice", required=True, type=Path)
     parser.add_argument("--lattice", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
-    parser.add_argument("--ros-domain-id", type=int, default=0)
+    parser.add_argument("--ros-domain-id", type=int, default=232)
     parser.add_argument("--run07-regression", action="store_true",
                         help="expect the recorded unsafe 2D control and test lattice rejection cases")
     parser.add_argument(

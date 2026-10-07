@@ -13,11 +13,11 @@
 namespace amr_navigation
 {
 
-nav_msgs::msg::Path make_precision_segment(
+static nav_msgs::msg::Path make_precision_segment_impl(
   const geometry_msgs::msg::PoseStamped & start,
   const geometry_msgs::msg::PoseStamped & goal,
   nav2_costmap_2d::Costmap2D & costmap,
-  const nav2_costmap_2d::Footprint & footprint)
+  const nav2_costmap_2d::Footprint & footprint, bool allow_reversing)
 {
   nav_msgs::msg::Path path;
   path.header = goal.header;
@@ -40,6 +40,7 @@ nav_msgs::msg::Path make_precision_segment(
     if (!std::isfinite(point.x) || !std::isfinite(point.y)) return path;
     radius = std::max(radius, std::hypot(point.x, point.y));
   }
+  if (!allow_reversing && (!std::isfinite(radius) || radius <= 0.0)) return path;
   const auto angle_delta = [](double from, double to) {
       return std::remainder(to - from, 2.0 * M_PI);
     };
@@ -49,7 +50,7 @@ nav_msgs::msg::Path make_precision_segment(
     const double backward = std::remainder(forward + M_PI, 2.0 * M_PI);
     // PlacementFollowPath permits reversing. Preserve the closest body heading
     // instead of requiring a half-turn beside the docking pedestal.
-    heading = std::abs(angle_delta(start_yaw, forward)) <=
+    heading = !allow_reversing || std::abs(angle_delta(start_yaw, forward)) <=
       std::abs(angle_delta(start_yaw, backward)) ? forward : backward;
   }
 
@@ -78,18 +79,25 @@ nav_msgs::msg::Path make_precision_segment(
   // Sample both translation and corner sweep at half a costmap cell, matching
   // the existing planner replay's swept-footprint proof.
   const double spacing = 0.5 * resolution;
-  const auto turn = [&](double x, double y, double from, double to) {
+  const auto turn = [&](double x, double y, double from, double to, bool emit = false) {
       const double delta = angle_delta(from, to);
       const auto steps = static_cast<std::size_t>(std::max(
         1.0, std::ceil(radius * std::abs(delta) / spacing)));
       for (std::size_t i = 0; i <= steps; ++i) {
-        if (!clear(x, y, from + delta * static_cast<double>(i) / steps)) return false;
+        const double yaw = from + delta * static_cast<double>(i) / steps;
+        if (emit ? !append(x, y, yaw) : !clear(x, y, yaw)) return false;
       }
       return true;
     };
   if (!turn(start.pose.position.x, start.pose.position.y, start_yaw, heading) ||
     !turn(goal.pose.position.x, goal.pose.position.y, heading, goal_yaw))
   {
+    return path;
+  }
+  if (!allow_reversing &&
+    !turn(start.pose.position.x, start.pose.position.y, start_yaw, heading, true))
+  {
+    path.poses.clear();
     return path;
   }
   const auto steps = static_cast<std::size_t>(std::max(1.0, std::ceil(length / spacing)));
@@ -102,11 +110,35 @@ nav_msgs::msg::Path make_precision_segment(
       return path;
     }
   }
+  if (!allow_reversing &&
+    !turn(goal.pose.position.x, goal.pose.position.y, heading, goal_yaw, true))
+  {
+    path.poses.clear();
+    return path;
+  }
   // The requested orientation is a separate terminal turn, not the tangent of
   // an artificial grid-to-exact-goal diagonal. Preserve the exact endpoints.
   path.poses.front() = start;
   path.poses.back() = goal;
   return path;
+}
+
+nav_msgs::msg::Path make_precision_segment(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav2_costmap_2d::Costmap2D & costmap,
+  const nav2_costmap_2d::Footprint & footprint)
+{
+  return make_precision_segment_impl(start, goal, costmap, footprint, true);
+}
+
+nav_msgs::msg::Path make_forward_precision_segment(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav2_costmap_2d::Costmap2D & costmap,
+  const nav2_costmap_2d::Footprint & footprint)
+{
+  return make_precision_segment_impl(start, goal, costmap, footprint, false);
 }
 
 void PrecisionNavfnPlanner::configure(

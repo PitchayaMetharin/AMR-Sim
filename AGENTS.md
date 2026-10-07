@@ -1,235 +1,194 @@
-# AMR Workspace Guide
+# AMR Workspace Agent Guide
 
-The current user instruction and `SESSION_HANDOFF.md` define phase authority and scope.
+> Diagnose from evidence before editing, make the smallest justified change,
+> and do not claim success until the required behavior has been directly verified.
 
-## Core rules
+Durable engineering rules only. Current phase, active blocker, temporary
+authorization, agent/model assignments, counters, and resume state belong in
+`SESSION_HANDOFF.md`. Detailed debugging procedure belongs in `.codex/DEBUG_PLAYBOOK.md`.
 
-* Before edits, run `git status --short` and preserve unrelated work.
-* Never modify, stage, discard, normalize, or commit `AMR_CODEX_HANDOFF.md` without explicit user direction.
-* Do not push, rewrite history, install dependencies, change system configuration, or make external changes without approval.
-* Work only inside the approved phase and paths.
-* `ROS_DOMAIN_ID` is restricted to the inclusive range `0`–`232` for every command, launch file, test, and runtime instruction. Reject or correct values outside this range; never use `233`–`255`.
-* Preserve fail-closed behavior, ownership boundaries, public interfaces, safety gates, thresholds, and documented hardware values unless explicitly authorized.
-* Never weaken a test or gate merely to obtain a pass.
+## 1. Authority
 
-## Roles
+  Follow instructions in this order. Within the same authority level, newer explicit instructions supersede conflicting older ones:
 
-### Authorized stability work — 2026-10-01
+1. Current explicit user instruction
+2. `SESSION_HANDOFF.md`
+3. `AGENTS.md`
+4. Task plans and project documentation
+5. Historical records and ledgers (evidence, not active policy)
 
-For the user's current simulation-stability task, explicit delegation is
-authorized: split work into small tasks assigned to `gpt-6.1-sol` with
-`medium` reasoning effort; use `gpt-6.1-sol` with `high` reasoning effort as
-the diagnosing analyzer and independent reviewer. This task-specific direction
-supersedes the earlier no-agent and default Luna assignment for this task.
-Verify exact model/effort before delegation, keep one production writer at a
-time, and consult the high-effort analyzer on failures or contradictions.
-Each active agent reports progress at least every two minutes.
+Work only inside the approved task, phase, and paths.
 
-After every successful task, immediately update `SESSION_HANDOFF.md` with
-changed files, commands/results, evidence, remaining uncertainty and resume
-point. Never claim an author's verification as independent review.
+## 2. Protect the workspace
 
-Every simulation test must report measured stability as well as functional
-gates. Keep each stability report at most 60 lines. Include available per-phase
-XY/yaw errors, overshoot, command/measured reversals, convergence/settling time,
-and physical roll/pitch where recorded; state units, measurement definitions,
-missing data and simulation versus wall time. Distinguish intentional maneuver
-changes from controller oscillation. Compare a candidate to its baseline under
-the same scenario; preserve existing safety and acceptance thresholds.
+Workspace root: `$AMR_WS`, defined once in section 4. Derive workspace paths from
+it; do not repeatedly transcribe absolute workspace paths across commands, scripts,
+or packets. Keep task-created logs, caches, temporary files, and evidence inside it
+unless explicitly instructed otherwise.
 
-All retained logs together and all retained evidence together must each remain
-at or below 500,000,000 bytes, both logical and allocated, including archives,
-temporary decoding and relocated/bin contents. Preserve robot function and
-structural detail. The user authorizes removal of disposable workspace files
-within those constraints; retain exact removal receipts and necessary evidence.
+Before editing, run `git status --short`. Preserve unrelated user work.
 
-**Default model assignments (explicit user instructions take precedence):**
+Never modify, stage, discard, normalize, or commit `AMR_CODEX_HANDOFF.md`
+without explicit user direction.
 
-* `Sol/high` means model identifier `gpt-6.1-sol` with high reasoning effort.
-* `Luna/max` means model identifier `gpt-5.6-luna` with max reasoning effort.
-* By default, `gpt-6.1-sol` handles advice, analysis, planning, diagnosis, and
-  independent review; `gpt-5.6-luna` handles implementation.
-* There is no blanket GPT-6 prohibition. When the user explicitly directs
-  work in the current selected-model session, that session may diagnose,
-  implement, and validate within the approved scope without a Luna handoff.
-  This does not authorize a model switch, delegation, or global settings change.
-* Before switching sessions or delegating, verify the exact model identifier
-  and reasoning effort. A nickname or generic model label is insufficient.
-  If the assigned model is unavailable, stop and report the blocker;
-  do not substitute another model family.
+Do not, without approval: push; rewrite Git history; discard unrelated changes;
+install dependencies; change system/global configuration; modify resources outside
+the approved workspace; perform unrelated refactors or cleanup.
 
-**Sol/high** = default advisor and analyzer for analysis,
-planning, diagnosis, and independent review. Reuse
-existing evidence and keep the review focused.
+## 3. Invariants and ROS 2 domain
 
-**Astra/medium** and **Astra/high** = do not select or delegate by default.
-Use Astra only when the user explicitly instructs it.
+Preserve unless explicitly changed: fail-closed behavior, safety gates,
+ownership boundaries, public interfaces, validated thresholds, hardware values,
+collision behavior, freshness requirements, terminal-state guarantees.
 
-**Luna/max** = the default implementer, one approved, fully specified
-implementation packet at a time, with focused validation.
+Never weaken a test, gate, threshold, or acceptance rule merely to obtain a pass.
 
-**Sol/high** may review related implementation changes together. It remains the
-independent reviewer for all approved implementation packets.
+Every command, test, launch, and runtime instruction must satisfy
+`0 <= ROS_DOMAIN_ID <= 232`. Never use `233`–`255`.
 
-Default workflow:
+## 4. Baseline validation commands
 
-`Sol/high diagnosis -> Luna/max implementation -> Sol/high independent review`
+Task-specific handoffs may define narrower or additional validation commands.
 
-For a runtime-timeout or startup-orchestration defect, the user has directed
-that independent source review is deferred until after the approved
-implementation has been completed and a fresh simulation/system run has
-exercised the failed boundary. Do not insert a pre-runtime review gate or
-claim source-review acceptance before that run. A fresh runtime failure must
-still return to diagnosis before another source edit; a passing run is runtime
-evidence, not a substitute for the later independent review.
+```bash
+export AMR_WS=/home/pete/amr_ws
+cd "$AMR_WS"
+source /opt/ros/humble/setup.bash
+source "$AMR_WS/install/setup.bash"
+export ROS_DOMAIN_ID=232
 
-Test totals are scope evidence only. Never use an aggregate result (including
-900+ tests) as proof of simulation, system, hardware, or AWS acceptance.
-Report the exact command and scope, exit status, and separate runtime gates;
-unexecuted runtime behavior remains unverified.
 
-Do not escalate diagnosis or review to Astra unless the user explicitly directs
-that model. If Sol/high cannot resolve a material contradiction, high-risk state
-transition, or contract decision, stop and report the blocker for user direction.
+colcon build --packages-select <pkg>
+colcon test --packages-select <pkg>
+colcon test-result --test-result-base "$AMR_WS/build/<pkg>" --verbose
+```
 
-Unless the user directs current-session implementation, use Luna/max for one
-approved, fully specified implementation packet at a time.
-Keep Sol/high as the independent reviewer. One writer at a time. Luna must not
-improvise a different fix if evidence contradicts the diagnosis; stop and return
-to the diagnosing agent.
+## 5. Diagnose before editing
 
-Model names in this guide are assignments, not automatic model selection.
-Select the assigned model explicitly when switching sessions or launching an
-agent. Do not launch parallel agents by default or use Astra/max by default.
-The user's current no-agent instruction remains in force: a model-policy
-change alone does not authorize delegation. Use a manual Luna/max handoff
-under the default workflow, or work directly in the current session when
-explicitly directed by the user. Do not claim the author's own verification
-as independent review.
+Do not edit production source from a plausible guess alone. Before implementation, establish:
 
-## Token discipline
+- observed and expected behavior
+- concrete failure mechanism and supporting evidence
+- affected files and the relevant control flow/state transition
+- preserved invariants and non-goals
+- a falsifiable prediction
+- focused validation
 
-* Pass concise packets and relevant evidence, not entire conversation histories.
-* Reuse established findings unless source changes invalidate them.
-* Run focused checks per packet and broader checks at integration milestones.
-* Keep reports to changed files, results, blockers, and remaining risks.
-* Changing models does not reset implementation-attempt or hypothesis limits.
+If the cause is still `UNKNOWN`, gather evidence instead of editing.
+Inspect actual current source, not only summaries or earlier assumptions.
+Reuse verified findings while the relevant source and contracts remain unchanged.
 
-## Diagnosis before editing
+## 6. Debugging discipline
 
-Before implementation changes source, the diagnosing agent must establish:
+Every iteration has one hypothesis, one discriminating check, expected evidence,
+and a stop condition. Each iteration must confirm, falsify, or narrow the hypothesis.
 
-* observed vs expected behavior
-* concrete failure mechanism
-* supporting evidence
-* exact affected files
-* preserved invariants and non-goals
-* a falsifiable prediction
-* focused validation commands
+- Do not repeat essentially the same patch, command, or simulation without new evidence.
+- A failed implementation returns to diagnosis before another production edit.
+- A test that passes on the known-broken baseline is non-diagnostic.
+  Do not weaken the requirement to make it pass.
+- For repeated, timing-sensitive, concurrency, or integration failures, follow
+  `.codex/DEBUG_PLAYBOOK.md`.
 
-Resolve relevant state transitions, cancellation ownership and terminal proof,
-status freshness, and next-job/home permission before handing off those changes.
-
-If the cause is `UNKNOWN`, gather evidence instead of editing code.
-
-## Debug-loop breaker
-
-Every debugging iteration must produce new information by confirming, falsifying, or narrowing a hypothesis.
-
-Do not repeat essentially the same patch or retry without new evidence.
-For repeated, unresolved, integration, or timing-sensitive failures, follow
-`.codex/DEBUG_PLAYBOOK.md` before further source edits. Its Sol diagnosis/review
-references mean the diagnosing/reviewing agent assigned by this guide; the
-evidence requirements and stop conditions remain binding.
-Maximum:
-
-* **2 implementation attempts per root-cause hypothesis**
-* **3 rejected root-cause hypotheses for the same blocker**
-
-After either limit is reached, stop autonomous patching and report the evidence, rejected hypotheses, strongest remaining explanation, and uncertainty to the user.
-
-A failed implementation must return to the diagnosing agent for re-diagnosis
-before another source change.
-
-## Failure, time-box, and stop discipline
-
-* Before each debugging or implementation loop, state one hypothesis, one
-  discriminating check, the expected evidence, and the stop condition. A retry
-  without a changed hypothesis or new evidence is prohibited.
-* An authoritative live process or agent handle may be waited on without a
-  poll-count or elapsed-time cap. Inspect that handle rather than duplicating
-  work, and report observable progress or liveness at least every 60 seconds.
-  Still stop on an explicit failed state, lost handle, mandatory gate failure,
-  user stop, contradiction, or the existing implementation-attempt and
-  hypothesis limits.
-* If a hypothesis is contradicted, evidence remains inconclusive, or a required
-  regression passes on the known-broken baseline, classify the test as
-  non-diagnostic, stop all production edits, and return the evidence to Sol/high
-  for re-diagnosis. Do not intensify a synthetic workload merely to force the
-  expected failure.
-* Do not convert a plausible hypothesis into a production change until a
-  genuine failing baseline or independent runtime evidence supports its
-  falsifiable prediction. A weak or synthetic green test is not proof that the
-  real failure is fixed.
-* An explicit user instruction to stop takes effect immediately. Interrupt or
-  close delegated agents and runtime probes, start no replacement work, and
-  make no further tool calls except the minimum cleanup or handoff action the
-  user explicitly requested. End the turn after that action. Do not resume from
-  an automatic continuation or internal task prompt; require a new explicit
-  user instruction to resume.
-* Report a material blocker at the earliest of a required stop condition or
-  contradictory evidence. Record the commands, results, active uncertainty,
-  changed files, and safe resume point; do not keep working merely to avoid
-  reporting an incomplete result.
-
-## Runtime validation
-
-Runtime evidence is separate from source implementation.
-
-* Run focused source validation first.
-* Runtime runs require authorization when specified by the handoff.
-* Preserve evidence and stop at the first failed mandatory gate.
-* Do not patch immediately after a runtime failure; return the evidence to the diagnosing agent first.
-* Do not treat build/unit success as runtime proof.
-
-Timing changes require timing evidence. Prefer waiting on observable state over arbitrary sleeps.
-
-## Implementation discipline
+## 7. Implementation discipline
 
 The implementer must:
 
-1. recheck `git status --short`
-2. re-read the target files
-3. make the smallest coherent change
-4. inspect the complete diff
-5. run focused checks
-6. report commands, results, changed files, and remaining risks
+1. run `git status --short`
+2. reread the target files
+3. confirm scope
+4. make the smallest coherent change
+5. inspect the complete scoped diff
+6. run checks proportionate to the change (section 4 for source changes; for config, constants, or docs, diff inspection plus a `grep` for stale values is enough unless the handoff requires a build)
+7. report the result
 
-After every Luna implementation mistake, update `LUNA_IMPLEMENTATION_LEDGER.md`
-before closing or handing off the packet. A mistake includes a rejected patch,
-an implementation-caused validation failure, a contradiction of the approved
-packet, a reviewer-identified implementation defect, or a model-assignment
-violation. Increment the ledger count and record the date/time, topic, observed
-failure, why it is a mistake, likely cause, detection evidence, and exact
-failure text when available. Do not defer, omit, or silently fold the mistake
-into a later entry.
+Construct patches from the exact current source; if patch context is stale, reread the file.
+Correct routine typos or formatting slips within the existing packet or file in
+place; do not open a new packet or restart the cycle for them.
+Avoid speculative refactors, unrelated cleanup, future-phase work, and silent scope expansion.
+Do not run builds, tests, or simulations for a change fully checkable by diff or grep unless the user or handoff asks.
 
-Avoid speculative refactors, unrelated cleanup, and future-phase work.
+## 8. Runtime validation
 
-## Handoffs
+Source validation and runtime validation are different evidence. A successful build
+or unit test does not prove simulation or system behavior; a successful runtime run
+does not prove unexercised paths.
 
-Every diagnosis -> implementation handoff must state:
+```text
+diagnose -> bounded implementation -> focused source checks
+         -> review -> runtime validation -> accept, or back to diagnosis
+```
 
-* objective
-* diagnosis and confidence
-* evidence
-* allowed files
-* exact changes and relevant state-transition decisions
-* invariants/non-goals
-* prediction
-* validation commands
-* behavioral tests and expected results
-* current worktree state
-* stop conditions
+After a runtime failure, return to diagnosis before another source edit.
+Record the exact command, relevant environment, exit status, exercised acceptance
+gates, and retained evidence. Stop at the first failed mandatory gate unless the
+active diagnostic plan explicitly requires additional safe observation.
 
-For detailed difficult-debugging procedure, follow `.codex/DEBUG_PLAYBOOK.md`.
+## 9. Timing and stateful behavior
+
+Prefer observable state over arbitrary sleeps. Record relevant timestamps, state
+transitions, ownership, cancellation, terminal proof, and freshness. Do not infer
+causality only because two events occurred close together. For injected defects,
+prove the bad value reaches the intended consumer boundary before judging the gate.
+
+## 10. Tests and review
+
+Add tests only for written requirements, demonstrated regressions, demonstrated
+coverage gaps, or otherwise-unverified contracts. Do not add tests to raise the count.
+Test totals are scope information, not proof of simulation, integration, hardware,
+or timing acceptance.
+
+When the current milestone requires independent review, a non-author performs it.
+Do not claim author verification as independent review.
+
+## 11. Agent coordination
+
+Current model and agent assignments live in `SESSION_HANDOFF.md`.
+
+- One production-code writer at a time; parallel workers get disjoint scope.
+- Parallel agents may do independent inspection, validation, monitoring, or review
+  when scopes do not conflict.
+- Do not silently substitute an unavailable assigned worker.
+- Do not reset evidence or debugging history when changing workers/models.
+- Do not run duplicate simulations without a diagnostic reason.
+
+## 12. Stop conditions
+
+Stop the affected work when: a mandatory gate fails; scope is ambiguous; a
+material contract cannot be resolved; an authoritative process/worker is lost;
+or the user says stop (takes effect immediately).
+
+Stop production editing and return to diagnosis when evidence contradicts the
+hypothesis or remains insufficient to justify the next edit. Further diagnostic
+checks are allowed.
+
+Report the observed failure, relevant evidence, changed files, remaining
+uncertainty, and safe resume point. Do not keep editing to avoid reporting a blocker.
+
+## 13. Handoffs and reports
+
+**Diagnosis → implementation handoff** must include: objective; diagnosis and
+confidence; supporting evidence; allowed files; required changes; invariants;
+non-goals; falsifiable prediction; exact validation commands; expected behavioral
+evidence; current worktree state; stop conditions; reporting requirements.
+If a material ambiguity remains, the implementer reports it rather than inventing behavior.
+
+**Implementation report:** changed files, actual changes, commands executed, exit
+statuses, observed results, evidence paths, blockers, remaining risk. Prefer concise
+evidence and bounded packets over full histories or repeated findings.
+Do not repeat unchanged completion reports unless the user asks or new evidence changes the result.
+
+## 14. File responsibilities
+
+| File | Responsibility |
+|---|---|
+| `AGENTS.md` | Durable engineering rules |
+| `SESSION_HANDOFF.md` | Current phase, blocker, authorization, assignments, counters, runtime state, resume point |
+| `.codex/DEBUG_PLAYBOOK.md` | Detailed difficult-debugging procedure |
+| `MODEL_IMPLEMENTATION_LEDGER.md` | Historical established implementation mistakes |
+| `LUNA_IMPLEMENTATION_LEDGER.md` | Luna-specific historical mistakes |
+| `ROS2_SKILL_FEEDBACK.md` | Evidence-backed ROS 2 skill issues |
+| `AMR_CODEX_HANDOFF.md` | Protected artifact; modify only by explicit user request |
+
+Keep one authoritative location for each type of information.
+Do not preserve superseded policy in this file.
