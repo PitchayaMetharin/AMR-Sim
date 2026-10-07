@@ -121,8 +121,17 @@ self-collision-free band 0.7430-0.7635 m; offline product102_arm_branch_test); P
 upright grasp seed with upright-only IK + wrist path constraints, legacy flipped fallback.
 Captured clearance replay cannot be regenerated for the new stance (capture taken at -3.345);
 see native45_clearance/claude_stance748_20261007/NOTE.md. Native48 lifecycle DDS response race
-(one-off, Native49 identical rerun passed). Remaining: wrist null-space spin (j4/j6 +-2.5 rad)
-during the Cartesian loaded lift after the upright grasp (j5~0 singularity) - next fix.
+(one-off, Native49 identical rerun passed). Wrist spin during the Cartesian loaded lift (j5~0 singularity) fixed:
+Product102 lift is joint-linear grasp->upright pre-grasp, every sample validated (payload-aware
+/check_state_validity, upright wrist, <=10 mm from vertical, <=0.06 rad TCP rotation), Cartesian
+fallback. Native51 FULL PASS (17/17 gates, success True, audit integrity PASS); pick j4/j6 total
+travel 1.84/1.82 rad (Native49 6.65/6.4, Native50 6.29). Interactive session: Product A send +
+go home succeeded, fault_latched False. Final sequential tests with no sim running: manipulation
+331, factory 481, mpc 71, mission 32, interfaces 20, control 14, navigation 12, bringup 6,
+description 37 (pytest; ctest 60 s default borderline). Note: amr_control/amr_mpc_controller tests
+pin ROS_DOMAIN_ID=232 and fail if a live sim is on 232. Open: dispatch lateral alignment makes a
+66 deg turn-drive-turn for the 10 cm Product B offset (proposed: transit endpoint at stance y);
+captured clearance replay not regenerable for the new stance; independent review not performed.
 
 ## Assignments and process requirements
 
@@ -376,3 +385,101 @@ The previous accumulated handoff was preserved as a historical snapshot at
 clearance evidence root. Its old active/resume instructions are superseded by
 this document. That previous recheck only read source/status/evidence and updated this handoff;
 no source edits, tests, replay, simulation, protected artifact or ledger changes.
+
+# AWS - Do not overwite below with factory handoff
+
+Recorded 2026-10-07 (Claude session, Opus 5.5 root, per explicit user instruction;
+diagnosis/inspection only — **no source edits**). Factory handoff updates belong
+above this header; keep this section intact.
+
+### Parallel AWS run (inspection)
+- Run root: `phase14_evidence/aws_parallel_20261007T132653Z/` (`launch.sh`,
+  `launch_env.txt`, `launch.log`, `watch/`). Started while factory run
+  `factory_full_validation_20261003_50` was live; user declared _50 throwaway,
+  so _50 timing/RTF evidence is confounded by the parallel AWS load.
+- Isolation: `ROS_DOMAIN_ID=231`, `GZ_PARTITION=amr_aws_parallel_20261007T132653Z`,
+  run-local `ROS_LOG_DIR`/`ROS_HOME`, `headless:=true rviz:=false`,
+  `aws_warehouse_exploration.launch.py`. Not run through the AWS evidence runner;
+  not acceptance evidence.
+- Outcome: exploration `COMPLETE` at ~20:29:56 local (~2.5 min), mission
+  `SUCCEEDED`, `fault_latched=false`, `goal_failures=0`, `reached_goal_count=3`,
+  `raw_frontier_count=128`, `blocked_frontier_count=128` (all `blocked_safety`),
+  reason `reachable area exhausted; blocked frontiers remain`. Final pose
+  (3.79, -9.51): corner corridor between bottom shelf rack and south wall
+  (zero-cost strip ~0.4 m along x=3.79). Shelf block (x 2.6–6.8) not entered.
+- This COMPLETE does **not** meet the documented AWS gate (continued mapping
+  through reachable shelf areas). Open requirement question for user: are the
+  shelf aisles required territory? SLAM-measured aisle gaps ~1.9 m (some
+  1.0–1.3 m) with clutter vs footprint 1.22 × 0.82 m (in-place turn ~1.44 m).
+  Do not reduce inflation/footprint to obtain a pass.
+- Evidence: `watch/exploration_status.txt`, `watch/maps_at_complete.npz`,
+  `watch/costmap_raw_at_complete.npz`, `watch/frontiers_vs_costmap_raw.png`
+  (valid), `watch/map_at_complete.png` (right panel uses a stale `/costmap`
+  snapshot stamped 37.65 s sim vs map 384 s — do not use). `watch/pose.txt` is
+  empty (bad `tf2_echo` argv). Possible stale RViz global costmap: `ros2 topic hz
+  /amr/global_costmap/costmap` saw no messages in 7 s despite
+  `always_send_full_costmap=true` — unverified.
+
+### Prior user-reported AWS failure (19:04 manual run)
+- Run: `.ros_logs/aws_warehouse_manual_01/2026-10-07-19-04-12-708806-pete-127367/`.
+  Controller: `RegulatedPurePursuitController detected collision ahead!`
+  (1791374778.48); supervisor: `Mission aborted: controller collision boundary
+  reached`. RViz exited cleanly 7.2 s later; RViz is required, so the launch shut
+  down. Explorer wrote no log, so its state after the abort is unrecorded.
+- Corrected diagnosis (earlier in-session claim "collision abort latches explorer
+  FAULT" was **wrong**): committed supervisor classifies the RPP collision log as
+  `OBSTACLE_BLOCKAGE` + `blockage_confirmed=true`
+  (`mission_supervisor_node.cpp` controller result callback); explorer treats
+  that as recoverable → blacklist + `RECOVERY_WAIT` (`frontier_explorer.py`
+  confirmed_blockage branch). Covered by `test_mission_supervisor_behavior.cpp`
+  and `test_frontier_lifecycle.py::test_matching_obstacle_blockage_enters_recovery_wait_then_requires_stationary_proof`.
+  Most likely the run was ended by RViz closing, not by an exploration fault
+  (pending user confirmation whether RViz was closed).
+- Unconfirmed risk (no evidence it occurs): collision evidence arrives via
+  `/rosout`; if the FollowPath result is processed before the log, the abort is
+  `CONTROLLER_ABORT` and the explorer latches `FAULT`. Do not fix without
+  observing it. Observe on next abort: `ros2 topic echo /amr/exploration/status`
+  — `RECOVERY_WAIT` = by design; `FAULT` + `mission_fault_class=CONTROLLER_ABORT`
+  = race confirmed.
+- `/amr/exploration/start` only works from `STOPPED`/`COMPLETE`/`INCOMPLETE`;
+  a latched `FAULT` requires relaunching the whole stack (any required process
+  exit shuts the launch down).
+- Code-version note: uncommitted supervisor edit (src mtime 19:12:11, build
+  19:12:25) routes GridBased goals < 1 m to `PrecisionGridBased`; the 19:04 run
+  predates it, the 20:27 parallel run includes it.
+
+### Fault check (completed 2026-10-07; AWS stack stopped)
+- AWS (domain 231) before stop: all 16 lifecycle nodes `active`; 4 ros2_control
+  controllers `active`; `/amr/health/status` HEALTHY (2); `/amr/base/status`
+  READY (2); manipulation STOWED_EMPTY (1); mission last terminal `SUCCEEDED`,
+  `fault_class=NONE`; exploration `COMPLETE`, `fault_latched=false`. No process
+  died before the stop.
+- Only non-OK diagnostic: EKF WARN — IMU orientation covariance is all zeros
+  (yaw variance replaced by robot_localization) while `ekf.yaml` fuses imu0 yaw
+  and yaw rate. Pre-existing (unchanged since initial commit); not changed.
+- Shutdown-only faults (after work completed; not gate failures, not fixed):
+  - `frontier_explorer.py` exit 1 on SIGINT: double `rclpy.shutdown()` →
+    `RCLError: rcl_shutdown already called` (also in the 19:04 run).
+  - AWS `gz sim` server ignored SIGINT, SIGTERM-escalated; its `gz sim` child
+    (170792) and the domain-231 ros2 daemon (171478, needed SIGKILL) were
+    orphaned and killed manually. Verified: no domain-231 processes, no `gz sim`.
+  - Factory `gate6_attachment_bootstrap` exit 1 after wrapper SIGINT:
+    `GATE6 ATTACHMENT BOOTSTRAP FAULT: Unable to convert call argument to Python
+    object`; intermittent — runs _45, _46, _50 (not _44, _47–_49).
+- Factory _50 (domain 232): finished; `result.json` `success: true`, all 17
+  gates exit 0; `final_observer_result.json` `passed: true`, 2 jobs. Timing
+  confounded by parallel AWS load.
+- A transient factory `gz sim` (pid 176951) appeared then vanished during the
+  check; origin not identified.
+
+### AWS resume point
+- State: no AWS processes running; no source changed in this slice.
+- Pending user decisions: (1) are shelf aisles required AWS territory (gate
+  wording "reachable shelf areas"); (2) whether to address the IMU zero-yaw-
+  covariance fusion or any shutdown-only fault above.
+- If an AWS run shows `Mission aborted`, keep the stack (and RViz) up and check
+  `/amr/exploration/status` before stopping; only `FAULT` +
+  `mission_fault_class=CONTROLLER_ABORT` is evidence for a rosout/result race fix.
+- Next acceptance attempt must use the AWS evidence runner
+  (`docs/SIMULATION_COMMANDS.md`), a fresh run dir, a domain in 0–232, and no
+  concurrent simulation.

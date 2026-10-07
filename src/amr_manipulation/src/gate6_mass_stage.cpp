@@ -3088,53 +3088,6 @@ int main(int argc, char ** argv) {
     if (!scene.applyAttachedCollisionObject(attached))
       throw std::runtime_error("MoveIt attached collision object was rejected");
 
-    // The product begins the lift in expected contact with its support.  Allow
-    // only this object pair while moving straight upward, then restore normal
-    // collision checking before any free-space loaded motion.
-    if (!set_pickup_support_collision(true))
-      throw std::runtime_error("temporary pickup support collision allowance was rejected");
-    auto lift_checkpoint = grasp;
-    lift_checkpoint.position.z += 0.080;
-    auto clearance_retreat = pregrasp;
-    try {
-      // Keep the checkpoint in the same collision-checked Cartesian path as
-      // the final clearance retreat.  Stopping at the checkpoint leaves the
-      // held product in the known self-collision boundary.
-      std::vector<geometry_msgs::msg::Pose> retreat_waypoints{
-        lift_checkpoint, clearance_retreat};
-      moveit_msgs::msg::RobotTrajectory retreat_trajectory;
-      if (arm.computeCartesianPath(
-          retreat_waypoints, 0.005, 0.0, retreat_trajectory, true) < 0.99)
-        throw std::runtime_error("continuous Cartesian retreat was incomplete");
-      MoveGroupInterface::Plan retreat_plan;
-      retreat_plan.trajectory_ = retreat_trajectory;
-      require_motion_permission();
-      if (arm.execute(retreat_plan) != moveit::core::MoveItErrorCode::SUCCESS)
-        throw std::runtime_error("continuous Cartesian retreat execution failed");
-      node->throw_if_canceled();
-    } catch (...) {
-      if (!set_pickup_support_collision(false))
-        RCLCPP_ERROR(node->get_logger(), "Failed to restore pickup support collision checking");
-      throw;
-    }
-    if (!set_pickup_support_collision(false))
-      throw std::runtime_error("pickup support collision checking was not restored");
-    if (!node->reference_evidence_stable(false))
-      throw std::runtime_error("dock moved during loaded retreat");
-    geometry_msgs::msg::PoseStamped retreat_product_pose;
-    if (!node->latest_product_pose(retreat_product_pose) ||
-      !node->native_attachment_state_is("attached"))
-    {
-      throw std::runtime_error("product evidence was not stable after loaded retreat");
-    }
-    const auto retreat_attachment = node->measured_attachment_evidence(
-      arm.getCurrentPose("gripper_tcp"));
-    if (retreat_attachment.position_error_m > 0.030 ||
-      retreat_attachment.orientation_error_rad > 0.15)
-    {
-      throw std::runtime_error("product attachment evidence was not stable after loaded retreat");
-    }
-
     // Use one payload-aware state-validity helper for every loaded retreat,
     // placement-lower, and post-detach request.  The joint state is serialized
     // as a diff so MoveIt's authoritative planning scene (including
@@ -3171,6 +3124,112 @@ int main(int argc, char ** argv) {
           throw std::runtime_error("payload-aware state validity failed at " + sample_label);
         }
       };
+
+    // The product begins the lift in expected contact with its support.  Allow
+    // only this object pair while moving straight upward, then restore normal
+    // collision checking before any free-space loaded motion.
+    if (!set_pickup_support_collision(true))
+      throw std::runtime_error("temporary pickup support collision allowance was rejected");
+    auto lift_checkpoint = grasp;
+    lift_checkpoint.position.z += 0.080;
+    auto clearance_retreat = pregrasp;
+    try {
+      // Keep the checkpoint in the same collision-checked Cartesian path as
+      // the final clearance retreat.  Stopping at the checkpoint leaves the
+      // held product in the known self-collision boundary.
+      std::vector<geometry_msgs::msg::Pose> retreat_waypoints{
+        lift_checkpoint, clearance_retreat};
+      moveit_msgs::msg::RobotTrajectory retreat_trajectory;
+      bool joint_lift_ready = false;
+      if (product.id == 102) {
+        // A straight Cartesian lift from the upright grasp crosses the j5=0
+        // wrist singularity and swings joints 4/6 (Native50). Lift linearly
+        // in joint space to the validated upright pre-grasp instead, after
+        // proving every sample is valid, upright, near-vertical and keeps
+        // the TCP orientation; otherwise keep the Cartesian lift below.
+        try {
+          auto lift_state = arm.getCurrentState(3.0);
+          if (!lift_state)
+            throw std::runtime_error("fresh MoveIt state was unavailable for loaded lift");
+          const auto * lift_group = lift_state->getJointModelGroup("manipulator");
+          std::vector<double> lift_start;
+          lift_state->copyJointGroupPositions(lift_group, lift_start);
+          const auto lift_path = amr_manipulation::product102_joint_lift(
+            lift_start, pregrasp_ik_solution, 20);
+          if (lift_path.size() != 21U)
+            throw std::runtime_error("joint lift path was invalid");
+          moveit::core::RobotState sample_state(*lift_state);
+          sample_state.setJointGroupPositions(lift_group, pregrasp_ik_solution);
+          sample_state.update();
+          const Eigen::Isometry3d lift_end = sample_state.getGlobalLinkTransform("gripper_tcp");
+          for (std::size_t index = 0; index < lift_path.size(); ++index) {
+            const auto & q = lift_path[index];
+            if (!finite_pregrasp_joint_values(q) ||
+              !amr_manipulation::product102_upright_wrist(q.data()))
+              throw std::runtime_error("joint lift sample left the upright wrist branch");
+            sample_state.setJointGroupPositions(lift_group, q);
+            sample_state.update();
+            if (!sample_state.satisfiesBounds(lift_group))
+              throw std::runtime_error("joint lift sample violated joint bounds");
+            const Eigen::Isometry3d tcp = sample_state.getGlobalLinkTransform("gripper_tcp");
+            if (std::hypot(tcp.translation().x() - lift_end.translation().x(),
+              tcp.translation().y() - lift_end.translation().y()) > 0.010 ||
+              Eigen::AngleAxisd(tcp.linear().transpose() * lift_end.linear()).angle() > 0.06)
+              throw std::runtime_error("joint lift sample left the near-vertical envelope");
+            validate_state(sample_state, "joint lift sample " + std::to_string(index));
+          }
+          retreat_trajectory.joint_trajectory.joint_names = expected_pregrasp_joint_names;
+          for (const auto & q : lift_path) {
+            trajectory_msgs::msg::JointTrajectoryPoint point;
+            point.positions = q;
+            retreat_trajectory.joint_trajectory.points.push_back(std::move(point));
+          }
+          robot_trajectory::RobotTrajectory lift_trajectory(arm.getRobotModel(), "manipulator");
+          lift_trajectory.setRobotTrajectoryMsg(*lift_state, retreat_trajectory);
+          trajectory_processing::IterativeParabolicTimeParameterization lift_timing;
+          if (!lift_timing.computeTimeStamps(lift_trajectory, 0.2, 0.2))
+            throw std::runtime_error("joint lift time parameterization failed");
+          lift_trajectory.getRobotTrajectoryMsg(retreat_trajectory);
+          joint_lift_ready = true;
+        } catch (const std::exception & error) {
+          retreat_trajectory = moveit_msgs::msg::RobotTrajectory{};
+          RCLCPP_WARN(node->get_logger(),
+            "Product102 joint lift unavailable (%s); using Cartesian lift", error.what());
+        }
+        if (joint_lift_ready)
+          RCLCPP_INFO(node->get_logger(), "Product102 upright joint lift planned");
+      }
+      if (!joint_lift_ready && arm.computeCartesianPath(
+          retreat_waypoints, 0.005, 0.0, retreat_trajectory, true) < 0.99)
+        throw std::runtime_error("continuous Cartesian retreat was incomplete");
+      MoveGroupInterface::Plan retreat_plan;
+      retreat_plan.trajectory_ = retreat_trajectory;
+      require_motion_permission();
+      if (arm.execute(retreat_plan) != moveit::core::MoveItErrorCode::SUCCESS)
+        throw std::runtime_error("continuous Cartesian retreat execution failed");
+      node->throw_if_canceled();
+    } catch (...) {
+      if (!set_pickup_support_collision(false))
+        RCLCPP_ERROR(node->get_logger(), "Failed to restore pickup support collision checking");
+      throw;
+    }
+    if (!set_pickup_support_collision(false))
+      throw std::runtime_error("pickup support collision checking was not restored");
+    if (!node->reference_evidence_stable(false))
+      throw std::runtime_error("dock moved during loaded retreat");
+    geometry_msgs::msg::PoseStamped retreat_product_pose;
+    if (!node->latest_product_pose(retreat_product_pose) ||
+      !node->native_attachment_state_is("attached"))
+    {
+      throw std::runtime_error("product evidence was not stable after loaded retreat");
+    }
+    const auto retreat_attachment = node->measured_attachment_evidence(
+      arm.getCurrentPose("gripper_tcp"));
+    if (retreat_attachment.position_error_m > 0.030 ||
+      retreat_attachment.orientation_error_rad > 0.15)
+    {
+      throw std::runtime_error("product attachment evidence was not stable after loaded retreat");
+    }
 
     const auto planning_scene_attached_object_proof =
       [&node](const bool require_held_product) {

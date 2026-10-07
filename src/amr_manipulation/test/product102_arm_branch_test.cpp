@@ -182,4 +182,35 @@ TEST_F(Product102ArmBranch, GraspSeedSelectsUprightBranchNextToPregrasp)
   }
 }
 
+// Native50: the Cartesian loaded lift after the upright grasp crossed the j5=0
+// wrist singularity and swung joints 4/6 by +-2.5 rad. The joint-linear lift
+// must stay near-vertical, keep the gripper orientation, and stay upright.
+TEST_F(Product102ArmBranch, JointLinearLoadedLiftIsNearVerticalAndUpright)
+{
+  const auto * group = model_->getJointModelGroup("manipulator");
+  const auto pregrasp_state = state(kRecordedPregrasp);
+  const Eigen::Isometry3d pregrasp = pregrasp_state.getGlobalLinkTransform("gripper_tcp");
+  Eigen::Isometry3d grasp = pregrasp;
+  grasp.translation().z() -= 0.095;
+  const auto seed = amr_manipulation::product102_grasp_seed(kRecordedPregrasp[0]);
+  auto grasp_state = state(std::vector<double>(seed.begin(), seed.end()));
+  ASSERT_TRUE(grasp_state.setFromIK(group, grasp, "gripper_tcp", 0.5));
+  std::vector<double> grasp_q;
+  grasp_state.copyJointGroupPositions(group, grasp_q);
+  const auto path = amr_manipulation::product102_joint_lift(grasp_q, kRecordedPregrasp, 20);
+  ASSERT_EQ(path.size(), 21U);
+  EXPECT_EQ(path.front(), grasp_q);
+  EXPECT_EQ(path.back(), kRecordedPregrasp);
+  for (const auto & q : path) {
+    ASSERT_EQ(q.size(), 6U);
+    EXPECT_TRUE(amr_manipulation::product102_upright_wrist(q.data()));
+    const auto st = state(q);
+    const auto tcp = st.getGlobalLinkTransform("gripper_tcp");
+    EXPECT_LE(std::hypot(tcp.translation().x() - pregrasp.translation().x(),
+      tcp.translation().y() - pregrasp.translation().y()), 0.010);
+    EXPECT_LE(Eigen::AngleAxisd(tcp.linear().transpose() * pregrasp.linear()).angle(), 0.06);
+    EXPECT_EQ(self_contacts(st), "");
+  }
+}
+
 }  // namespace

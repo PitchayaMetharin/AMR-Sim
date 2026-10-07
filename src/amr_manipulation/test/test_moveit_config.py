@@ -287,11 +287,17 @@ def test_moveit_launch_sets_factory_model_and_publishes_descriptions():
     lower_execute = mass_source.index("arm.execute(lower_plan)")
     assert attach_scene < allow_support < lift_checkpoint < clearance_retreat
     assert clearance_retreat < retreat_waypoints < retreat_path < retreat_execute
-    assert retreat_execute < restore_support < validity_service
+    assert retreat_execute < restore_support
+    # The payload-aware validity helper is created before the support allowance
+    # so the Product 102 joint-linear lift validates every sample (Native50).
+    assert attach_scene < validity_service < allow_support
     assert validity_service < validity_helper < validity_diff < validity_contacts < validity_required
+    assert validity_required < allow_support
+    joint_lift_validation = mass_source.index('validate_state(sample_state, "joint lift sample "')
+    assert allow_support < joint_lift_validation < retreat_path < retreat_execute
     assert validity_helper < loaded_stow < payload_proof < lower_execute
     assert "retreat_waypoints" in mass_source
-    assert mass_source[attach_scene:validity_service].count(
+    assert mass_source[attach_scene:restore_support].count(
         "retreat_waypoints, 0.005, 0.0, retreat_trajectory, true") == 1
     assert "latest_product_pose(retreat_product_pose)" in mass_source
     assert "native_attachment_state_is(\"attached\")" in mass_source
