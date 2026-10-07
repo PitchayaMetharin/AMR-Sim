@@ -513,7 +513,12 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory("amr_mpc_controller"),
             "launch", "amr_mpc_controller.launch.py")),
-        condition=autonomous_condition)
+        condition=autonomous_condition,
+        launch_arguments={
+            "enable_final_position_profiles": "true",
+            "products_registry": os.path.join(factory, "config", "products.yaml"),
+            "stations_registry": os.path.join(factory, "config", "stations.yaml"),
+        }.items())
     include_control = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory("amr_control"),

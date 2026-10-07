@@ -34,7 +34,7 @@
       stateful: false
       xy_goal_tolerance: 0.01
     FollowPath:
-      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+      plugin: amr_mpc_controller::HeadingLatchedRPP
       desired_linear_vel: 0.50
       lookahead_dist: 0.60
       min_lookahead_dist: 0.30
@@ -54,7 +54,7 @@
       cost_scaling_gain: 1.0
       inflation_cost_scaling_factor: 3.0
       use_rotate_to_heading: true
-      rotate_to_heading_angular_vel: 0.40
+      rotate_to_heading_angular_vel: 0.64
       max_angular_accel: 0.40
       rotate_to_heading_min_angle: 0.785
       allow_reversing: false
@@ -83,7 +83,7 @@
       cost_scaling_gain: 1.0
       inflation_cost_scaling_factor: 3.0
       use_rotate_to_heading: false
-      rotate_to_heading_angular_vel: 0.40
+      rotate_to_heading_angular_vel: 0.64
       max_angular_accel: 0.40
       rotate_to_heading_min_angle: 0.785
       allow_reversing: true

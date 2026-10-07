@@ -1,0 +1,18 @@
+{
+  "workspace": "/home/pete/amr_ws",
+  "baseline": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline",
+  "checks": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_recovery_checks4",
+  "script": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/recover_scene_finalize.py",
+  "environment": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env",
+  "owned_environment": {
+    "HOME": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env/home",
+    "ROS_HOME": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env/ros_home",
+    "TMPDIR": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env/tmp",
+    "XDG_CACHE_HOME": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env/xdg_cache",
+    "XDG_CONFIG_HOME": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env/xdg_config",
+    "XDG_DATA_HOME": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env/xdg_data",
+    "ROS_LOG_DIR": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_baseline/env/ros_logs"
+  },
+  "snapshot": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_recovery_checks4/recover_scene_finalize.py.before",
+  "failed_syntax_receipt": "/home/pete/amr_ws/phase14_evidence/stability_20261003/b_turn_placement_20261006/native44_recovery_checks4/syntax_compile_path_correction1.receipt.json"
+}

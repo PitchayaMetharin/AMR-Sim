@@ -1,5 +1,6 @@
 import importlib.util
 import inspect
+import json
 import math
 import subprocess
 import sys
@@ -33,9 +34,13 @@ ADAPTER_SPEC.loader.exec_module(ADAPTER)
 class _Logger:
     def __init__(self):
         self.errors = []
+        self.infos = []
 
     def error(self, message):
         self.errors.append(message)
+
+    def info(self, message):
+        self.infos.append(message)
 
 
 class _Publisher:
@@ -284,6 +289,7 @@ class _GoalHandle:
     def __init__(self):
         self.request = SimpleNamespace(
             pickup_station_id="pickup_a", destination_station_id="dispatch")
+        self.goal_id = SimpleNamespace(uuid=list(range(1, 17)))
         self.is_active = True
         self.feedback = []
         self.terminal_calls = []
@@ -346,6 +352,9 @@ def _execution_adapter(return_code, statuses=()):
     adapter._child_sequence = 0
     adapter._child_status_at = 0.0
     adapter._child_status_authority_open = False
+    adapter._ownership_epoch = None
+    adapter._boot_id = 91
+    adapter._sequence = 0
     adapter._state = ADAPTER.ManipulatorStatus.STOWED_EMPTY
     adapter._base_motion_allowed = True
     adapter._product_attached = False
@@ -861,12 +870,64 @@ def test_cancel_arriving_before_execute_callback_is_preserved():
     adapter = _execution_adapter(0)
     adapter._cancel_requested.set()
     goal_handle = _GoalHandle()
+    logger = _Logger()
+    adapter.get_logger = lambda: logger
 
     result = adapter._execute_callback(goal_handle)
 
     assert result.outcome == ExecuteProductCycle.Result.CANCELED
     assert not result.delivered
     assert goal_handle.terminal_calls == ["canceled"]
+    close = json.loads(next(message for message in logger.infos
+                            if message.startswith(ADAPTER.OWNERSHIP_LOG_PREFIX))[
+        len(ADAPTER.OWNERSHIP_LOG_PREFIX):])
+    assert close["cancel_requested"] is True
+
+
+def test_late_accepted_cancel_is_recorded_before_success_cleanup():
+    adapter = _execution_adapter(0)
+    goal_handle = _GoalHandle()
+    logger = _Logger()
+    adapter.get_logger = lambda: logger
+
+    def accept_after_cancel_decision():
+        assert adapter._cancel_callback(goal_handle) == ADAPTER.CancelResponse.ACCEPT
+        return True
+
+    adapter._wait_fresh_independent_empty_stow = accept_after_cancel_decision
+    result = adapter._execute_callback(goal_handle)
+
+    assert result.outcome == ExecuteProductCycle.Result.SUCCESS
+    assert goal_handle.terminal_calls == ["succeed"]
+    close = json.loads(next(message for message in logger.infos
+                            if message.startswith(ADAPTER.OWNERSHIP_LOG_PREFIX))[
+        len(ADAPTER.OWNERSHIP_LOG_PREFIX):])
+    assert close["cancel_requested"] is True
+
+
+def test_delayed_cancel_accepted_during_next_reservation_is_owned_by_next_epoch():
+    adapter = _execution_adapter(0)
+    logger = _Logger()
+    adapter.get_logger = lambda: logger
+    previous_goal = _GoalHandle()
+
+    assert adapter._execute_callback(previous_goal).outcome == \
+        ExecuteProductCycle.Result.SUCCESS
+    assert not adapter._cancel_requested.is_set()
+    adapter._goal_reserved = True
+    assert adapter._cancel_callback(previous_goal) == ADAPTER.CancelResponse.ACCEPT
+
+    next_goal = _GoalHandle()
+    next_goal.goal_id.uuid = list(range(17, 33))
+    result = adapter._execute_callback(next_goal)
+
+    assert result.outcome == ExecuteProductCycle.Result.CANCELED
+    records = [json.loads(message[len(ADAPTER.OWNERSHIP_LOG_PREFIX):])
+               for message in logger.infos
+               if message.startswith(ADAPTER.OWNERSHIP_LOG_PREFIX)]
+    next_close = next(record for record in records
+                      if record["execution_uuid"] == bytes(range(17, 33)).hex())
+    assert next_close["cancel_requested"] is True
 
 
 class _FailingFuture:
@@ -1014,3 +1075,520 @@ def test_main_unexpected_spin_exception_remains_visible():
     assert executor.shutdown_calls == 1
     assert node.destroy_calls == 1
     assert context.try_shutdown_calls == 1
+
+
+def test_ownership_epoch_keeps_accepted_child_snapshot_immutable():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", 91)
+    first = _child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=8, detail=ADAPTER.OWNERSHIP_SCHEMA)
+
+    with adapter._lock:
+        adapter._observe_accepted_child_locked(first, 12.5)
+        retained = adapter._ownership_epoch["latest_child"]
+        record = adapter._ownership_record_locked(
+            adapter._ownership_epoch, "START", 12.6)
+        first.sequence = 99
+        later = _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_LOADED, product_attached=True,
+            product_id="101", source_boot_id=7, sequence=9)
+        adapter._observe_accepted_child_locked(later, 12.6)
+        adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+            goal, "101", adapter._boot_id)
+    logger = _Logger()
+    adapter.get_logger = lambda: logger
+    adapter._emit_ownership_record_safely(record)
+
+    assert retained["sequence"] == 8
+    assert record["child"]["sequence"] == 8
+    assert adapter._ownership_epoch["latest_child"] is None
+    assert logger.infos and '"sequence":8' in logger.infos[0]
+
+
+def test_observer_initialization_and_emission_errors_do_not_change_execution():
+    adapter = _execution_adapter(0)
+    goal_handle = _GoalHandle()
+    with patch.object(ADAPTER.CycleSupervisor, "_new_ownership_epoch",
+                      side_effect=RuntimeError("observer init failed")):
+        result = adapter._execute_callback(goal_handle)
+
+    assert result.outcome == ExecuteProductCycle.Result.SUCCESS
+    assert goal_handle.terminal_calls == ["succeed"]
+    assert adapter._ownership_epoch is None
+
+    adapter.get_logger = lambda: (_ for _ in ()).throw(RuntimeError("logger unavailable"))
+    ADAPTER.CycleSupervisor._emit_ownership_record_safely(adapter, {"event": "CLOSE"})
+
+
+def test_ownership_record_and_emission_limits_fail_closed():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(goal, "101", adapter._boot_id)
+    epoch["record_count"] = ADAPTER.OWNERSHIP_MAX_RECORDS
+    with adapter._lock:
+        assert adapter._ownership_record_locked(epoch, "CLOSE", 12.0) is None
+    assert "record_capacity_exhausted" in epoch["history"]
+
+    logger = _Logger()
+    adapter.get_logger = lambda: logger
+    ADAPTER.CycleSupervisor._emit_ownership_record_safely(
+        adapter, {"padding": "x" * ADAPTER.OWNERSHIP_MAX_RECORD_BYTES})
+    assert logger.infos == []
+    ADAPTER.CycleSupervisor._emit_ownership_record_safely(
+        adapter, {"nonfinite": float("nan")})
+    assert logger.infos == []
+
+
+def test_fixed_observer_history_survives_recovery_seal_and_epoch_reset():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._goal_reserved = True
+    adapter._child_status_authority_open = True
+    epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(goal, "101", adapter._boot_id)
+    epoch["history"].update(ADAPTER.OWNERSHIP_HISTORY_REASONS)
+    adapter._ownership_epoch = epoch
+    adapter._child_stage_started = True
+    adapter._child_mass_stage_boot_id = 7
+
+    adapter._internal_status_callback(_child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=1, detail="Gate 6 mass stage is starting"))
+    with adapter._lock:
+        record = adapter._capture_close_locked(
+            epoch, goal, SimpleNamespace(product_id="101", outcome=1, delivered=False),
+            None, False, None, 12.0)
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", adapter._boot_id)
+
+    assert set(record["observed_history_violations"]) == ADAPTER.OWNERSHIP_HISTORY_REASONS
+    assert epoch["sealed"]
+    assert adapter._ownership_epoch["history"] == set()
+
+
+def test_public_status_publish_failure_does_not_emit_reserved_ownership_proof():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", adapter._boot_id)
+    adapter._child_mass_stage_boot_id = 7
+    adapter._child_stage_started = True
+    adapter._child_boot_id = 7
+    adapter._child_sequence = 1
+    adapter._child_valid = True
+    adapter._child_consistent = True
+    adapter._child_state = ADAPTER.ManipulatorStatus.STARTING
+    adapter._child_detail = "Gate 6 mass stage is starting"
+    adapter._child_status_at = ADAPTER.time.monotonic()
+    adapter._child_stage_loaded_proof = False
+    adapter._child_terminal_empty_proof = False
+    adapter._state = ADAPTER.ManipulatorStatus.STARTING
+    adapter._base_motion_allowed = False
+    adapter._product_attached = False
+    adapter._product_id = ""
+    adapter._detail = "Gate 6 mass stage is starting"
+    child_status = _child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=1, detail="Gate 6 mass stage is starting")
+    adapter._observe_accepted_child_locked(child_status, ADAPTER.time.monotonic())
+    logger = _Logger()
+    adapter.get_logger = lambda: logger
+
+    class _FailingPublisher:
+        def publish(self, message):
+            raise RuntimeError("public status publication failed")
+
+    adapter._status_pub = _FailingPublisher()
+    with pytest.raises(RuntimeError, match="public status publication failed"):
+        adapter._publish_status()
+
+    assert adapter._ownership_epoch["record_count"] == 1
+    assert logger.infos == []
+
+
+def test_successful_public_status_is_published_before_ownership_proof():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", adapter._boot_id)
+    adapter._child_mass_stage_boot_id = 7
+    adapter._child_stage_started = True
+    adapter._child_boot_id = 7
+    adapter._child_sequence = 1
+    adapter._child_valid = True
+    adapter._child_consistent = True
+    adapter._child_state = ADAPTER.ManipulatorStatus.STARTING
+    adapter._child_detail = "Gate 6 mass stage is starting"
+    adapter._child_status_at = ADAPTER.time.monotonic()
+    adapter._child_stage_loaded_proof = False
+    adapter._child_terminal_empty_proof = False
+    adapter._state = ADAPTER.ManipulatorStatus.STARTING
+    adapter._base_motion_allowed = False
+    adapter._product_attached = False
+    adapter._product_id = ""
+    adapter._detail = "Gate 6 mass stage is starting"
+    child_status = _child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=1, detail="Gate 6 mass stage is starting")
+    events = []
+
+    class _OrderedPublisher:
+        def publish(self, message):
+            events.append(("public", message.sequence))
+
+    class _OrderedLogger:
+        def info(self, message):
+            events.append(("ownership", message))
+
+    adapter._status_pub = _OrderedPublisher()
+    adapter.get_logger = lambda: _OrderedLogger()
+    adapter._observe_accepted_child_locked(child_status, ADAPTER.time.monotonic())
+
+    adapter._publish_status()
+
+    assert [kind for kind, _ in events] == ["public", "ownership"]
+    assert adapter._ownership_epoch["record_count"] == 1
+
+
+def test_recognizable_invalid_first_claim_stays_sticky_after_recovery():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", adapter._boot_id)
+
+    adapter._internal_status_callback(_child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, valid=False,
+        base_motion_allowed=False, source_boot_id=7, sequence=1,
+        detail="Gate 6 mass stage is starting"))
+    adapter._internal_status_callback(_child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=2, detail="Gate 6 mass stage is starting"))
+
+    assert "invalid_initial_stage_claim" in adapter._ownership_epoch["history"]
+    assert adapter._child_stage_started
+
+
+def test_foreign_stage_claim_is_observed_before_legacy_callback_filter():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", adapter._boot_id)
+    adapter._internal_status_callback(_child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=1, detail="Gate 6 mass stage is starting"))
+    adapter._internal_status_callback(_child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=8, sequence=1, detail="Gate 6 mass stage is starting"))
+
+    assert "foreign_stage_claim" in adapter._ownership_epoch["history"]
+    assert "contradictory_stage_ownership" in adapter._ownership_epoch["history"]
+    assert adapter._child_mass_stage_boot_id == 7
+
+
+@pytest.mark.parametrize(("fault", "expected_reason"), [
+    ("wrong_product", "wrong_product_stage_claim"),
+    ("owned_sequence", "owned_sequence_rollback"),
+])
+def test_owned_observer_fault_history_latches_before_callback_filters(
+        fault, expected_reason):
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(goal, "101", adapter._boot_id)
+    adapter._ownership_epoch = epoch
+
+    if fault == "wrong_product":
+        bad_status = _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+            product_attached=True, product_id="102", source_boot_id=7,
+            sequence=1, detail="loaded")
+        recovery_status = _child_status(
+            state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+            source_boot_id=7, sequence=2,
+            detail="Gate 6 mass stage is starting")
+    else:
+        adapter._child_stage_started = True
+        adapter._child_mass_stage_boot_id = 7
+        adapter._child_boot_id = 7
+        adapter._child_sequence = 8
+        bad_status = _child_status(
+            state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+            source_boot_id=7, sequence=7, detail="child progress")
+        recovery_status = _child_status(
+            state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+            source_boot_id=7, sequence=9, detail="child progress")
+
+    adapter._internal_status_callback(bad_status)
+    assert expected_reason in epoch["history"]
+
+    adapter._internal_status_callback(recovery_status)
+    assert expected_reason in epoch["history"]
+
+
+def test_unqualified_first_start_boundary_cannot_be_replaced():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", adapter._boot_id)
+    adapter._child_mass_stage_boot_id = 7
+    adapter._child_boot_id = 7
+    adapter._child_stage_started = True
+    adapter._child_valid = True
+    adapter._child_consistent = True
+    adapter._child_status_at = 10.0
+    adapter._state = ADAPTER.ManipulatorStatus.STARTING
+    adapter._base_motion_allowed = False
+    adapter._product_attached = False
+    adapter._product_id = ""
+    first_start = _child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, valid=False,
+        base_motion_allowed=False, source_boot_id=91, sequence=1,
+        detail="Gate 6 mass stage is starting")
+    child_start = _child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=1, detail="Gate 6 mass stage is starting")
+    with adapter._lock:
+        adapter._observe_accepted_child_locked(child_start, 10.0)
+        assert ADAPTER.CycleSupervisor._capture_boundary_locked(
+            adapter, first_start, 10.1) is None
+        recovered_start = _child_status(
+            state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+            source_boot_id=91, sequence=2, detail="Gate 6 mass stage is starting")
+        assert ADAPTER.CycleSupervisor._capture_boundary_locked(
+            adapter, recovered_start, 10.1) is None
+    assert adapter._ownership_epoch["first_start"] is None
+    assert "first_start_boundary_unqualified" in adapter._ownership_epoch["history"]
+
+def test_first_qualifying_empty_and_late_owned_fault_are_observed_until_close():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(goal, "101", adapter._boot_id)
+    adapter._ownership_epoch = epoch
+    adapter._child_stage_started = True
+    adapter._child_mass_stage_boot_id = 7
+    adapter._child_boot_id = 7
+    adapter._child_valid = True
+    adapter._child_consistent = True
+
+    child_start = _child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=1, detail="Gate 6 mass stage is starting")
+    public_start = _child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=adapter._boot_id, sequence=1,
+        detail="Gate 6 mass stage is starting")
+    adapter._observe_accepted_child_locked(child_start, 10.0)
+    with adapter._lock:
+        start_record = adapter._capture_boundary_locked(public_start, 10.01)
+    assert start_record["event"] == "START"
+    assert epoch["first_start"] == {
+        "record_index": 1, "source_boot_id": adapter._boot_id, "sequence": 1}
+
+    adapter._child_stage_loaded_proof = True
+    child_loaded = _child_status(
+        state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+        product_attached=True, product_id="101", source_boot_id=7,
+        sequence=2, detail="loaded")
+    public_loaded = _child_status(
+        state=ADAPTER.ManipulatorStatus.STOWED_LOADED,
+        product_attached=True, product_id="101", source_boot_id=adapter._boot_id,
+        sequence=2, detail="loaded")
+    adapter._observe_accepted_child_locked(child_loaded, 10.1)
+    with adapter._lock:
+        loaded_record = adapter._capture_boundary_locked(public_loaded, 10.11)
+    assert loaded_record["event"] == "LOADED"
+    assert epoch["first_loaded"] == {
+        "record_index": 2, "source_boot_id": adapter._boot_id, "sequence": 2}
+
+    adapter._child_terminal_empty_proof = True
+    child_empty = _child_status(
+        state=ADAPTER.ManipulatorStatus.STOWED_EMPTY, base_motion_allowed=False,
+        source_boot_id=7, sequence=3, detail="empty")
+    unqualified_empty = _child_status(
+        state=ADAPTER.ManipulatorStatus.STOWED_EMPTY, base_motion_allowed=False,
+        source_boot_id=adapter._boot_id, sequence=3, detail="empty")
+    adapter._observe_accepted_child_locked(child_empty, 10.2)
+    with adapter._lock:
+        assert adapter._capture_boundary_locked(unqualified_empty, 10.21) is None
+    assert epoch["first_empty"] is None
+    assert not epoch["first_empty_attempted"]
+    assert not epoch["history"]
+
+    child_empty.base_motion_allowed = True
+    child_empty.sequence = 4
+    qualified_empty = _child_status(
+        state=ADAPTER.ManipulatorStatus.STOWED_EMPTY, base_motion_allowed=True,
+        source_boot_id=adapter._boot_id, sequence=4, detail="empty")
+    adapter._observe_accepted_child_locked(child_empty, 10.3)
+    with adapter._lock:
+        empty_record = adapter._capture_boundary_locked(qualified_empty, 10.31)
+    assert empty_record["event"] == "EMPTY"
+    first_empty = dict(epoch["first_empty"])
+    assert first_empty == {
+        "record_index": 3, "source_boot_id": adapter._boot_id, "sequence": 4}
+    assert epoch["first_empty_attempted"]
+
+    child_empty.sequence = 5
+    later_empty = _child_status(
+        state=ADAPTER.ManipulatorStatus.STOWED_EMPTY, base_motion_allowed=True,
+        source_boot_id=adapter._boot_id, sequence=5, detail="empty")
+    adapter._observe_accepted_child_locked(child_empty, 10.4)
+    with adapter._lock:
+        assert adapter._capture_boundary_locked(later_empty, 10.41) is None
+    assert epoch["first_empty"] == first_empty
+
+    adapter._child_boot_id = 7
+    adapter._child_sequence = 5
+    adapter._child_state = ADAPTER.ManipulatorStatus.STOWED_EMPTY
+    adapter._child_valid = True
+    adapter._child_consistent = True
+    adapter._child_status_at = 10.4
+    adapter._state = ADAPTER.ManipulatorStatus.STOWED_EMPTY
+    adapter._base_motion_allowed = True
+    adapter._product_attached = False
+    adapter._product_id = ""
+    adapter._detail = "empty"
+    adapter._child_status_authority_open = False
+    runtime_before_late = (
+        adapter._child_boot_id, adapter._child_sequence, adapter._child_state,
+        adapter._child_valid, adapter._child_consistent, adapter._child_status_at,
+        adapter._child_status_authority_open, adapter._child_stage_started,
+        adapter._child_stage_loaded_proof, adapter._child_terminal_empty_proof,
+        adapter._state, adapter._base_motion_allowed, adapter._product_attached,
+        adapter._product_id, adapter._detail, dict(epoch["latest_child"]))
+    late_fault = _child_status(
+        state=ADAPTER.ManipulatorStatus.FAULT, valid=False,
+        base_motion_allowed=False, source_boot_id=7, sequence=6,
+        detail="late owned fault")
+    adapter._internal_status_callback(late_fault)
+
+    assert "owned_status_invalid" in epoch["history"]
+    assert runtime_before_late == (
+        adapter._child_boot_id, adapter._child_sequence, adapter._child_state,
+        adapter._child_valid, adapter._child_consistent, adapter._child_status_at,
+        adapter._child_status_authority_open, adapter._child_stage_started,
+        adapter._child_stage_loaded_proof, adapter._child_terminal_empty_proof,
+        adapter._state, adapter._base_motion_allowed, adapter._product_attached,
+        adapter._product_id, adapter._detail, dict(epoch["latest_child"]))
+    close_record = adapter._capture_close_locked(
+        epoch, goal, SimpleNamespace(product_id="101", outcome=0, delivered=True),
+        None, False, 0, 10.5)
+    assert "owned_status_invalid" in close_record["observed_history_violations"]
+
+    adapter._ownership_epoch = None
+    adapter._active_goal = None
+    adapter._goal_reserved = False
+    next_goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(17, 33))))
+    next_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        next_goal, "101", adapter._boot_id)
+    adapter._active_goal = next_goal
+    adapter._ownership_epoch = next_epoch
+    adapter._child_stage_started = False
+    adapter._child_mass_stage_boot_id = 0
+    adapter._child_boot_id = 0
+    adapter._child_sequence = 0
+    adapter._child_status_authority_open = False
+    adapter._internal_status_callback(late_fault)
+    assert next_epoch["history"] == set()
+
+
+def test_unqualified_first_loaded_boundary_cannot_be_replaced():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(goal, "101", adapter._boot_id)
+    epoch["first_start"] = {"record_index": 1, "source_boot_id": 91, "sequence": 1}
+    adapter._ownership_epoch = epoch
+    adapter._child_stage_started = True
+    adapter._child_mass_stage_boot_id = 7
+    adapter._child_boot_id = 7
+    adapter._child_sequence = 2
+    adapter._child_status_at = 10.0
+    adapter._child_valid = True
+    adapter._child_consistent = True
+    adapter._child_stage_loaded_proof = True
+    adapter._state = ADAPTER.ManipulatorStatus.STOWED_LOADED
+    adapter._base_motion_allowed = True
+    adapter._product_attached = True
+    adapter._product_id = "101"
+    child_loaded = _child_status(
+        state=ADAPTER.ManipulatorStatus.STOWED_LOADED, product_attached=True,
+        product_id="101", source_boot_id=7, sequence=2)
+    with adapter._lock:
+        adapter._observe_accepted_child_locked(child_loaded, 10.0)
+        unqualified = _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_LOADED, base_motion_allowed=False,
+            product_attached=True, product_id="101", source_boot_id=91, sequence=2)
+        assert ADAPTER.CycleSupervisor._capture_boundary_locked(
+            adapter, unqualified, 10.1) is None
+        recovered = _child_status(
+            state=ADAPTER.ManipulatorStatus.STOWED_LOADED, base_motion_allowed=True,
+            product_attached=True, product_id="101", source_boot_id=91, sequence=3)
+        assert ADAPTER.CycleSupervisor._capture_boundary_locked(
+            adapter, recovered, 10.1) is None
+
+    assert epoch["first_loaded"] is None
+    assert "first_loaded_boundary_unqualified" in epoch["history"]
+
+
+def test_observer_exception_isolation_preserves_legacy_child_acceptance():
+    adapter = _status_adapter()
+    goal = SimpleNamespace(goal_id=SimpleNamespace(uuid=list(range(1, 17))))
+    adapter._active_goal = goal
+    adapter._child_status_authority_open = True
+    adapter._ownership_epoch = ADAPTER.CycleSupervisor._new_ownership_epoch(
+        goal, "101", adapter._boot_id)
+
+    def broken_observer(_message):
+        raise RuntimeError("diagnostic failure")
+
+    adapter._observe_child_before_filters_locked = broken_observer
+    adapter._internal_status_callback(_child_status(
+        state=ADAPTER.ManipulatorStatus.STARTING, base_motion_allowed=False,
+        source_boot_id=7, sequence=1, detail="Gate 6 mass stage is starting"))
+
+    assert adapter._child_stage_started
+    assert adapter._child_mass_stage_boot_id == 7
+    assert "observation_unavailable" in adapter._ownership_epoch["history"]
+
+
+def test_boundary_capture_exception_does_not_change_publication():
+    adapter = _status_adapter()
+    adapter._capture_boundary_locked = lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("capture failed"))
+
+    adapter._publish_status()
+
+    assert len(adapter._status_pub.messages) == 1
+
+
+def test_close_capture_exception_does_not_skip_cycle_cleanup():
+    adapter = _execution_adapter(0)
+    adapter._capture_close_locked = lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("close evidence failed"))
+    goal = _GoalHandle()
+
+    result = ADAPTER.CycleSupervisor._execute_callback(adapter, goal)
+
+    assert result.outcome == ADAPTER.ExecuteProductCycle.Result.SUCCESS
+    assert adapter._active_goal is None
+    assert adapter._goal_reserved is False

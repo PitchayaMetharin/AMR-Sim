@@ -6,7 +6,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_ros_live_control_behavior_test_uses_an_isolated_domain():
+def test_ros_live_control_behavior_test_uses_workspace_domain():
     cmake = (ROOT / "CMakeLists.txt").read_text()
     properties = cmake.index(
         "set_tests_properties(\n    control_configuration_test PROPERTIES")
@@ -14,7 +14,7 @@ def test_ros_live_control_behavior_test_uses_an_isolated_domain():
         "ament_add_pytest_test", properties)]
 
     assert "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_logs" in test_environment
-    assert "ROS_DOMAIN_ID=211" in test_environment
+    assert "ROS_DOMAIN_ID=232" in test_environment
 
 
 def test_control_lifecycle_registers_activation_before_configuration():
@@ -49,7 +49,8 @@ def test_arbitration_owns_constraints_and_stamped_command():
     assert parameters["require_manipulator_stowed"] is False
     assert parameters["manipulator_status_timeout_ms"] == 200
     assert parameters["max_linear_velocity"] <= 0.5
-    assert parameters["max_angular_velocity"] <= 0.4
+    assert parameters["max_angular_velocity"] == 0.64
+    assert parameters["max_angular_acceleration"] == 1.0
 
 def test_control_does_not_publish_to_simulation():
     source = (ROOT / "src" / "command_arbitration_node.cpp").read_text()

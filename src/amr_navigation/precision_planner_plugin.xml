@@ -4,4 +4,9 @@
          base_class_type="nav2_core::GlobalPlanner">
     <description>Exact swept-footprint-checked precision segments with Navfn detour fallback.</description>
   </class>
+  <class name="amr_navigation/ExactGoalLattice"
+         type="amr_navigation::ExactGoalLattice"
+         base_class_type="nav2_core::GlobalPlanner">
+    <description>Private lattice route with a bounded swept forward-only exact-goal suffix.</description>
+  </class>
 </library>

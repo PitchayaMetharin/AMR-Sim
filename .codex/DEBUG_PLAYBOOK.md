@@ -4,26 +4,46 @@ Use this playbook when a failure is unresolved, repeated, integration-related, t
 
 Normal straightforward fixes do not need this entire procedure.
 
-## 0. Default model assignments and user overrides
+## 0. Current Luna/max implementation and Sol/high supervision
 
-The default model assignments use exact identifiers:
+AGENTS.md's current 2026-10-04 role assignment is authoritative: exact
+`gpt-6-luna` / `max` alone implements; exact `gpt-6.1-sol` / `high` thinks,
+plans, analyzes, orchestrates, debugs and supervises. Sol never writes
+implementation code without manual explicit user authorization. Sol supplies
+the detailed packet; Luna may implement assigned test/probe code, run checks
+and monitor owned processes, then report actual changes, commands and evidence.
+Batch Sol's check after completed implementation and before simulation; worker
+self-checks, immediate failure stops and the runtime-specific review exception
+remain binding. Verify actual session model/effort before release; no model
+substitution or global settings change is authorized. Failed work returns to
+Sol's diagnosis; worker changes reset no counters or scope. Use AGENTS.md's
+Implementation discipline to attribute mistakes: plan deviations can count
+against Luna; faithful implementation of a failed plan does not. Account for
+established mistakes in MODEL_IMPLEMENTATION_LEDGER.md and also record actual
+Luna mistakes in LUNA_IMPLEMENTATION_LEDGER.md; preserve historical entries.
+All diagnosis, evidence, stop and counter requirements below remain binding.
 
-* Sol/high is `gpt-6.1-sol` with high reasoning effort, the default advisor/analyzer
-  for advice, analysis, planning, diagnosis, and independent review.
-* Luna/max is `gpt-5.6-luna` with max reasoning effort, the default implementer.
-* There is no blanket GPT-6 prohibition. Explicit user direction may authorize
-  diagnosis, implementation, and validation in the current selected-model
-  session without a Luna handoff. This is not permission to switch models,
-  delegate, or change global settings.
-* Verify the exact model identifier and reasoning effort before every model
-  switch or delegation. If the assigned model is unavailable, stop and
-  report the blocker instead of substituting another model family.
-* The user's no-agent instruction remains binding. Use a manual Luna/max
-  handoff under the default workflow, or work directly in the current session
-  when explicitly directed. The Sol/Luna references below then mean the
-  authorized diagnosing/implementing session; all evidence requirements,
-  attempt limits, stop conditions, and independent-review requirements remain
-  binding. An author cannot claim their own verification as independent review.
+Historical 2026-10-02 task-fit model choices below are superseded by the
+current role assignment; shared evidence, scope and stop rules remain binding:
+
+* Small mechanical lower-risk work: prefer `gpt-5.6-luna` / `xhigh`; `/ max`
+  only when extra effort is justified by the task.
+* Core ROS2, lifecycle/concurrency/safety-sensitive work, hard verification or
+  demonstrated Luna mistakes: select `gpt-6.1-sol` / `medium` directly with
+  recorded task-fit evidence. No mandatory Luna trial or serial model ladder.
+* `gpt-6.1-sol` / `high` is the orchestrator and diagnoses a contradiction or
+  error in Sol/medium analysis. Record the failed prediction/evidence first;
+  routine orchestration is not a mandate for high-effort diagnosis of every task.
+* No Astra or another model generation/family without user direction. Verify
+  exact model/effort; if unavailable, report rather than substitute.
+* Scoped delegation is authorized for the current stability task, one production
+  writer at a time. Do not change global settings or expand phase authority.
+* Role references elsewhere in this playbook follow the current assignment:
+  Sol is the analyzer/supervisor; Luna is the sole implementation worker.
+  Historical permission for a Sol implementation worker is superseded.
+* Retain all evidence requirements, attempt/hypothesis counters and independent
+  review. A model change resets no counters, and author verification is never
+  independent review. Availability errors alone are not implementation mistakes.
 
 ## 1. Classify the failure
 
@@ -58,7 +78,7 @@ Do not rerun an expensive integration test merely to reproduce already adequate 
 
 ## 3. Build hypotheses
 
-Sol/high owns diagnosis.
+The diagnosing agent selected by the current elevation rule owns diagnosis.
 
 For each plausible cause, classify it as:
 
@@ -73,7 +93,7 @@ Do not revive a falsified hypothesis unless new evidence contradicts the earlier
 
 ## 4. Require a causal mechanism
 
-Before Luna/max edits source, Sol must explain:
+Before implementation source edits, the assigned diagnosing agent must explain:
 
 `observed state -> code/runtime mechanism -> failure`
 
@@ -91,9 +111,9 @@ Example:
 
 The prediction must describe what evidence should change if the diagnosis is correct.
 
-## 6. Sol -> Luna implementation packet
+## 6. Evidence-backed implementation packet
 
-Sol provides Luna:
+The assigned diagnosing agent provides the implementer:
 
 ### Objective
 
@@ -151,13 +171,17 @@ Then:
 * inspect the complete diff
 * run focused validation first
 
-After every Luna implementation mistake, update
-`LUNA_IMPLEMENTATION_LEDGER.md` before closing or handing off the packet.
-Increment the count and record the date/time, topic, observed failure, why it
-is a mistake, likely cause, detection evidence, and exact failure text when
-available. This includes rejected patches, implementation-caused validation
-failures, contradictions of the approved packet, reviewer-identified defects,
-and model-assignment violations.
+Apply AGENTS.md's Implementation discipline before assigning blame. Compare
+the scoped diff, commands and reports with the approved packet; failed tests
+or runs alone do not establish a Luna mistake. Faithful execution of a failed
+plan returns to Sol's diagnosis without incrementing Luna's count. For an
+established Luna deviation, update both `MODEL_IMPLEMENTATION_LEDGER.md` and
+`LUNA_IMPLEMENTATION_LEDGER.md` before closing or handing off, preserving the
+packet requirement, observed deviation, exact failure, impact and evidence.
+
+Keep each new ledger entry at most six lines total, combining metadata where
+needed while retaining exact failure, cause, evidence and safe resume point.
+Do not rewrite historical entries merely to impose the new format.
 
 Do not alter thresholds, safety gates, tests, analyzers, or expected values just to produce a pass.
 
@@ -200,17 +224,16 @@ The following do not count as progress by themselves:
 * trying another plausible patch without new evidence
 * restarting repeatedly hoping for a different outcome
 
-### Limits
+### Retry policy — user override 2026-10-06
 
-Maximum **2 implementation attempts under the same root-cause hypothesis**.
-
-After two failures, Sol must revise or falsify the causal model before another source edit.
-
-Maximum **3 rejected root-cause hypotheses for the same blocker**.
-
-After three rejected hypotheses, stop autonomous debugging and escalate to the user.
-
-Do not evade these limits by renaming substantially identical hypotheses.
+There is no numeric cap on implementation attempts under one hypothesis or
+rejected hypotheses for a blocker. Preserve historical counters and evidence.
+Count-based exhausted allowances and historical PENDING exception notes do not
+require another approval. Every failure still returns to Sol for diagnosis
+before another source edit, and every retry must produce new information.
+Use the same hypothesis identity when the mechanism is substantially unchanged.
+Runtime/action budgets, bounded repair counts, safety gates and failure stops
+remain binding; this override changes engineering retry policy only.
 
 ## 10. Failed-attempt review
 
@@ -311,7 +334,7 @@ Do not modify a test simply because it blocks progress.
 
 ## 15. Escalation packet
 
-When the debug-loop limit is reached, stop editing and report:
+When a material blocker cannot be resolved from available evidence, stop editing and report:
 
 ### Original failure
 

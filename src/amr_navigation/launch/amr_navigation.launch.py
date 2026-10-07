@@ -28,7 +28,8 @@ def generate_launch_description():
             name="planner_server",
             namespace="/amr",
             output="screen",
-            parameters=[parameters, {"GridBased.lattice_filepath": lattice_file}],
+            parameters=[parameters, {"GridBased.lattice_filepath": lattice_file,
+                                     "ExactGoalLattice.lattice_filepath": lattice_file}],
         ),
         Node(
             package="nav2_smoother",

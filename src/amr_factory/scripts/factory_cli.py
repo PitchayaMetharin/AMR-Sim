@@ -70,8 +70,11 @@ def _transport(args):
         goal.pickup_station_id = args.pickup
         goal.destination_station_id = args.destination
         accepted = _spin_until(node, client.send_goal_async(goal), 3.0)
-        if accepted is None or not accepted.accepted:
-            print("transport goal rejected or timed out", file=sys.stderr)
+        if accepted is None:
+            print("transport acceptance response TIMEOUT", file=sys.stderr)
+            return 2
+        if not accepted.accepted:
+            print("transport goal REJECTED", file=sys.stderr)
             return 2
         result = _spin_until(node, accepted.get_result_async(), args.timeout)
         if result is None or result.result is None:

@@ -8,7 +8,7 @@ WORKSPACE_SRC = BRINGUP_ROOT.parent
 
 def test_localhost_only_environment_is_declared():
     text = (BRINGUP_ROOT / "env" / "amr_ros_env.sh").read_text()
-    assert "ROS_DOMAIN_ID=1" in text
+    assert "ROS_DOMAIN_ID=232" in text
     assert "ROS_LOCALHOST_ONLY=1" in text
 
 

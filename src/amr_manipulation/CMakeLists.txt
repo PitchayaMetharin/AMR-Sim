@@ -96,13 +96,33 @@ if(BUILD_TESTING)
   target_link_libraries(attachment_gate_test manipulation_validation)
   ament_add_gtest(
     gate6_pickup_retreat_behavior_test
-    test/test_gate6_pickup_retreat_behavior.cpp)
+    test/test_gate6_pickup_retreat_behavior.cpp
+    TIMEOUT 90)
   ament_target_dependencies(
     gate6_pickup_retreat_behavior_test
     amr_interfaces control_msgs moveit_msgs moveit_ros_planning_interface
     nav2_msgs nav_msgs rclcpp rclcpp_action moveit_core ros_gz_interfaces
     shape_msgs std_msgs std_srvs trajectory_msgs tf2_ros)
   target_link_libraries(gate6_pickup_retreat_behavior_test manipulation_validation)
+  ament_add_gtest(
+    gate6_centered_coverage_behavior_test
+    test/test_gate6_pickup_retreat_behavior.cpp
+    TIMEOUT 90
+    ENV "GTEST_FILTER=*Gate6CenteredBudgetBehavior.*:*Gate6CenteredDelayedAcceptanceBehavior.*:Gate6CenteredDockBehavior.Observer*")
+  ament_target_dependencies(
+    gate6_centered_coverage_behavior_test
+    amr_interfaces control_msgs moveit_msgs moveit_ros_planning_interface
+    nav2_msgs nav_msgs rclcpp rclcpp_action moveit_core ros_gz_interfaces
+    shape_msgs std_msgs std_srvs trajectory_msgs tf2_ros)
+  target_link_libraries(gate6_centered_coverage_behavior_test manipulation_validation)
+  target_compile_definitions(gate6_centered_coverage_behavior_test PRIVATE
+    AMR_GATE6_CENTERED_COVERAGE_TESTS)
+  find_package(ament_index_cpp REQUIRED)
+  find_package(moveit_ros_planning REQUIRED)
+  ament_add_gtest(product102_arm_branch_test test/product102_arm_branch_test.cpp TIMEOUT 120)
+  target_include_directories(product102_arm_branch_test PRIVATE include)
+  ament_target_dependencies(product102_arm_branch_test
+    amr_interfaces ament_index_cpp moveit_core moveit_ros_planning rclcpp)
   ament_add_pytest_test(moveit_config_test test/test_moveit_config.py)
   ament_add_pytest_test(manipulation_contract_test test/test_manipulation_contract.py)
   ament_add_pytest_test(product_test_contract_test test/test_product_test_contract.py)

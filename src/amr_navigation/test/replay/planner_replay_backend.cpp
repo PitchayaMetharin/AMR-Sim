@@ -54,6 +54,10 @@ using nav2_smac_planner::SearchInfo;
 constexpr double kGoalPositionTolerance = 0.07;
 constexpr double kGoalYawTolerance = 0.15;
 constexpr double kPathPlanningTime = 2.0;
+// Backend CLI/default smoother budget. The production mission requests 1 s
+// (mission_supervisor_node.cpp max_smoothing_duration); dedicated replays pass
+// that explicitly instead of changing this default.
+constexpr int kDefaultSmootherSeconds = 2;
 constexpr int kMaxOnApproachIterations = 1000;
 constexpr float kLookupTableSize = 20.0F;
 constexpr int kEndpointBlockRadiusCells = 2;
@@ -441,7 +445,9 @@ std::vector<PoseData> convertLatticePath(
 json runConfiguredSmoother(
   const ReplayData & data, const RunOptions & options,
   const std::shared_ptr<nav2_util::LifecycleNode> & node,
-  const std::vector<PoseData> & input_path, const std::string & input_label);
+  const std::vector<PoseData> & input_path, const std::string & input_label,
+  int smoother_seconds = kDefaultSmootherSeconds,
+  std::vector<PoseData> * smoothed_out = nullptr);
 
 #ifndef AMR_REPLAY_LATTICE_ONLY
 json runSmac2D(
@@ -611,10 +617,15 @@ json runSmacLattice(
 json runConfiguredSmoother(
   const ReplayData & data, const RunOptions & options,
   const std::shared_ptr<nav2_util::LifecycleNode> & node,
-  const std::vector<PoseData> & input_path, const std::string & input_label)
+  const std::vector<PoseData> & input_path, const std::string & input_label,
+  const int smoother_seconds, std::vector<PoseData> * const smoothed_out)
 {
+  if (smoother_seconds <= 0) {
+    throw std::runtime_error("smoother budget must be a positive number of seconds");
+  }
   json result{
-    {"smoother", "nav2_smoother::SimpleSmoother"}, {"input", input_label}, {"success", false}};
+    {"smoother", "nav2_smoother::SimpleSmoother"}, {"input", input_label}, {"success", false},
+    {"smoother_budget_s", smoother_seconds}};
   try {
     node->declare_parameter("simple_smoother.tolerance", 1.0e-10);
     node->declare_parameter("simple_smoother.max_its", 1000);
@@ -654,7 +665,8 @@ json runConfiguredSmoother(
   auto tf_buffer = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   smoother.configure(node, "simple_smoother", tf_buffer, costmap_sub, nullptr);
   smoother.activate();
-  const bool completed = smoother.smooth(path, rclcpp::Duration(std::chrono::seconds(2)));
+  const bool completed = smoother.smooth(
+    path, rclcpp::Duration(std::chrono::seconds(smoother_seconds)));
   smoother.deactivate();
   smoother.cleanup();
 
@@ -665,6 +677,9 @@ json runConfiguredSmoother(
       2.0 * pose.pose.orientation.w * pose.pose.orientation.z,
       1.0 - 2.0 * pose.pose.orientation.z * pose.pose.orientation.z);
     smoothed_path.push_back(PoseData{pose.pose.position.x, pose.pose.position.y, yaw});
+  }
+  if (smoothed_out != nullptr) {
+    *smoothed_out = smoothed_path;
   }
   auto costmap = makeCostmap(data);
   const auto collision = checkWorldPath(data, costmap.get(), smoothed_path, options.allow_unknown);

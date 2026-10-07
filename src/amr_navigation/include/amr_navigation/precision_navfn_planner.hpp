@@ -15,6 +15,14 @@ nav_msgs::msg::Path make_precision_segment(
   nav2_costmap_2d::Costmap2D & costmap,
   const nav2_costmap_2d::Footprint & footprint);
 
+// Forward-only variant with explicit sampled endpoint turns. Used by the
+// private lattice suffix; the public reversing segment contract is unchanged.
+nav_msgs::msg::Path make_forward_precision_segment(
+  const geometry_msgs::msg::PoseStamped & start,
+  const geometry_msgs::msg::PoseStamped & goal,
+  nav2_costmap_2d::Costmap2D & costmap,
+  const nav2_costmap_2d::Footprint & footprint);
+
 class PrecisionNavfnPlanner : public nav2_navfn_planner::NavfnPlanner
 {
 public:

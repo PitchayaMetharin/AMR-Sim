@@ -19,7 +19,7 @@ This script follows `ROS2_Software_Architecture_10min_v2.pptx` and the Canva pre
 | 9 | Theory and calculations | 1:20 |
 | 10 | Current state and close | 0:50 |
 | **Total** |  | **10:00** |
-
+ 
 ## Slide 1 — ROS 2 Software Architecture
 
 ### Purpose

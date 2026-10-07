@@ -489,11 +489,37 @@ def test_diff_drive_uses_commissioning_limits():
     plugin = robot.find("./gazebo/plugin[@name='gz::sim::systems::DiffDrive']")
     assert float(plugin.find("max_linear_velocity").text) == 0.5
     assert float(plugin.find("min_linear_velocity").text) == -0.5
-    assert float(plugin.find("max_angular_velocity").text) == 0.4
-    assert float(plugin.find("min_angular_velocity").text) == -0.4
+    assert float(plugin.find("max_angular_velocity").text) == 0.64
+    assert float(plugin.find("min_angular_velocity").text) == -0.64
     assert float(plugin.find("max_linear_acceleration").text) == 0.5
-    assert float(plugin.find("max_angular_acceleration").text) == 0.4
+    assert float(plugin.find("max_angular_acceleration").text) == 1.0
+    assert float(plugin.find("min_angular_acceleration").text) == -1.0
     assert float(plugin.find("odom_publish_frequency").text) == 50.0
+
+
+def test_configured_turning_cap_matches_controller_arbitrator_and_simulator():
+    source = ROOT.parent
+    controller_config = yaml.safe_load(
+        (source / "amr_mpc_controller/config/controller.yaml").read_text())
+    controller = controller_config["/amr/controller_server"]["ros__parameters"]
+    control_config = yaml.safe_load(
+        (source / "amr_control/config/control.yaml").read_text())
+    arbitration = control_config["/amr/command_arbitration_node"]["ros__parameters"]
+    plugin = expand().find("./gazebo/plugin[@name='gz::sim::systems::DiffDrive']")
+
+    # The authorized 60% cap increase must reach every configured limiter.
+    for name in controller["controller_plugins"]:
+        assert controller[name]["rotate_to_heading_angular_vel"] == 0.64
+        assert controller[name]["max_angular_accel"] == 0.40
+    assert arbitration["max_angular_velocity"] == 0.64
+    assert float(plugin.find("max_angular_velocity").text) == 0.64
+    assert float(plugin.find("min_angular_velocity").text) == -0.64
+    # Arbitration and simulator turn-rate slew must not lag path-following
+    # commands (Native46 product B weave at 0.40 rad/s^2); the controller's
+    # own rotate-in-place ramp above stays 0.40.
+    assert arbitration["max_angular_acceleration"] == 1.0
+    assert float(plugin.find("max_angular_acceleration").text) == 1.0
+    assert float(plugin.find("min_angular_acceleration").text) == -1.0
 
 def test_model_pose_is_available_as_independent_acceptance_truth():
     robot = expand()

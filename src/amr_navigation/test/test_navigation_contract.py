@@ -22,7 +22,7 @@ def test_planner_consumes_map_and_independent_perception_clouds():
     config = yaml.safe_load((ROOT / "config" / "planner.yaml").read_text())
     planner = config["/amr/planner_server"]["ros__parameters"]
     costmap = config["/amr/global_costmap/global_costmap"]["ros__parameters"]
-    assert planner["planner_plugins"] == ["GridBased", "PrecisionGridBased"]
+    assert planner["planner_plugins"] == ["GridBased", "PrecisionGridBased", "ExactGoalLattice"]
     grid_based = planner["GridBased"]
     assert grid_based["plugin"] == "nav2_smac_planner/SmacPlannerLattice"
     assert grid_based["tolerance"] == 0.05
@@ -73,7 +73,8 @@ def test_launch_has_planner_but_no_motion_runtime():
     assert 'get_package_share_directory("nav2_smac_planner")' in launch
     assert '"5cm_resolution", "0.5m_turning_radius", "diff", "output.json"' in launch
     assert '"GridBased.lattice_filepath": lattice_file' in launch
-    assert '<exec_depend>nav2_smac_planner</exec_depend>' in (ROOT / "package.xml").read_text()
+    assert '"ExactGoalLattice.lattice_filepath": lattice_file' in launch
+    assert '<depend>nav2_smac_planner</depend>' in (ROOT / "package.xml").read_text()
     for forbidden in ("controller_server", "bt_navigator", "behavior_server",
                       "velocity_smoother", "cmd_vel"):
         assert forbidden not in launch
@@ -87,6 +88,20 @@ def test_lifecycle_manager_starts_after_planning_construction_barrier():
     barrier_index = launch.index(barrier)
     assert launch.index('executable="planner_server"') < barrier_index
     assert launch.index('executable="smoother_server"') < barrier_index
+
+
+def test_private_exact_goal_lattice_clones_the_public_lattice_contract():
+    config = yaml.safe_load((ROOT / "config" / "planner.yaml").read_text())
+    planner = config["/amr/planner_server"]["ros__parameters"]
+    exact = planner["ExactGoalLattice"].copy()
+    assert exact.pop("plugin") == "amr_navigation/ExactGoalLattice"
+    public = planner["GridBased"].copy()
+    public.pop("plugin")
+    assert exact == public
+    mission = (ROOT.parent / "amr_mission" / "src" / "mission_supervisor_node.cpp").read_text()
+    # Existing public routes and their near-position heading shortcut stay
+    # unchanged until the separate private mission-route slice.
+    assert '"PrecisionGridBased"' in mission
 
 
 def test_smoother_is_collision_checked_and_lifecycle_managed():

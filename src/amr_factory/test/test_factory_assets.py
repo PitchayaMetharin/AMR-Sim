@@ -1,4 +1,5 @@
 import math
+import importlib.util
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -6,6 +7,51 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_factory_executes_private_profile_include_with_canonical_paths(monkeypatch):
+    from launch import LaunchContext
+
+    spec = importlib.util.spec_from_file_location(
+        "factory_profile_launch_contract", ROOT / "launch" / "factory_localization.launch.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original = module.IncludeLaunchDescription
+    original_source = module.PythonLaunchDescriptionSource
+    includes = []
+    source_paths = {}
+
+    def capture_source(path):
+        source = original_source(path)
+        source_paths[source] = path
+        return source
+
+    def capture(source, **kwargs):
+        action = original(source, **kwargs)
+        includes.append((source, kwargs))
+        return action
+
+    monkeypatch.setattr(module, "IncludeLaunchDescription", capture)
+    monkeypatch.setattr(module, "PythonLaunchDescriptionSource", capture_source)
+    module.generate_launch_description()
+    context = LaunchContext()
+    context.launch_configurations["control_mode"] = "autonomous"
+    expected_mpc_path = str(Path(module.get_package_share_directory("amr_mpc_controller")) /
+                            "launch" / "amr_mpc_controller.launch.py")
+    mpc = [(source, kwargs) for source, kwargs in includes
+           if source_paths[source] == expected_mpc_path]
+    assert len(mpc) == 1
+    _, kwargs = mpc[0]
+    assert kwargs["condition"].evaluate(context)
+    arguments = dict(kwargs["launch_arguments"])
+    factory = Path(module.get_package_share_directory("amr_factory"))
+    assert arguments == {
+        "enable_final_position_profiles": "true",
+        "products_registry": str(factory / "config" / "products.yaml"),
+        "stations_registry": str(factory / "config" / "stations.yaml"),
+    }
+    context.launch_configurations["control_mode"] = "manual"
+    assert not kwargs["condition"].evaluate(context)
 
 
 def test_factory_world_is_local_sdf_19_with_required_asset_categories():

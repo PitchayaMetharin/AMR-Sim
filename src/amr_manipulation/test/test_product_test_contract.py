@@ -314,6 +314,23 @@ def test_mass_stage_success_message_remains_compatible_for_one_kg():
     assert "product.mass_kg, product.mass_kg" in source
 
 
+def test_loaded_dispatch_routes_are_explicit_and_public_helpers_remain_default():
+    source = (PACKAGE_ROOT / "src" / "gate6_mass_stage.cpp").read_text(encoding="utf-8")
+    assert 'bool use_dispatch_profile = false' in source
+    assert '"/amr/mission/navigate_to_pose_dispatch_a"' in source
+    assert '"/amr/mission/navigate_to_pose_dispatch_b"' in source
+    assert 'node->navigate_to_dispatch(dispatch_translation_target, 120s)' in source
+    assert 'node->navigate_to_dispatch(dispatch_heading_target, 120s)' in source
+    assert 'node->navigate_to_dispatch(final_heading_target, 120s)' in source
+    assert 'node->navigate_product102_centered_dock(' in source
+    assert 'final_placement_stance.physical, 120s, centered_dock' in source
+    assert 'centered_b_alignment_admission(alignment_displacement)' in source
+    assert 'node->navigate_to_aligned_precision(dispatch_dock_corrected_target, 120s, true)' in source
+    assert 'node->navigate_to_dispatch_precise(segment_target, 120s)' in source
+    assert 'node->navigate_to_registered_retreat(product.pickup_station, 120s)' in source
+    assert 'node->navigate_to(product.pickup_station, 120s)' in source
+
+
 def test_factory_launch_uses_native_service_proxies_for_reset_control():
     source = (PACKAGE_ROOT.parent / "amr_factory" / "launch" /
               "factory_localization.launch.py").read_text(encoding="utf-8")

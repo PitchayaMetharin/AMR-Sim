@@ -124,6 +124,21 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     retreat_server_ = create_mission_server(
       "/amr/mission/navigate_to_pose_retreat", "PrecisionGridBased", "retreat_goal_checker",
       "PlacementFollowPath");
+    dispatch_a_server_ = create_mission_server(
+      "/amr/mission/navigate_to_pose_dispatch_a", "ExactGoalLattice", "goal_checker",
+      "FinalPositionFollowPathA");
+    dispatch_b_server_ = create_mission_server(
+      "/amr/mission/navigate_to_pose_dispatch_b", "ExactGoalLattice", "goal_checker",
+      "FinalPositionFollowPathB");
+    dispatch_a_precise_server_ = create_mission_server(
+      "/amr/mission/navigate_to_pose_dispatch_a_precise", "PrecisionGridBased",
+      "placement_goal_checker", "FinalPositionPlacementFollowPathA");
+    dispatch_b_precise_server_ = create_mission_server(
+      "/amr/mission/navigate_to_pose_dispatch_b_precise", "PrecisionGridBased",
+      "placement_goal_checker", "FinalPositionPlacementFollowPathB");
+    dispatch_b_clear_approach_server_ = create_mission_server(
+      "/amr/mission/navigate_to_pose_dispatch_b_clear_approach", "PrecisionGridBased",
+      "retreat_goal_checker", "FinalPositionPlacementFollowPathB");
     return CallbackReturn::SUCCESS;
   }
 
@@ -149,6 +164,29 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   }
 
  private:
+  static bool is_dispatch_controller(const std::string & controller) {
+    return controller == "FinalPositionFollowPathA" || controller == "FinalPositionFollowPathB" ||
+      controller == "FinalPositionPlacementFollowPathA" ||
+      controller == "FinalPositionPlacementFollowPathB";
+  }
+
+  static bool requested_goal_parity(
+    const nav_msgs::msg::Path & path, const geometry_msgs::msg::PoseStamped & requested)
+  {
+    if (path.poses.empty() || path.header.frame_id != "map") return false;
+    for (const auto & point : path.poses) {
+      if (point.header.frame_id != "map" || !valid_planar_pose(point.pose)) return false;
+    }
+    const auto & final = path.poses.back().pose;
+    const auto & goal = requested.pose;
+    const auto yaw = [](const geometry_msgs::msg::Quaternion & q) {
+      return std::atan2(2.0*q.w*q.z, 1.0-2.0*q.z*q.z);
+    };
+    const double difference = yaw(final.orientation)-yaw(goal.orientation);
+    return std::hypot(final.position.x-goal.position.x, final.position.y-goal.position.y) <= 1e-6 &&
+      std::abs(std::atan2(std::sin(difference),std::cos(difference))) <= 1e-6;
+  }
+
   struct CancelTargets {
     std::shared_ptr<MissionGoalHandle> mission;
     std::shared_ptr<ComputeGoalHandle> planner;
@@ -436,14 +474,21 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       // existing checker; only choose the exact, swept-footprint planner.
       geometry_msgs::msg::PoseStamped current_pose;
       const auto & target = mission->get_goal()->pose.pose.position;
-      if (planner_id == "GridBased" && latest_base_pose(current_pose) &&
+      if ((planner_id == "GridBased" || planner_id == "ExactGoalLattice") && latest_base_pose(current_pose) &&
         std::isfinite(current_pose.pose.position.x) &&
-        std::isfinite(current_pose.pose.position.y) &&
-        std::hypot(target.x - current_pose.pose.position.x,
-          target.y - current_pose.pose.position.y) <= 0.07)
+        std::isfinite(current_pose.pose.position.y))
       {
-        mission_planner_id_ = "PrecisionGridBased";
-        RCLCPP_INFO(get_logger(), "Near-position heading goal uses PrecisionGridBased");
+        const double distance = std::hypot(target.x - current_pose.pose.position.x,
+            target.y - current_pose.pose.position.y);
+        if (distance <= 0.07) {
+          mission_planner_id_ = "PrecisionGridBased";
+          RCLCPP_INFO(get_logger(), "Near-position heading goal uses PrecisionGridBased");
+        } else if (planner_id == "GridBased" && distance < 1.0) {
+          // The 0.5 m-radius lattice cannot make a one-cell lateral correction
+          // within a short approach and loops instead (Native46/47 docks).
+          mission_planner_id_ = "PrecisionGridBased";
+          RCLCPP_INFO(get_logger(), "Short goal (%.2f m) uses PrecisionGridBased", distance);
+        }
       }
       selected_planner_id = mission_planner_id_;
       mission_goal_checker_id_ = goal_checker_id;
@@ -538,6 +583,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         nav_msgs::msg::Path path;
         bool process = false;
         bool cancel = false;
+        bool parity_failed = false;
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (mission != mission_goal_ || terminal_reported_) return;
@@ -551,18 +597,31 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           if (cancel) {
             state_ = MissionState::CANCELING;
           } else if (result.code == rclcpp_action::ResultCode::SUCCEEDED &&
-            result.result && !result.result->path.poses.empty())
+            result.result && (is_dispatch_controller(mission_controller_id_) ||
+            !result.result->path.poses.empty()))
           {
-            state_ = MissionState::SMOOTHER_PENDING;
-            path = result.result->path;
-            publish_status(
-              mission, StatusStage::SMOOTHING, StatusOutcome::PENDING,
-              "global planning succeeded; path smoothing started", FaultClass::NONE, false);
+            parity_failed = is_dispatch_controller(mission_controller_id_) &&
+              !requested_goal_parity(result.result->path, mission->get_goal()->pose);
+            if (parity_failed) {
+              // Terminal proof discharged this request, including pending acceptance.
+              // Retain mission ownership until abort completes outside the mutex.
+              state_ = MissionState::IDLE;
+            } else {
+              state_ = MissionState::SMOOTHER_PENDING;
+              path = result.result->path;
+              publish_status(
+                mission, StatusStage::SMOOTHING, StatusOutcome::PENDING,
+                "global planning succeeded; path smoothing started", FaultClass::NONE, false);
+            }
           }
         }
         if (!process) return;
         if (cancel) {
           complete_after_stop(mission);
+          return;
+        }
+        if (parity_failed) {
+          abort(mission, "planned path differs from requested dispatch goal", FaultClass::PLANNER_ABORT);
           return;
         }
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
@@ -648,6 +707,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
         nav_msgs::msg::Path smoothed_path;
         bool process = false;
         bool cancel = false;
+        bool parity_failed = false;
         {
           std::lock_guard<std::mutex> lock(mutex_);
           if (mission != mission_goal_ || terminal_reported_) return;
@@ -660,18 +720,28 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
             state_ = MissionState::CANCELING;
           } else if (result.code == rclcpp_action::ResultCode::SUCCEEDED &&
             result.result && result.result->was_completed &&
-            !result.result->path.poses.empty())
+            (is_dispatch_controller(mission_controller_id_) || !result.result->path.poses.empty()))
           {
-            state_ = MissionState::CONTROLLER_PENDING;
-            smoothed_path = result.result->path;
-            publish_status(
-              mission, StatusStage::FOLLOWING, StatusOutcome::PENDING,
-              "path smoothing succeeded; path following started", FaultClass::NONE, false);
+            parity_failed = is_dispatch_controller(mission_controller_id_) &&
+              !requested_goal_parity(result.result->path, mission->get_goal()->pose);
+            if (parity_failed) {
+              state_ = MissionState::IDLE;
+            } else {
+              state_ = MissionState::CONTROLLER_PENDING;
+              smoothed_path = result.result->path;
+              publish_status(
+                mission, StatusStage::FOLLOWING, StatusOutcome::PENDING,
+                "path smoothing succeeded; path following started", FaultClass::NONE, false);
+            }
           }
         }
         if (!process) return;
         if (cancel) {
           complete_after_stop(mission);
+          return;
+        }
+        if (parity_failed) {
+          abort(mission, "smoothed path differs from requested dispatch goal", FaultClass::SMOOTHER_ABORT);
           return;
         }
         if (result.code != rclcpp_action::ResultCode::SUCCEEDED ||
@@ -1086,6 +1156,9 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
   rclcpp_action::Server<NavigateToPose>::SharedPtr server_;
   rclcpp_action::Server<NavigateToPose>::SharedPtr precise_server_;
   rclcpp_action::Server<NavigateToPose>::SharedPtr retreat_server_;
+  rclcpp_action::Server<NavigateToPose>::SharedPtr dispatch_a_server_, dispatch_b_server_;
+  rclcpp_action::Server<NavigateToPose>::SharedPtr dispatch_a_precise_server_, dispatch_b_precise_server_;
+  rclcpp_action::Server<NavigateToPose>::SharedPtr dispatch_b_clear_approach_server_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr status_publisher_;
   rclcpp::Subscription<rcl_interfaces::msg::Log>::SharedPtr controller_log_subscription_;
   rclcpp_action::Client<ComputePath>::SharedPtr planner_client_;
