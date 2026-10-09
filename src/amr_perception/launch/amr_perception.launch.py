@@ -34,6 +34,7 @@ def managed_node(executable):
 def generate_launch_description():
     actions = []
     for executable in (
-            "front_lidar_perception_node", "rear_lidar_perception_node"):
+            "front_lidar_perception_node", "rear_lidar_perception_node",
+            "lidar_scan_merger_node"):
         actions.extend(managed_node(executable))
     return LaunchDescription(actions)

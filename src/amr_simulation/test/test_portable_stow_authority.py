@@ -124,9 +124,13 @@ def test_source_contract_revokes_proof_and_requires_strict_status_identity():
 class _Logger:
     def __init__(self):
         self.errors = []
+        self.warnings = []
 
     def error(self, message):
         self.errors.append(message)
+
+    def warning(self, message):
+        self.warnings.append(message)
 
 
 class _Publisher:
@@ -336,3 +340,101 @@ def test_status_sequence_is_strictly_increasing_on_one_boot():
     messages = authority._status_pub.messages
     assert messages[0].source_boot_id == messages[1].source_boot_id != 0
     assert messages[1].sequence > messages[0].sequence > 0
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.goals = []
+        self.futures = []
+
+    def server_is_ready(self):
+        return True
+
+    def send_goal_async(self, goal, goal_uuid=None):
+        self.goals.append(goal_uuid)
+        future = _Future(None)
+        self.futures.append(future)
+        return future
+
+
+def _recovery_unknown(authority, module):
+    future = _Future(
+        SimpleNamespace(status=GoalStatus.STATUS_UNKNOWN, result=SimpleNamespace(error_code=0))
+    )
+    authority._result_query_future = future
+    authority._result_query_is_recovery = True
+    with patch.object(module.time, "monotonic", return_value=20.0):
+        authority._result_callback(future)
+
+
+def _resend_authority(module):
+    authority = _bare_authority()
+    authority._trajectory_client = _RecordingClient()
+    authority._make_goal = lambda: object()
+    with patch.object(module.time, "monotonic", return_value=10.0):
+        authority._send_trajectory_once()
+    return authority
+
+
+def test_recovery_unknown_resends_goal_with_new_uuid():
+    module = _load()
+    authority = _resend_authority(module)
+    first = authority._trajectory_client.goals[0]
+    _recovery_unknown(authority, module)
+    assert not authority._fault_latched
+    assert authority._state != ManipulatorStatus.FAULT
+    assert authority._logger.warnings
+    with patch.object(module.time, "monotonic", return_value=21.0):
+        authority._send_trajectory_once()
+    goals = authority._trajectory_client.goals
+    assert len(goals) == 2
+    assert bytes(goals[1].uuid) != bytes(first.uuid)
+
+
+def test_recovery_unknown_exhausts_send_attempts_and_latches_fault():
+    module = _load()
+    authority = _resend_authority(module)
+    for _ in range(module.MAX_GOAL_SEND_ATTEMPTS - 1):
+        _recovery_unknown(authority, module)
+        assert not authority._fault_latched
+        with patch.object(module.time, "monotonic", return_value=21.0):
+            authority._send_trajectory_once()
+    assert len(authority._trajectory_client.goals) == module.MAX_GOAL_SEND_ATTEMPTS
+    _recovery_unknown(authority, module)
+    assert authority._fault_latched
+    assert "never acknowledged after 3 attempts" in authority._detail
+    with patch.object(module.time, "monotonic", return_value=22.0):
+        authority._send_trajectory_once()
+    assert len(authority._trajectory_client.goals) == module.MAX_GOAL_SEND_ATTEMPTS
+
+
+def test_late_goal_response_for_superseded_attempt_is_ignored():
+    module = _load()
+    authority = _resend_authority(module)
+    first_future = authority._trajectory_client.futures[0]
+    _recovery_unknown(authority, module)
+    with patch.object(module.time, "monotonic", return_value=21.0):
+        authority._send_trajectory_once()
+    second_future = authority._trajectory_client.futures[1]
+    assert authority._goal_response_future is second_future
+    second_uuid = authority._goal_uuid
+
+    late_handle = SimpleNamespace(accepted=False)
+    first_future.value = late_handle
+    authority._goal_response_callback(first_future)
+
+    assert not authority._fault_latched
+    assert authority._goal_response_future is second_future
+    assert authority._goal_uuid is second_uuid
+    assert authority._goal_handle is None
+
+
+@pytest.mark.parametrize("status", [GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED])
+def test_recovery_other_terminal_statuses_still_latch_fault(status):
+    module = _load()
+    authority = _resend_authority(module)
+    future = _Future(SimpleNamespace(status=status, result=SimpleNamespace(error_code=0)))
+    authority._result_query_future = future
+    authority._result_query_is_recovery = True
+    authority._result_callback(future)
+    assert authority._fault_latched

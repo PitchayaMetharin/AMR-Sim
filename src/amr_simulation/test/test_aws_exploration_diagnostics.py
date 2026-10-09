@@ -13,6 +13,7 @@ from std_msgs.msg import String
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "aws_exploration_diagnostics.py"
 LAUNCHER = Path(__file__).parents[1] / "scripts" / "aws_exploration_diagnostics_run.py"
+RUNNER = Path(__file__).parents[1] / "scripts" / "aws_exploration_runner.py"
 
 
 def _load(path, name):
@@ -80,6 +81,9 @@ def test_maintained_launcher_uses_runner_gui_rviz_diagnostics_and_valid_domain(t
     assert normalized.map_saver is not None
     assert "nav2_map_server" in normalized.map_saver
     assert "map_saver_cli" in normalized.map_saver
+    assert "save_map_timeout:=10.0" in normalized.map_saver
+    runner = _load(RUNNER, "aws_exploration_runner_bound")
+    assert 10.0 < runner.DEFAULT_MAP_SAVE_TIMEOUT_SEC
     assert str(run_dir / "evidence" / "aws_map") in normalized.map_saver
     assert normalized.map_output_prefix == run_dir / "evidence" / "aws_map"
     assert set(_load(SCRIPT, "diagnostics_topics").evidence_topics()) <= set(recorder)

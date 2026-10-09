@@ -165,7 +165,10 @@ the active bag. The runner performs optional bag checks only after the recorder
 and every run-owned process have exited; use a new run directory for every
 retry. A successful source test or a nonzero bag row count is not AWS runtime
 acceptance: the final gate still requires a fresh, non-faulted `COMPLETE` with
-continued mapping through reachable shelf areas.
+continued mapping through reachable shelf areas. "Reachable" means reachable
+with the unchanged robot footprint and costmap inflation: shelf aisles whose
+frontiers are all `blocked_safety` are not required territory (user decision,
+2026-10-07). Do not reduce footprint or inflation to reach them.
 
 ### TF2 runtime overlay for AWS exploration
 
@@ -277,9 +280,9 @@ non-faulted terminal state before saving.
 ## Canonical AWS warehouse exploration
 
 The packaged AWS preset uses the derived `aws_warehouse.sdf` and the same
-portable graph. It declares only the `headless`, `rviz`, and
-`auto_start_exploration` toggles; it adds no runtime nodes of its own and
-includes the portable launch once:
+portable graph. It declares only the `headless`, `software_rendering`, `rviz`,
+`auto_start_exploration`, `simulation_diagnostics`, and `continuous_exploration`
+toggles; it adds no runtime nodes of its own and includes the portable launch once:
 
 ```bash
 ros2 launch amr_simulation aws_warehouse_exploration.launch.py \
@@ -355,6 +358,26 @@ ros2 launch amr_simulation aws_warehouse_localization.launch.py \
 This launch starts `map_server` and AMCL, does not start SLAM Toolbox or the
 frontier explorer, and uses AMCL as the sole `map -> odom` owner. The initial
 pose must match the map datum used when the candidate was saved.
+
+### Continuous exploration (patrol) mode
+
+By default the explorer finishes in `COMPLETE` or `INCOMPLETE` once no
+reachable frontier remains. For an open-ended run, opt in with
+`continuous_exploration:=true`. The robot still explores reachable frontiers
+first; when none are reachable it keeps driving to free, reachable map cells
+(a different one each time) instead of terminating:
+
+```bash
+export ROS_DOMAIN_ID=232
+ros2 launch amr_simulation aws_warehouse_exploration.launch.py \
+  headless:=false software_rendering:=auto rviz:=true \
+  auto_start_exploration:=true continuous_exploration:=true
+```
+
+Stop it explicitly with
+`ros2 service call /amr/exploration/stop std_srvs/srv/Trigger` or Ctrl+C.
+This mode never reaches `COMPLETE`, so it is not used with the bounded
+evidence runner and is not AWS acceptance evidence.
 
 ## Factory and Gate 6 simulation
 

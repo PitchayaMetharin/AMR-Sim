@@ -159,10 +159,11 @@ def test_aws_include_is_thin_and_forwards_only_the_portable_public_contract():
         "rviz",
         "auto_start_exploration",
         "simulation_diagnostics",
+        "continuous_exploration",
     ]
-    diagnostics_declaration = declarations[-1]
-    assert diagnostics_declaration.default_value[0].perform(LaunchContext()) == "false"
-    assert diagnostics_declaration.choices == ["true", "false"]
+    for opt_in in declarations[-2:]:
+        assert opt_in.default_value[0].perform(LaunchContext()) == "false"
+        assert opt_in.choices == ["true", "false"]
 
     includes = [action for action in actions if isinstance(action, IncludeLaunchDescription)]
     assert len(includes) == 1
@@ -184,6 +185,7 @@ def test_aws_include_is_thin_and_forwards_only_the_portable_public_contract():
         "rviz",
         "auto_start_exploration",
         "simulation_diagnostics",
+        "continuous_exploration",
         "rviz_config",
     }
     assert Path(arguments["world"]).parts[-2:] == ("worlds", WORLD_PATH.name)
@@ -198,6 +200,7 @@ def test_aws_include_is_thin_and_forwards_only_the_portable_public_contract():
         "rviz",
         "auto_start_exploration",
         "simulation_diagnostics",
+        "continuous_exploration",
     ):
         assert _substitution_name(arguments[name]) == name
     assert Path(arguments["rviz_config"]).parts[-2:] == ("rviz", RVIZ_PATH.name)

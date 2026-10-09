@@ -478,7 +478,7 @@ def generate_launch_description():
             },
             "set_initial_pose": True,
         }],
-        remappings=[("map", "/map"), ("scan", "/amr/sensors/front_lidar/scan")],
+        remappings=[("map", "/map"), ("scan", "/amr/sensors/merged_lidar/scan")],
         condition=UnlessCondition(LaunchConfiguration("mapping_mode")),
         output="screen",
     )

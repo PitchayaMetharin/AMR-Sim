@@ -49,6 +49,7 @@ BASE_STATUS_MAX_AGE_S = 0.2
 JOINT_STATUS_MAX_AGE_S = 2.0
 GOAL_RESPONSE_TIMEOUT_S = 3.0
 RESULT_QUERY_TIMEOUT_S = 5.0
+MAX_GOAL_SEND_ATTEMPTS = 3
 NON_TERMINAL_RESULT_STATUSES = frozenset(
     (
         GoalStatus.STATUS_ACCEPTED,
@@ -153,6 +154,8 @@ class PortableStowAuthority(Node):
         self._detail = "waiting for one arm stow trajectory"
         self._fault_latched = False
         self._trajectory_sent = False
+        self._goal_send_attempts = 0
+        self._superseded_goal_futures = []
         self._trajectory_succeeded = False
         self._trajectory_sent_at = 0.0
         self._joint_after_trajectory = False
@@ -281,6 +284,7 @@ class PortableStowAuthority(Node):
         # Set this before sending so an exception or rejected goal can never
         # cause a retry in a later timer tick.
         self._trajectory_sent = True
+        self._goal_send_attempts = getattr(self, "_goal_send_attempts", 0) + 1
         self._trajectory_sent_at = time.monotonic()
         try:
             self._goal_uuid = UUID(uuid=list(uuid.uuid4().bytes))
@@ -354,6 +358,9 @@ class PortableStowAuthority(Node):
     def _goal_response_callback(self, future) -> None:
         if self._fault_latched or self._trajectory_succeeded:
             return
+        # A late response for a superseded attempt must not become current.
+        if any(future is old for old in getattr(self, "_superseded_goal_futures", ())):
+            return
         if getattr(self, "_result_query_future", None) is not None:
             return
         self._goal_response_future = None
@@ -398,6 +405,32 @@ class PortableStowAuthority(Node):
             error_code = int(result.error_code)
         except Exception as error:
             self._latch_fault(f"arm trajectory result exception: {error}")
+            return
+        if is_recovery and status == GoalStatus.STATUS_UNKNOWN:
+            # The server never created this goal (goal response was lost in
+            # discovery), so the arm cannot have moved. Allow a bounded resend.
+            attempts = getattr(self, "_goal_send_attempts", 1)
+            if attempts >= MAX_GOAL_SEND_ATTEMPTS:
+                self._latch_fault(
+                    "arm trajectory goal was never acknowledged after "
+                    f"{attempts} attempts"
+                )
+                return
+            self.get_logger().warning(
+                f"arm trajectory goal attempt {attempts} was never created by the "
+                "server; resending with a new goal UUID"
+            )
+            old_future = getattr(self, "_goal_response_future", None)
+            if old_future is not None:
+                self._superseded_goal_futures = list(
+                    getattr(self, "_superseded_goal_futures", [])
+                ) + [old_future]
+            self._goal_response_future = None
+            self._goal_uuid = None
+            self._goal_handle = None
+            self._result_recovery_next_at = 0.0
+            self._trajectory_sent = False
+            self._detail = "arm trajectory goal not created; resending"
             return
         if status in NON_TERMINAL_RESULT_STATUSES:
             self._detail = "arm trajectory still executing; awaiting terminal result"

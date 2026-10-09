@@ -6,14 +6,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_online_mapping_uses_local_state_and_front_scan():
+def test_online_mapping_uses_local_state_and_merged_scan():
     config = yaml.safe_load((ROOT / "config" / "mapper.yaml").read_text())
     parameters = config["/amr/slam_toolbox"]["ros__parameters"]
     assert parameters["use_sim_time"] is True
     assert parameters["map_frame"] == "map"
     assert parameters["odom_frame"] == "odom"
     assert parameters["base_frame"] == "base_footprint"
-    assert parameters["scan_topic"] == "/amr/sensors/front_lidar/scan"
+    assert parameters["scan_topic"] == "/amr/sensors/merged_lidar/scan"
     assert parameters["mode"] == "mapping"
     assert parameters["scan_queue_size"] == 10
     assert parameters["transform_timeout"] == 1.0

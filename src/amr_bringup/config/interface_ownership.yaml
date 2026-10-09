@@ -33,6 +33,10 @@
       "type": "sensor_msgs/msg/LaserScan",
       "publisher": "amr_sensor_adapters/front_lidar_adapter_node"
     },
+    "/amr/sensors/merged_lidar/scan": {
+      "type": "sensor_msgs/msg/LaserScan",
+      "publisher": "amr_perception/lidar_scan_merger_node"
+    },
     "/amr/sensors/front_lidar/points": {
       "type": "sensor_msgs/msg/PointCloud2",
       "publisher": "amr_sensor_adapters/front_lidar_adapter_node"

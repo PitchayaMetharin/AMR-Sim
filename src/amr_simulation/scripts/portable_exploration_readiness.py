@@ -83,6 +83,7 @@ ADAPTER_NODES = (
     "wheel_odometry_node",
     "front_lidar_perception_node",
     "rear_lidar_perception_node",
+    "lidar_scan_merger_node",
     "command_arbitration_node",
 )
 SLAM_NODE = "slam_toolbox"
@@ -240,6 +241,7 @@ class PortableExplorationReadiness(Node):
         self._lifecycle_pending: Dict[str, Tuple[object, float]] = {}
 
         self._front_scan_at = 0.0
+        self._merged_scan_at = 0.0
         self._map_at = 0.0
         self._map: Optional[OccupancyGrid] = None
         self._global_costmap_at = 0.0
@@ -264,6 +266,13 @@ class PortableExplorationReadiness(Node):
             LaserScan,
             "/amr/sensors/front_lidar/scan",
             self._front_scan_callback,
+            qos_profile_sensor_data,
+        )
+        # SLAM and AMCL consume only the merged scan.
+        self._merged_scan_sub = self.create_subscription(
+            LaserScan,
+            "/amr/sensors/merged_lidar/scan",
+            self._merged_scan_callback,
             qos_profile_sensor_data,
         )
         self._map_sub = self.create_subscription(
@@ -309,13 +318,20 @@ class PortableExplorationReadiness(Node):
 
     # Evidence callbacks intentionally record steady receipt times.  Header
     # stamps are checked only for future data and never used as an age clock.
-    def _front_scan_callback(self, message: LaserScan) -> None:
+    def _valid_scan(self, message: LaserScan) -> bool:
         now_ros = self.get_clock().now().to_msg()
         if not _stamp_not_future(message.header.stamp, now_ros):
-            return
-        if not message.ranges or not all(math.isfinite(value) or math.isinf(value) for value in message.ranges):
-            return
-        self._front_scan_at = time.monotonic()
+            return False
+        return bool(message.ranges) and all(
+            math.isfinite(value) or math.isinf(value) for value in message.ranges)
+
+    def _front_scan_callback(self, message: LaserScan) -> None:
+        if self._valid_scan(message):
+            self._front_scan_at = time.monotonic()
+
+    def _merged_scan_callback(self, message: LaserScan) -> None:
+        if self._valid_scan(message):
+            self._merged_scan_at = time.monotonic()
 
     def _map_callback(self, message: OccupancyGrid) -> None:
         now_ros = self.get_clock().now().to_msg()
@@ -557,6 +573,8 @@ class PortableExplorationReadiness(Node):
                 unmet.append(f"active lifecycle node: {name}")
         if not fresh_receipt(self._front_scan_at, now, RECEIPT_MAX_AGE_S):
             unmet.append("fresh front scan")
+        if not fresh_receipt(self._merged_scan_at, now, RECEIPT_MAX_AGE_S):
+            unmet.append("fresh merged scan")
         if not self._fresh_tf_edge("odom", "base_footprint", now):
             unmet.append("fresh odom->base_footprint TF")
         if not self._fresh_base_ready(now):
@@ -624,6 +642,8 @@ class PortableExplorationReadiness(Node):
                 unmet.append(f"final active lifecycle node: {name}")
         if not fresh_receipt(self._front_scan_at, now, RECEIPT_MAX_AGE_S):
             unmet.append("final fresh front scan")
+        if not fresh_receipt(self._merged_scan_at, now, RECEIPT_MAX_AGE_S):
+            unmet.append("final fresh merged scan")
         if not self._fresh_base_ready(now):
             unmet.append("final fresh BaseStatus READY")
         if not self._fresh_stow_empty(now):

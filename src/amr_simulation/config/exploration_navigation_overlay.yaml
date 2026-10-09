@@ -1,0 +1,8 @@
+# Exploration-only global-costmap overlay: plan-C clearance plus inflation
+# around unknown space (applied after amr_navigation planner.yaml).
+/amr/global_costmap/global_costmap:
+  ros__parameters:
+    inflation_layer:
+      inflation_radius: 1.0
+      cost_scaling_factor: 2.0
+      inflate_around_unknown: true

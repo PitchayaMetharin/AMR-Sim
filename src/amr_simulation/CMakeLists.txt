@@ -39,6 +39,7 @@ target_link_libraries(
   gz-transport13::gz-transport13)
 install(TARGETS portable_robot_inserter DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch rviz worlds DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(FILES assets/AWS_WAREHOUSE_FUEL_ATTRIBUTION.md
   DESTINATION share/${PROJECT_NAME}/assets)
 install(PROGRAMS

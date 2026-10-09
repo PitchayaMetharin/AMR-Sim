@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Fail-closed frontier exploration through the AMR mission action boundary."""
 
+import array
+from collections import deque
 from copy import deepcopy
+import hashlib
+import json
 from contextlib import contextmanager
 import math
 from numbers import Integral, Real
@@ -29,7 +33,8 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from frontier_algorithm import (
     NAVIGATION_FOOTPRINT, _goal_distance_is_valid, _route_start_proof,
     costmap_frontier_candidates, frontier_cell_world, frontier_clusters,
-    costmap_geometry, frontier_world_cell, occupancy_grid_geometry)
+    costmap_geometry, frontier_world_cell, goal_heading, occupancy_grid_geometry,
+    patrol_candidates, robot_start_check)
 
 
 _UNSET = object()
@@ -38,10 +43,43 @@ MISSION_STATUS_DIAGNOSTIC = "amr_mission/mission_supervisor"
 SAFE_REACHABLE_COMPLETION_POLICY = "SAFE_REACHABLE_AREA_V1"
 FRONTIER_BLOCKED_CLASSES = frozenset(("BLOCKED_SAFETY", "BLOCKED_ROUTE"))
 MAX_BLOCKAGE_ATTEMPTS = 3
+MAX_CONSECUTIVE_BLOCKAGES = 10
+PATROL_SAMPLE_SPACING_M = 1.0
+PATROL_MIN_GOAL_DISTANCE_M = 1.5
+PATROL_AVOID_RADIUS_M = 0.5
+PATROL_HISTORY_LENGTH = 4
+FRONTIER_APPROACH_RADIUS_M = 1.5
+FRONTIER_APPROACH_AVOID_RADIUS_M = 0.5
+# Goal disk: the circumscribed footprint radius plus an arrival margin that
+# covers the controller's xy_goal_tolerance.  The margin applies to approach
+# and patrol goals only; frontier-cell goals keep the footprint gate.
+GOAL_ARRIVAL_MARGIN_M = 0.12
+EVIDENCE_RECORD_LIMIT = 200
+GOAL_CLEARANCE_RADIUS_M = (
+    max(math.hypot(x, y) for x, y in NAVIGATION_FOOTPRINT)
+    + GOAL_ARRIVAL_MARGIN_M)
+# Route search and patrol clear lethal cells by this margin: the rotating
+# 1.22 x 0.82 m body clipped walls in AWS runs 02/05.  Replay evidence:
+# .ros_logs/claude_resume_20261009/replay_scripts/margin_sweep.py
+ROUTE_FOOTPRINT_MARGIN_M = 0.08
+EXPLORATION_ROUTE_FOOTPRINT = tuple(
+    (x + math.copysign(ROUTE_FOOTPRINT_MARGIN_M, x),
+     y + math.copysign(ROUTE_FOOTPRINT_MARGIN_M, y))
+    for x, y in NAVIGATION_FOOTPRINT)
+# The result and mission-status callbacks run on different callback groups, so a
+# non-success result may overtake the supervisor's matching TERMINAL status.
+MISSION_TERMINAL_GRACE_S = 1.0
+_MISSION_TERMINAL_PENDING_DETAILS = frozenset((
+    "matching mission terminal status is missing",
+    "matching mission status is not terminal",
+))
 RECOVERY_YAW_TOLERANCE_RAD = math.radians(1.0)
+LOCALIZATION_RECOVERY_DEADLINE_S = 5.0
+LOCALIZATION_RECOVERY_LIMIT = 3
+LOCALIZATION_HEADROOM_MIN_S = 0.5
 MISSION_FAULT_CLASSES = frozenset((
     "NONE", "OBSTACLE_BLOCKAGE", "PLANNER_ABORT", "SMOOTHER_ABORT",
-    "CONTROLLER_ABORT", "CANCELLATION", "NAVIGATION_FAULT"))
+    "CONTROLLER_ABORT", "LOCALIZATION_UNAVAILABLE", "CANCELLATION", "NAVIGATION_FAULT"))
 MISSION_STAGES = frozenset((
     "PLANNING", "SMOOTHING", "FOLLOWING", "CANCELING", "TERMINAL"))
 MISSION_OUTCOMES = frozenset((
@@ -115,6 +153,7 @@ class FrontierExplorer(Node):
         self.declare_parameter("cancel_timeout_sec", 5.0)
         self.declare_parameter("min_goal_distance_m", 0.3)
         self.declare_parameter("runtime_diagnostics", False)
+        self.declare_parameter("continuous_exploration", False)
         self.autostart = _parameter_bool(
             self.get_parameter("autostart").value, "autostart")
         self.map_timeout = _parameter_positive_real(
@@ -137,6 +176,9 @@ class FrontierExplorer(Node):
             self.get_parameter("min_goal_distance_m").value, "min_goal_distance_m")
         self.runtime_diagnostics = _parameter_bool(
             self.get_parameter("runtime_diagnostics").value, "runtime_diagnostics")
+        self.continuous_exploration = _parameter_bool(
+            self.get_parameter("continuous_exploration").value,
+            "continuous_exploration")
 
         self._lock = threading.RLock()
         self.action_callback_group = ReentrantCallbackGroup()
@@ -223,6 +265,7 @@ class FrontierExplorer(Node):
         self.active_goal = None
         self._active_token = None
         self._result_status = None
+        self._pending_result = None
         self._result_future = None
         self.goal_started_at = None
         self._motion_deadline = None
@@ -243,7 +286,10 @@ class FrontierExplorer(Node):
         self._recovery_goal_world = None
         self._recovery_stationary_sample = None
         self._recovery_stationary_samples = 0
+        self._localization_recovery_deadline = None
+        self.localization_recoveries = 0
         self.reached_goal_count = 0
+        self._consecutive_blockages = 0
         self.raw_frontier_count = 0
         self.blocked_frontier_count = 0
         self.blocked_safety_count = 0
@@ -253,6 +299,12 @@ class FrontierExplorer(Node):
         self._mission_fault_class = "NONE"
         self.blacklist = set()
         self.failed_goal_worlds = set()
+        self.patrol_active = False
+        self.patrol_history = []
+        self.reached_goal_worlds = []
+        # Observation-only evidence; deliberately not cleared on start/stop.
+        self.evidence_records = deque(maxlen=EVIDENCE_RECORD_LIMIT)
+        self._dispatch_evidence = None
         self.goal_failures = 0
         self.no_frontier_updates_seen = 0
         self.active_candidate = None
@@ -495,6 +547,182 @@ class FrontierExplorer(Node):
         return 0.0 <= now - received_at <= max_age_sec
 
     @staticmethod
+    def _format_world_point(world):
+        if world is None:
+            return ""
+        return "%.6f,%.6f" % (float(world[0]), float(world[1]))
+
+    def _log_goal_dispatch(self, world, goal_kind):
+        # Observational only: a logging failure must never alter dispatch.
+        try:
+            self.get_logger().info(
+                "navigation goal dispatched to world (%s): %s goal"
+                % (self._format_world_point(world), goal_kind))
+        except Exception:  # pragma: no cover - logging boundary
+            pass
+
+    def _record_evidence(self, record):
+        """Append an observation-only evidence record; never raises."""
+        try:
+            records = getattr(self, "evidence_records", None)
+            if records is None:
+                records = deque(maxlen=EVIDENCE_RECORD_LIMIT)
+                self.evidence_records = records
+            records.append(record)
+            while len(records) > EVIDENCE_RECORD_LIMIT:
+                records.popleft()
+        except Exception:  # pragma: no cover - evidence boundary
+            return
+        try:
+            self.get_logger().info(
+                "[EXPLORE-EVIDENCE] " + json.dumps(record, sort_keys=True))
+        except Exception:  # pragma: no cover - logging boundary
+            pass
+
+    @classmethod
+    def _evidence_pose(cls, transform):
+        try:
+            pose = cls._transform_world_yaw(transform)
+            if pose is None:
+                return None
+            stamp_ns = cls._header_stamp_ns(transform)
+            return {
+                "x": pose[0][0], "y": pose[0][1], "yaw": pose[1],
+                "tf_stamp_ns": stamp_ns if type(stamp_ns) is int else None}
+        except Exception:  # pragma: no cover - evidence boundary
+            return None
+
+    @classmethod
+    def _evidence_snapshot_identity(cls, message, receipt, kind):
+        """Identity of a map or costmap snapshot the selector consumed."""
+        if kind == "map":
+            info = message.info
+            digest = hashlib.sha256(
+                array.array("b", message.data).tobytes()).hexdigest()
+            width, height = info.width, info.height
+            resolution = info.resolution
+            origin_x, origin_y = info.origin.position.x, info.origin.position.y
+        else:
+            meta = message.metadata
+            digest = hashlib.sha256(bytes(message.data)).hexdigest()
+            width, height = meta.size_x, meta.size_y
+            resolution = meta.resolution
+            origin_x, origin_y = meta.origin.position.x, meta.origin.position.y
+        stamp_ns = cls._header_stamp_ns(message)
+        return {
+            "sha256": digest, "width": int(width), "height": int(height),
+            "resolution": float(resolution),
+            "origin_x": float(origin_x), "origin_y": float(origin_y),
+            "frame_id": str(message.header.frame_id),
+            "stamp_ns": stamp_ns if type(stamp_ns) is int else None,
+            "receipt_monotonic": receipt}
+
+    def _record_dispatch_evidence(
+            self, run_generation, goal_world, candidate, goal_kind, context):
+        try:
+            context = context or {}
+            gate = {"frontier cell": "frontier_cell"}.get(goal_kind, goal_kind)
+            record = {
+                "kind": "dispatch",
+                "run_generation": run_generation,
+                "goal_uuid": None,
+                "goal_world": (
+                    [float(goal_world[0]), float(goal_world[1])]
+                    if goal_world is not None else None),
+                "candidate": (
+                    [candidate[0], candidate[1]]
+                    if candidate is not None else None),
+                "gate": gate,
+                "gate_radius": (
+                    GOAL_CLEARANCE_RADIUS_M
+                    if gate in ("approach", "patrol") else None),
+                "footprint": [list(point) for point in NAVIGATION_FOOTPRINT],
+                "goal_yaw": context.get("goal_yaw"),
+                "pose": self._evidence_pose(context.get("transform")),
+                "map": None,
+                "costmap": None,
+            }
+            map_snapshot = context.get("map_snapshot")
+            costmap_snapshot = context.get("costmap_snapshot")
+            if map_snapshot is not None:
+                record["map"] = self._evidence_snapshot_identity(
+                    map_snapshot[0], map_snapshot[2], "map")
+            if costmap_snapshot is not None:
+                record["costmap"] = self._evidence_snapshot_identity(
+                    costmap_snapshot[0], costmap_snapshot[2], "costmap")
+            self._dispatch_evidence = record
+            self._record_evidence(record)
+        except Exception:  # pragma: no cover - evidence boundary
+            pass
+
+    def _record_goal_reached_evidence(self, run_generation, goal_uuid):
+        try:
+            latched = getattr(self, "_dispatch_evidence", None) or {}
+            pose = None
+            try:
+                pose = self._evidence_pose(self.tf_buffer.lookup_transform(
+                    "map", "base_footprint", rclpy.time.Time(),
+                    timeout=Duration(seconds=0.0)))
+            except Exception:
+                pose = None
+            self._record_evidence({
+                "kind": "goal_reached",
+                "run_generation": run_generation,
+                "goal_uuid": goal_uuid,
+                "goal_world": latched.get("goal_world"),
+                "gate": latched.get("gate"),
+                "gate_radius": latched.get("gate_radius"),
+                "pose": pose})
+        except Exception:  # pragma: no cover - evidence boundary
+            pass
+
+    def _record_terminal_evidence(self, state, reason, counts, context):
+        try:
+            context = context or {}
+            costmap = context.get("costmap")
+            grid = context.get("grid")
+            robot_world = context.get("robot_world")
+            robot_yaw = context.get("robot_yaw")
+            check = context.get("start_check")
+            if check is None and costmap is not None and robot_world is not None:
+                check = robot_start_check(costmap, robot_world, robot_yaw)
+            category, cells = check if check is not None else (None, [])
+            geometry = costmap_geometry(costmap) if costmap is not None else None
+            overlapping = []
+            for cell_x, cell_y, cost in cells:
+                map_value = None
+                try:
+                    resolution = geometry[2]
+                    cos_yaw, sin_yaw = geometry[5], geometry[6]
+                    local_x = (cell_x + 0.5) * resolution
+                    local_y = (cell_y + 0.5) * resolution
+                    world = (
+                        geometry[3] + cos_yaw * local_x - sin_yaw * local_y,
+                        geometry[4] + sin_yaw * local_x + cos_yaw * local_y)
+                    map_cell = frontier_world_cell(grid, world)
+                    if map_cell is not None:
+                        map_value = int(
+                            grid.data[map_cell[1] * grid.info.width + map_cell[0]])
+                except Exception:
+                    map_value = None
+                overlapping.append({
+                    "x": cell_x, "y": cell_y, "cost": cost,
+                    "map_value": map_value})
+            self._record_evidence({
+                "kind": "terminal",
+                "state": state,
+                "reason": reason,
+                "start_check": category,
+                "overlapping_cells": overlapping,
+                "pose": (
+                    {"x": robot_world[0], "y": robot_world[1],
+                     "yaw": robot_yaw}
+                    if robot_world is not None else None),
+                "counts": counts})
+        except Exception:  # pragma: no cover - evidence boundary
+            pass
+
+    @staticmethod
     def _format_candidate(candidate):
         if candidate is None:
             return ""
@@ -679,6 +907,11 @@ class FrontierExplorer(Node):
                 self._mission_status_invalid_at = received_at
             else:
                 self._mission_status_by_uuid[goal_uuid] = record
+                if (self._pending_result is not None
+                        and goal_uuid == self._expected_goal_uuid
+                        and record["valid"]
+                        and record["stage"] == "TERMINAL"):
+                    self._resolve_pending_result_locked()
 
     def _mission_status_max_age(self):
         return max(
@@ -767,9 +1000,15 @@ class FrontierExplorer(Node):
             "cancel_target": self._cancel_target,
             "cancel_ack": self._cancel_ack,
             "goal_failures": self.goal_failures,
+            "localization_recoveries": getattr(self, "localization_recoveries", 0),
             "no_frontier_updates_seen": self.no_frontier_updates_seen,
             "candidate": self._format_candidate(self.active_candidate),
+            "goal_world": self._format_world_point(
+                getattr(self, "_attempted_goal_world", None)),
             "fault_latched": self.fault_latched,
+            "continuous_exploration": getattr(
+                self, "continuous_exploration", False),
+            "patrol_active": getattr(self, "patrol_active", False),
             "reached_goal_count": getattr(self, "reached_goal_count", 0),
             "completion_policy": SAFE_REACHABLE_COMPLETION_POLICY,
             "raw_frontier_count": getattr(self, "raw_frontier_count", 0),
@@ -989,6 +1228,7 @@ class FrontierExplorer(Node):
         self.active_goal = None
         self._active_token = None
         self._result_status = None
+        self._pending_result = None
         self._result_future = None
         self.goal_started_at = None
         self._motion_deadline = None
@@ -1052,12 +1292,18 @@ class FrontierExplorer(Node):
             self.processed_map_version = -1
             self.blacklist.clear()
             self.failed_goal_worlds.clear()
+            self.patrol_active = False
+            self.patrol_history = []
+            self.reached_goal_worlds = []
             getattr(self, "_blocked_destinations", {}).clear()
             getattr(self, "_retry_exhausted_destinations", set()).clear()
             self._recovery_goal_world = None
             self._recovery_stationary_sample = None
             self._recovery_stationary_samples = 0
+            self._localization_recovery_deadline = None
+            self.localization_recoveries = 0
             self.reached_goal_count = 0
+            self._consecutive_blockages = 0
             self.raw_frontier_count = 0
             self.blocked_frontier_count = 0
             self.blocked_safety_count = 0
@@ -1288,6 +1534,15 @@ class FrontierExplorer(Node):
             cancel_deadline = (
                 cancel_record.deadline if cancel_record is not None else None)
             started_at = self.started_at
+            if self._pending_result is not None:
+                self._resolve_pending_result_locked()
+                state = self.state
+                motion_token = self._motion_token
+                motion_deadline = self._motion_deadline
+                cancel_requested = self.cancel_requested
+                cancel_record = self._cancel_record
+                cancel_deadline = (
+                    cancel_record.deadline if cancel_record is not None else None)
             self._publish_status_locked()
         now = self._monotonic()
 
@@ -1398,6 +1653,13 @@ class FrontierExplorer(Node):
         self.unresolved_frontier_count = unresolved_count
 
     @staticmethod
+    def _has_safe_frontier_endpoint(diagnostics):
+        return any(
+            isinstance(item, dict)
+            and item.get("safe_endpoint_count", 0) > 0
+            for item in (diagnostics or ()))
+
+    @staticmethod
     def _frontier_diagnostics_are_blocked(diagnostics, has_frontiers):
         if not has_frontiers:
             return True
@@ -1410,7 +1672,9 @@ class FrontierExplorer(Node):
 
     def _finish_without_goal(
             self, run_generation, reason, complete=False, incomplete=False,
-            frontier_diagnostics=None):
+            frontier_diagnostics=None, evidence_context=None):
+        committed = None
+        counts = None
         with self._lock:
             if self.run_generation != run_generation or self.state != "PLANNING":
                 return
@@ -1430,10 +1694,20 @@ class FrontierExplorer(Node):
                     self.unresolved_frontier_count = self.raw_frontier_count
             if incomplete:
                 self._terminal_locked("INCOMPLETE", reason)
+                committed = "INCOMPLETE"
             elif complete:
                 self._terminal_locked("COMPLETE", reason)
+                committed = "COMPLETE"
             else:
                 self._set_state_locked("SCANNING", reason)
+            if committed is not None:
+                counts = {
+                    "raw": self.raw_frontier_count,
+                    "blocked_safety": self.blocked_safety_count,
+                    "blocked_route": self.blocked_route_count}
+        if committed is not None:
+            self._record_terminal_evidence(
+                committed, reason, counts, evidence_context)
 
     def _current_unresolved_frontier_count_locked(self):
         try:
@@ -1461,14 +1735,64 @@ class FrontierExplorer(Node):
 
     def _recovery_wait_tick(self, run_generation, started_at):
         """Wait for fresh readiness and two independent stationary TF samples."""
-        ready, detail, transform = self._readiness(
-            require_action=True, require_costmap=True, require_transform=True)
         with self._lock:
             if not self._decision_matches_locked(
                     run_generation=run_generation,
                     expected_state="RECOVERY_WAIT",
                     expected_started_at=started_at):
                 return
+            deadline = getattr(self, "_localization_recovery_deadline", None)
+            if self._localization_recovery_expired_locked(deadline):
+                return
+        ready, detail, transform = self._readiness(
+            require_action=True, require_costmap=True, require_transform=True)
+        headroom_ready = False
+        if deadline is not None and ready:
+            # Each edge must be independently fresh; a composed TF alone
+            # cannot prove that the stalled localization publisher recovered.
+            with self._lock:
+                if (not self._decision_matches_locked(
+                        run_generation=run_generation,
+                        expected_state="RECOVERY_WAIT",
+                        expected_started_at=started_at)
+                        or getattr(self, "_localization_recovery_deadline", None) != deadline
+                        or self._localization_recovery_expired_locked(deadline)):
+                    return
+            try:
+                map_odom = self.tf_buffer.lookup_transform(
+                    "map", "odom", rclpy.time.Time(), timeout=Duration(seconds=0.0))
+                odom_base = self.tf_buffer.lookup_transform(
+                    "odom", "base_footprint", rclpy.time.Time(),
+                    timeout=Duration(seconds=0.0))
+                map_stamp = self._header_stamp_ns(map_odom)
+                odom_stamp = self._header_stamp_ns(odom_base)
+                headroom_ready = (
+                    isinstance(map_stamp, int) and map_stamp > 0
+                    and isinstance(odom_stamp, int) and odom_stamp > 0
+                    and self._valid_lookup_transform(map_odom)
+                    and self._valid_transform(
+                        odom_base, self._now_ros_ns(), self.tf_timeout)
+                    and map_stamp - odom_stamp
+                    >= int(LOCALIZATION_HEADROOM_MIN_S * 1_000_000_000))
+            except (AttributeError, TypeError, ValueError, OverflowError,
+                    TransformException, RuntimeError):
+                headroom_ready = False
+        with self._lock:
+            if not self._decision_matches_locked(
+                    run_generation=run_generation,
+                    expected_state="RECOVERY_WAIT",
+                    expected_started_at=started_at):
+                return
+            if (getattr(self, "_localization_recovery_deadline", None) != deadline
+                    or self._localization_recovery_expired_locked(deadline)):
+                return
+            if deadline is not None and not headroom_ready:
+                ready = False
+                detail = "fresh localization TF headroom is unavailable"
+            if (deadline is not None and transform is not None
+                    and not self._valid_lookup_transform(transform)):
+                ready = False
+                detail = "localization stationary TF sample is stale or invalid"
             if not ready or transform is None:
                 self._recovery_stationary_sample = None
                 self._recovery_stationary_samples = 0
@@ -1486,6 +1810,16 @@ class FrontierExplorer(Node):
                 return
             # Store (x, y, yaw) from this timer tick.
             current_sample = (pose[0][0], pose[0][1], pose[1])
+            if deadline is not None:
+                # Keep the independent acquisition's stamp with its pose.
+                stamp = self._header_stamp_ns(transform)
+                if not isinstance(stamp, int) or stamp <= 0:
+                    self._recovery_stationary_sample = None
+                    self._recovery_stationary_samples = 0
+                    self._set_state_locked(
+                        "RECOVERY_WAIT", "localization TF stamp is unavailable")
+                    return
+                current_sample += (stamp,)
             previous = self._recovery_stationary_sample
             if previous is None:
                 self._recovery_stationary_sample = current_sample
@@ -1494,6 +1828,22 @@ class FrontierExplorer(Node):
                     "RECOVERY_WAIT",
                     "recovery waiting for stationary TF proof (1/2)")
                 return
+            if deadline is not None:
+                if current_sample[3] <= previous[3]:
+                    # Retain an anchor, but a frozen/backward acquisition
+                    # breaks the consecutive independent-sample proof.
+                    self._recovery_stationary_sample = current_sample
+                    self._recovery_stationary_samples = 0
+                    self._set_state_locked(
+                        "RECOVERY_WAIT", "localization TF stamp did not advance")
+                    return
+                if self._recovery_stationary_samples == 0:
+                    self._recovery_stationary_sample = current_sample
+                    self._recovery_stationary_samples = 1
+                    self._set_state_locked(
+                        "RECOVERY_WAIT",
+                        "recovery waiting for stationary TF proof (1/2)")
+                    return
             translation_delta = math.hypot(
                 current_sample[0] - previous[0],
                 current_sample[1] - previous[1])
@@ -1503,6 +1853,10 @@ class FrontierExplorer(Node):
             stationary = (
                 translation_delta <= 0.5 * float(geometry[2])
                 and abs(yaw_delta) <= RECOVERY_YAW_TOLERANCE_RAD)
+            if deadline is not None:
+                stationary = (
+                    translation_delta < 0.5 * float(geometry[2])
+                    and abs(yaw_delta) <= RECOVERY_YAW_TOLERANCE_RAD)
             if not stationary:
                 self._recovery_stationary_sample = current_sample
                 self._recovery_stationary_samples = 1
@@ -1515,8 +1869,17 @@ class FrontierExplorer(Node):
             self.processed_map_version = -1
             self._recovery_stationary_sample = None
             self._recovery_stationary_samples = 0
+            self._localization_recovery_deadline = None
             self._set_state_locked(
                 "SCANNING", "recovery readiness and stationary TF proof passed")
+
+    def _localization_recovery_expired_locked(self, deadline):
+        if deadline is not None and self._monotonic() >= deadline:
+            self._mission_fault_class = "LOCALIZATION_UNAVAILABLE"
+            self._terminal_locked(
+                "FAULT", "localization did not recover within 5.0 s")
+            return True
+        return False
 
     def _select_frontier(self, run_generation=None, transform=None):
         """Plan the current map and carry one post-cluster TF sample."""
@@ -1635,10 +1998,21 @@ class FrontierExplorer(Node):
                     clusters, grid, costmap, failed_goal_cells,
                     robot_world=robot_world,
                     min_goal_distance=self.min_goal_distance,
-                    footprint=NAVIGATION_FOOTPRINT,
+                    footprint=EXPLORATION_ROUTE_FOOTPRINT,
                     robot_yaw=robot_yaw,
-                    require_path_clear=True, return_diagnostics=True)
+                    require_path_clear=True, return_diagnostics=True,
+                    approach_radius=FRONTIER_APPROACH_RADIUS_M,
+                    avoid_worlds=tuple(
+                        getattr(self, "reached_goal_worlds", ())),
+                    avoid_radius=FRONTIER_APPROACH_AVOID_RADIUS_M,
+                    goal_clearance_radius=GOAL_CLEARANCE_RADIUS_M,
+                    return_tiers=True)
+                candidate_tiers = {}
                 if (isinstance(selection_result, tuple)
+                        and len(selection_result) == 3):
+                    candidates, frontier_diagnostics, candidate_tiers = (
+                        selection_result)
+                elif (isinstance(selection_result, tuple)
                         and len(selection_result) == 2):
                     candidates, frontier_diagnostics = selection_result
                 else:
@@ -1665,6 +2039,7 @@ class FrontierExplorer(Node):
             self._planning_gate_failure(run_generation, started_at, costmap_detail)
             return
 
+        dispatching_patrol = False
         if not candidates:
             current_map_ready, current_map_detail, _ = (
                 self._map_readiness())
@@ -1703,22 +2078,101 @@ class FrontierExplorer(Node):
                 incomplete = (
                     limit_reached and bool(clusters)
                     and not blocked_completion)
-            if incomplete:
-                detail = "exploration incomplete: frontier classification is unresolved"
-            elif limit_reached and bool(clusters):
-                detail = (
-                    "exploration complete: reachable area exhausted; "
-                    "blocked frontiers remain")
-            elif limit_reached:
-                detail = "exploration complete: no costmap-valid frontier remains"
+                patrol = bool(
+                    getattr(self, "continuous_exploration", False)
+                    and (limit_reached or self.patrol_active))
+                patrol_history = tuple(self.patrol_history)
+            if patrol:
+                # Continuous mode never terminates on exhaustion; it keeps
+                # driving to a different free, reachable map cell instead.
+                with self._trace_span(
+                        "patrol_search", generation=run_generation) as trace:
+                    try:
+                        patrol_cells = patrol_candidates(
+                            grid, costmap, robot_world, robot_yaw,
+                            footprint=EXPLORATION_ROUTE_FOOTPRINT,
+                            min_goal_distance=max(
+                                self.min_goal_distance,
+                                PATROL_MIN_GOAL_DISTANCE_M),
+                            sample_spacing=PATROL_SAMPLE_SPACING_M,
+                            avoid_worlds=failed_goal_worlds,
+                            avoid_radius=PATROL_AVOID_RADIUS_M,
+                            visited_worlds=patrol_history,
+                            goal_clearance_radius=GOAL_CLEARANCE_RADIUS_M)
+                        if trace is not None:
+                            trace["candidate_count"] = (
+                                len(patrol_cells)
+                                if patrol_cells is not None else None)
+                            trace["outcome"] = (
+                                "ok" if patrol_cells is not None else "invalid")
+                    except Exception as exc:  # pragma: no cover - algorithm boundary
+                        if trace is not None:
+                            trace["outcome"] = "algorithm_error"
+                            trace["error"] = str(exc)
+                        self._fault(
+                            "frontier planning failed: " + str(exc),
+                            expected_run_generation=run_generation,
+                            expected_state="PLANNING",
+                            expected_started_at=started_at)
+                        return
+                if patrol_cells is None:
+                    self._planning_gate_failure(
+                        run_generation, started_at, costmap_detail)
+                    return
+                if not patrol_cells:
+                    self._finish_without_goal(
+                        run_generation,
+                        "continuous exploration: no reachable patrol goal; "
+                        "waiting for a map update")
+                    return
+                candidates = patrol_cells
+                dispatching_patrol = True
             else:
-                detail = "no costmap-valid frontier in this map update"
-            self._finish_without_goal(
-                run_generation, detail,
-                complete=limit_reached and not incomplete,
-                incomplete=incomplete,
-                frontier_diagnostics=frontier_diagnostics)
-            return
+                start_check = None
+                if (limit_reached and not incomplete
+                        and self._has_safe_frontier_endpoint(
+                            frontier_diagnostics)):
+                    start_check = robot_start_check(
+                        costmap_snapshot[0], robot_world, robot_yaw)
+                start_blocked = (
+                    start_check is not None and start_check[0] != "clear")
+                if start_blocked:
+                    # The route proof cannot start from an unsafe pose, so the
+                    # BLOCKED_ROUTE result is not evidence of a finished map.
+                    incomplete = True
+                    if start_check[0] == "collision":
+                        detail = (
+                            "exploration incomplete: completion cannot be "
+                            "certified; robot pose is not collision-free")
+                    else:
+                        detail = (
+                            "exploration incomplete: completion cannot be "
+                            "certified; route start is inadmissible")
+                elif incomplete:
+                    detail = (
+                        "exploration incomplete: frontier classification is "
+                        "unresolved")
+                elif limit_reached and bool(clusters):
+                    detail = (
+                        "exploration complete: reachable area exhausted; "
+                        "blocked frontiers remain")
+                elif limit_reached:
+                    detail = (
+                        "exploration complete: no costmap-valid frontier remains")
+                else:
+                    detail = "no costmap-valid frontier in this map update"
+                self._finish_without_goal(
+                    run_generation, detail,
+                    complete=limit_reached and not incomplete,
+                    incomplete=incomplete,
+                    frontier_diagnostics=frontier_diagnostics,
+                    evidence_context={
+                        "start_check": start_check,
+                        "costmap": costmap_snapshot[0],
+                        "grid": map_snapshot[0],
+                        "robot_world": robot_world,
+                        "robot_yaw": robot_yaw})
+                return
 
         gx, gy = candidates[0]
         goal_world = frontier_cell_world(grid, (gx, gy))
@@ -1731,6 +2185,7 @@ class FrontierExplorer(Node):
             return
 
         fresh_transform = None
+        fresh_pose = None
         valid_transform = (
             self._valid_lookup_transform(transform)
             if transform_from_lookup else self._valid_transform(
@@ -1810,15 +2265,34 @@ class FrontierExplorer(Node):
             pose.header.stamp = stamp
         pose.pose.position.x = goal_world[0]
         pose.pose.position.y = goal_world[1]
-        pose.pose.orientation.w = 1.0
+        heading_origin = fresh_pose[0] if fresh_pose is not None else robot_world
+        goal_tier = None if dispatching_patrol else candidate_tiers.get((gx, gy))
+        goal_yaw = goal_heading(
+            costmap_snapshot[0], heading_origin, goal_world,
+            require_turn_clear=goal_tier == "frontier_cell")
+        pose.pose.orientation.z = math.sin(goal_yaw / 2.0)
+        pose.pose.orientation.w = math.cos(goal_yaw / 2.0)
         goal = NavigateToPose.Goal()
         goal.pose = pose
+        if dispatching_patrol:
+            goal_kind = "patrol"
+        else:
+            goal_kind = {
+                "frontier_cell": "frontier cell",
+                "approach": "approach"}.get(
+                    candidate_tiers.get((gx, gy)), "unknown")
         self._reserve_and_send(
             goal, (gx, gy), run_generation, expected_started_at=started_at,
             map_snapshot=map_snapshot, costmap_snapshot=costmap_snapshot,
             transform=transform, fresh_transform=fresh_transform,
             goal_world=goal_world, transform_from_lookup=transform_from_lookup,
-            fresh_transform_from_lookup=fresh_transform is not None)
+            fresh_transform_from_lookup=fresh_transform is not None,
+            patrol=dispatching_patrol, goal_kind=goal_kind,
+            evidence_context={
+                "transform": fresh_transform or transform,
+                "map_snapshot": map_snapshot,
+                "costmap_snapshot": costmap_snapshot,
+                "goal_yaw": goal_yaw})
 
     @staticmethod
     def _map_content_equal(planned_map, latest_map):
@@ -1949,7 +2423,8 @@ class FrontierExplorer(Node):
             self, goal, candidate, run_generation, expected_started_at=_UNSET,
             map_snapshot=None, costmap_snapshot=None, transform=None,
             fresh_transform=None, goal_world=None, transform_from_lookup=False,
-            fresh_transform_from_lookup=False):
+            fresh_transform_from_lookup=False, patrol=False,
+            goal_kind="unknown", evidence_context=None):
         with self._trace_span("reservation", generation=run_generation) as trace:
             result = self._reserve_and_send_impl(
                 goal, candidate, run_generation,
@@ -1958,7 +2433,9 @@ class FrontierExplorer(Node):
                 transform=transform, fresh_transform=fresh_transform,
                 goal_world=goal_world,
                 transform_from_lookup=transform_from_lookup,
-                fresh_transform_from_lookup=fresh_transform_from_lookup)
+                fresh_transform_from_lookup=fresh_transform_from_lookup,
+                patrol=patrol, goal_kind=goal_kind,
+                evidence_context=evidence_context)
             if trace is not None:
                 with self._lock:
                     trace["state_after"] = self.state
@@ -1975,7 +2452,8 @@ class FrontierExplorer(Node):
             self, goal, candidate, run_generation, expected_started_at=_UNSET,
             map_snapshot=None, costmap_snapshot=None, transform=None,
             fresh_transform=None, goal_world=None, transform_from_lookup=False,
-            fresh_transform_from_lookup=False):
+            fresh_transform_from_lookup=False, patrol=False,
+            goal_kind="unknown", evidence_context=None):
         with self._lock:
             if (not self._decision_matches_locked(
                     run_generation=run_generation,
@@ -2010,6 +2488,11 @@ class FrontierExplorer(Node):
                 attempted_goal_world = frontier_cell_world(
                     self.latest_map, candidate)
             self.no_frontier_updates_seen = 0
+            self.patrol_active = bool(patrol)
+            if patrol and attempted_goal_world is not None:
+                self.patrol_history = (
+                    list(self.patrol_history) + [attempted_goal_world]
+                )[-PATROL_HISTORY_LENGTH:]
             self.motion_generation += 1
             token = (run_generation, self.motion_generation)
             self._motion_token = token
@@ -2043,6 +2526,10 @@ class FrontierExplorer(Node):
             self._set_state_locked("GOAL_PENDING", "navigation goal pending acceptance", force=True)
             motion_deadline = self._motion_deadline
 
+        self._log_goal_dispatch(attempted_goal_world, goal_kind)
+        self._record_dispatch_evidence(
+            run_generation, attempted_goal_world, candidate, goal_kind,
+            evidence_context)
         try:
             future = self.action_client.send_goal_async(goal)
             future.add_done_callback(
@@ -2211,6 +2698,7 @@ class FrontierExplorer(Node):
                     expected_started_at=expected_started_at)
             return
 
+        reached_uuid = _UNSET
         with self._lock:
             if not self._token_current_locked(run_generation, motion_generation):
                 return
@@ -2221,86 +2709,175 @@ class FrontierExplorer(Node):
             candidate = self.active_candidate
             attempted_goal_world = self._attempted_goal_world
             if status == GoalStatus.STATUS_SUCCEEDED:
+                reached_uuid = getattr(self, "_expected_goal_uuid", None)
                 self._clear_motion_locked()
                 self._clear_readiness_episode_locked()
                 self.goal_failures = 0
                 self.reached_goal_count = getattr(self, "reached_goal_count", 0) + 1
+                self._consecutive_blockages = 0
+                self.localization_recoveries = 0
+                self._localization_recovery_deadline = None
+                if (not getattr(self, "patrol_active", False)
+                        and attempted_goal_world is not None):
+                    self.reached_goal_worlds = (
+                        list(getattr(self, "reached_goal_worlds", []))
+                        + [attempted_goal_world])
                 self._mission_blockage_confirmed = False
                 self._mission_fault_class = "NONE"
                 self._set_state_locked("SCANNING", "navigation goal succeeded")
             else:
                 mission_record, evidence_detail = (
                     self._matching_mission_terminal_locked())
-                confirmed_blockage = (
-                    status != GoalStatus.STATUS_CANCELED
-                    and mission_record is not None
-                    and mission_record.get("outcome") == "FAULT"
-                    and mission_record.get("fault_class") == "OBSTACLE_BLOCKAGE"
-                    and mission_record.get("blockage_confirmed") is True)
-                if confirmed_blockage:
-                    fingerprint = self._route_evidence_fingerprint(
-                        self.latest_map, self.latest_costmap)
-                    self._record_blockage_locked(
-                        attempted_goal_world, fingerprint)
-                    self._clear_motion_locked()
-                    self._clear_readiness_episode_locked()
-                    self._recovery_goal_world = attempted_goal_world
-                    self._recovery_stationary_sample = None
-                    self._recovery_stationary_samples = 0
-                    self._mission_blockage_confirmed = True
-                    self._mission_fault_class = "OBSTACLE_BLOCKAGE"
-                    self.processed_map_version = -1
-                    self._set_state_locked(
-                        "RECOVERY_WAIT",
-                        "confirmed obstacle blockage; waiting for recovery evidence")
-                elif self._is_recoverable_planner_abort(status, mission_record):
-                    fingerprint = self._route_evidence_fingerprint(
-                        self.latest_map, self.latest_costmap)
-                    if (attempted_goal_world is not None
-                            and fingerprint is not None):
-                        # A planner-result no-path is safe to defer because the
-                        # mission supervisor has already proved that no
-                        # downstream motion obligation remains.  Keep the
-                        # planner fault class visible, but do not turn a
-                        # single unreachable frontier into a run fault.
-                        self._record_blockage_locked(
-                            attempted_goal_world, fingerprint)
-                        self._clear_motion_locked()
-                        self._clear_readiness_episode_locked()
-                        self._recovery_goal_world = attempted_goal_world
-                        self._recovery_stationary_sample = None
-                        self._recovery_stationary_samples = 0
-                        self.goal_failures += 1
-                        self._mission_blockage_confirmed = False
-                        self._mission_fault_class = "PLANNER_ABORT"
-                        self.processed_map_version = -1
-                        self._set_state_locked(
-                            "RECOVERY_WAIT",
-                            "global planning failed; deferring frontier under current route evidence")
-                    else:
-                        # Missing route evidence cannot authorize deferral.
-                        detail = (
-                            "navigation goal ended with status %s; %s"
-                            % (status, evidence_detail))
-                        self._record_goal_failure_locked(
-                            detail,
-                            candidate=candidate,
-                            attempted_goal_world=attempted_goal_world,
-                            fault_class="PLANNER_ABORT")
-                else:
-                    fault_class = "NAVIGATION_FAULT"
-                    if mission_record is not None:
-                        candidate_fault_class = mission_record.get("fault_class")
-                        if candidate_fault_class:
-                            fault_class = candidate_fault_class
-                    detail = (
-                        "navigation goal ended with status %s; %s"
-                        % (status, evidence_detail))
-                    self._record_goal_failure_locked(
-                        detail,
-                        candidate=candidate,
-                        attempted_goal_world=attempted_goal_world,
-                        fault_class=fault_class)
+                if (status != GoalStatus.STATUS_CANCELED
+                        and mission_record is None
+                        and evidence_detail
+                        in _MISSION_TERMINAL_PENDING_DETAILS):
+                    # Defer: the matching TERMINAL status may still be in
+                    # flight.  Motion stays owned (state NAVIGATING) meanwhile.
+                    self._pending_result = {
+                        "status": status,
+                        "token": (run_generation, motion_generation),
+                        "candidate": candidate,
+                        "attempted_goal_world": attempted_goal_world,
+                        "deadline": self._monotonic() + MISSION_TERMINAL_GRACE_S,
+                    }
+                    return
+                self._classify_non_success_locked(
+                    status, candidate, attempted_goal_world,
+                    mission_record, evidence_detail)
+        if reached_uuid is not _UNSET:
+            self._record_goal_reached_evidence(run_generation, reached_uuid)
+
+    def _classify_non_success_locked(
+            self, status, candidate, attempted_goal_world,
+            mission_record, evidence_detail):
+        confirmed_blockage = (
+            status != GoalStatus.STATUS_CANCELED
+            and mission_record is not None
+            and mission_record.get("outcome") == "FAULT"
+            and mission_record.get("fault_class") == "OBSTACLE_BLOCKAGE"
+            and mission_record.get("blockage_confirmed") is True)
+        localization_unavailable = (
+            status == GoalStatus.STATUS_ABORTED
+            and mission_record is not None
+            and mission_record.get("outcome") == "FAULT"
+            and mission_record.get("fault_class") == "LOCALIZATION_UNAVAILABLE"
+            and mission_record.get("reason") == "path following lost map localization"
+            and mission_record.get("blockage_confirmed") is False)
+        if localization_unavailable:
+            self._clear_motion_locked()
+            self._clear_readiness_episode_locked()
+            self._recovery_goal_world = None
+            self._recovery_stationary_sample = None
+            self._recovery_stationary_samples = 0
+            self._mission_blockage_confirmed = False
+            self._mission_fault_class = "LOCALIZATION_UNAVAILABLE"
+            recoveries = getattr(self, "localization_recoveries", 0)
+            if recoveries >= LOCALIZATION_RECOVERY_LIMIT:
+                self._terminal_locked(
+                    "FAULT", "consecutive localization recoveries exhausted")
+                return
+            self.localization_recoveries = recoveries + 1
+            self._localization_recovery_deadline = (
+                self._monotonic() + LOCALIZATION_RECOVERY_DEADLINE_S)
+            self.processed_map_version = -1
+            self._set_state_locked(
+                "RECOVERY_WAIT", "path following lost map localization; waiting for recovery evidence")
+        elif confirmed_blockage:
+            fingerprint = self._route_evidence_fingerprint(
+                self.latest_map, self.latest_costmap)
+            self._record_blockage_locked(
+                attempted_goal_world, fingerprint)
+            self._clear_motion_locked()
+            self._clear_readiness_episode_locked()
+            self._recovery_goal_world = attempted_goal_world
+            self._recovery_stationary_sample = None
+            self._recovery_stationary_samples = 0
+            self._mission_blockage_confirmed = True
+            self._mission_fault_class = "OBSTACLE_BLOCKAGE"
+            self.processed_map_version = -1
+            self._consecutive_blockages = (
+                getattr(self, "_consecutive_blockages", 0) + 1)
+            if self._consecutive_blockages >= MAX_CONSECUTIVE_BLOCKAGES:
+                self._terminal_locked(
+                    "INCOMPLETE",
+                    "exploration incomplete: repeated obstacle blockage: %d consecutive confirmed "
+                    "blockages without reaching a goal"
+                    % self._consecutive_blockages)
+                return
+            self._set_state_locked(
+                "RECOVERY_WAIT",
+                "confirmed obstacle blockage; waiting for recovery evidence")
+        elif self._is_recoverable_planner_abort(status, mission_record):
+            fingerprint = self._route_evidence_fingerprint(
+                self.latest_map, self.latest_costmap)
+            if (attempted_goal_world is not None
+                    and fingerprint is not None):
+                # A planner-result no-path is safe to defer because the
+                # mission supervisor has already proved that no
+                # downstream motion obligation remains.  Keep the
+                # planner fault class visible, but do not turn a
+                # single unreachable frontier into a run fault.
+                self._record_blockage_locked(
+                    attempted_goal_world, fingerprint)
+                self._clear_motion_locked()
+                self._clear_readiness_episode_locked()
+                self._recovery_goal_world = attempted_goal_world
+                self._recovery_stationary_sample = None
+                self._recovery_stationary_samples = 0
+                self.goal_failures += 1
+                self._mission_blockage_confirmed = False
+                self._mission_fault_class = "PLANNER_ABORT"
+                self.processed_map_version = -1
+                self._set_state_locked(
+                    "RECOVERY_WAIT",
+                    "global planning failed; deferring frontier under current route evidence")
+            else:
+                # Missing route evidence cannot authorize deferral.
+                detail = (
+                    "navigation goal ended with status %s; %s"
+                    % (status, evidence_detail))
+                self._record_goal_failure_locked(
+                    detail,
+                    candidate=candidate,
+                    attempted_goal_world=attempted_goal_world,
+                    fault_class="PLANNER_ABORT")
+        else:
+            fault_class = "NAVIGATION_FAULT"
+            if mission_record is not None:
+                candidate_fault_class = mission_record.get("fault_class")
+                if candidate_fault_class:
+                    fault_class = candidate_fault_class
+            detail = (
+                "navigation goal ended with status %s; %s"
+                % (status, evidence_detail))
+            self._record_goal_failure_locked(
+                detail,
+                candidate=candidate,
+                attempted_goal_world=attempted_goal_world,
+                fault_class=fault_class)
+
+    def _resolve_pending_result_locked(self, force=False):
+        """Classify a deferred non-success result once evidence or grace ends."""
+        pending = self._pending_result
+        if pending is None:
+            return
+        token = pending["token"]
+        if (not self._token_current_locked(*token)
+                or self.fault_latched or self.cancel_requested):
+            self._pending_result = None
+            if self.cancel_requested:
+                self._apply_cancel_proof_locked()
+            return
+        mission_record, evidence_detail = (
+            self._matching_mission_terminal_locked())
+        if mission_record is None and not (
+                force or self._monotonic() >= pending["deadline"]):
+            return
+        self._pending_result = None
+        self._classify_non_success_locked(
+            pending["status"], pending["candidate"],
+            pending["attempted_goal_world"], mission_record, evidence_detail)
 
     def _record_goal_failure_locked(
             self, detail, candidate=None, attempted_goal_world=_UNSET,
@@ -2646,10 +3223,12 @@ def main():
     executor.add_node(node)
     try:
         executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

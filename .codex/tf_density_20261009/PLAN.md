@@ -1,0 +1,11 @@
+# Run16 replay discrimination
+
+Hypothesis: map rasterization/graph publication under smapper_mutex blocks scan callback as accepted graph grows. Alternative merged-input starvation falsified by continuous full input; gross simulation RTF slowdown falsified by independent run16 metric windows. Exact installed2.6.10 source under installed_*.cpp shows updateMap and addScan sharing lock; transform publisher stamps last callback scan+unchanged1s timeout.
+
+Compare full819s identical recorded clock/odom/staticTF/7932mergedscans, map->odom removed, domain230, same2 busy workers, same hardware power and no simulation. Baseline original mapper; candidate only minimum_time_interval0.5, travel_distance0.3, travel_heading0.3. Preserve cadence1s, resolution0.05, range20, TFtimeout1, queue10, all controller/explorer safety gates. Candidate remains diagnostic until reviewed.
+
+Record actual graph vertices (marker count minus3 fixed markers), max lag and graph/map association per100simsec, input receipt counts/gaps, final map/free area. Prediction: fewer vertices and materially shorter map-associated stalls for same inputs. Reject if scan receipt differs or load/monitor disappears; baseline must show late graph-related delay to discriminate. Coverage comparison must retain at least95% of baseline mapped free area (diagnostic proposal, not replacement for runtime acceptance); inspect final maps for missing mapped areas or gross distortion. Numeric result alone is insufficient: unchanged normal hospital terminal and AWS regression remain mandatory.
+
+Do not infer whole-host live performance from replay alone. Baseline controlled load may not reproduce full Gazebo contention; report this limitation. If candidate does not reduce relevant delay/coverage, return to diagnosis, no production overlay. Do not increase freshness or recovery budgets.
+
+Stop/reap owned groups on failure. Preserve original hospital evidence; all decode scratch is derived/task-created and has removal receipts. Compression diagnosis independently confirmed: installedrosbag2 0.15.17 exact131072-byte-multiple streaming finalization bug. Complete grouped frames recover original SQLite datasets; hashes/quickchecks retained. Future recorder uses message compression.

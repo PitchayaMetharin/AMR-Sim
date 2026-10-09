@@ -108,8 +108,10 @@ def test_mission_status_is_uuid_correlated_and_observation_only():
         assert outcome in source
     for fault_class in (
             "NONE", "OBSTACLE_BLOCKAGE", "PLANNER_ABORT", "SMOOTHER_ABORT",
-            "CONTROLLER_ABORT", "CANCELLATION", "NAVIGATION_FAULT"):
+            "CONTROLLER_ABORT", "CANCELLATION", "NAVIGATION_FAULT",
+            "LOCALIZATION_UNAVAILABLE"):
         assert fault_class in source
+    assert "path following lost map localization" in source
     assert "path smoothing reached a collision boundary" in source
     assert "result.result->was_completed && !result.result->path.poses.empty()" in source
     assert '"RegulatedPurePursuitController detected collision ahead!"' in source

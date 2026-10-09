@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -80,6 +81,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     PLANNER_ABORT,
     SMOOTHER_ABORT,
     CONTROLLER_ABORT,
+    LOCALIZATION_UNAVAILABLE,
     CANCELLATION,
     NAVIGATION_FAULT,
   };
@@ -224,6 +226,7 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
       case FaultClass::PLANNER_ABORT: return "PLANNER_ABORT";
       case FaultClass::SMOOTHER_ABORT: return "SMOOTHER_ABORT";
       case FaultClass::CONTROLLER_ABORT: return "CONTROLLER_ABORT";
+      case FaultClass::LOCALIZATION_UNAVAILABLE: return "LOCALIZATION_UNAVAILABLE";
       case FaultClass::CANCELLATION: return "CANCELLATION";
       case FaultClass::NAVIGATION_FAULT: return "NAVIGATION_FAULT";
     }
@@ -882,11 +885,15 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
           complete_public(
             mission, Completion::SUCCEEDED, "mission completed", FaultClass::NONE, false);
         } else {
+          const bool localization_unavailable =
+            !controller_collision && map_localization_lags_odometry();
           abort(
             mission,
             controller_collision ? "controller collision boundary reached" :
+            localization_unavailable ? "path following lost map localization" :
             "path following failed",
             controller_collision ? FaultClass::OBSTACLE_BLOCKAGE :
+            localization_unavailable ? FaultClass::LOCALIZATION_UNAVAILABLE :
             FaultClass::CONTROLLER_ABORT,
             controller_collision);
         }
@@ -933,6 +940,28 @@ class MissionSupervisorNode final : public rclcpp_lifecycle::LifecycleNode {
     }
     if (mission_feedback) {
       mission->publish_feedback(mission_feedback);
+    }
+  }
+
+  bool map_localization_lags_odometry() {
+    try {
+      const auto map_odom = tf_buffer_.lookupTransform("map", "odom", tf2::TimePointZero);
+      const auto odom_base = tf_buffer_.lookupTransform(
+        "odom", "base_footprint", tf2::TimePointZero);
+      const auto valid = [](const geometry_msgs::msg::TransformStamped & transform) {
+          const auto & stamp = transform.header.stamp;
+          const auto & t = transform.transform.translation;
+          const auto & q = transform.transform.rotation;
+          return stamp.sec >= 0 && stamp.nanosec < 1000000000u &&
+                 (stamp.sec > 0 || stamp.nanosec > 0) &&
+                 std::isfinite(t.x) && std::isfinite(t.y) && std::isfinite(t.z) &&
+                 std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) &&
+                 std::isfinite(q.w) && (q.x != 0.0 || q.y != 0.0 || q.z != 0.0 || q.w != 0.0);
+        };
+      return valid(map_odom) && valid(odom_base) &&
+             rclcpp::Time(map_odom.header.stamp) < rclcpp::Time(odom_base.header.stamp);
+    } catch (const tf2::TransformException &) {
+      return false;
     }
   }
 

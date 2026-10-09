@@ -31,6 +31,7 @@ def generate_launch_description() -> LaunchDescription:
             "rviz": LaunchConfiguration("rviz"),
             "auto_start_exploration": LaunchConfiguration("auto_start_exploration"),
             "simulation_diagnostics": LaunchConfiguration("simulation_diagnostics"),
+            "continuous_exploration": LaunchConfiguration("continuous_exploration"),
             # This is intentionally internal: portable exploration keeps its
             # sensors.rviz default and does not grow another public argument.
             "rviz_config": str(rviz_config),
@@ -48,6 +49,11 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument(
             "simulation_diagnostics",
+            default_value="false",
+            choices=["true", "false"],
+        ),
+        DeclareLaunchArgument(
+            "continuous_exploration",
             default_value="false",
             choices=["true", "false"],
         ),

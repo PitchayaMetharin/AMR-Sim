@@ -22,7 +22,9 @@ def test_explorer_has_only_action_and_stop_boundaries():
     assert "last_costmap_at" in source
     assert "costmap_frontier_candidates" in source
     assert "NAVIGATION_FOOTPRINT" in source
-    assert "footprint=NAVIGATION_FOOTPRINT" in source
+    # Route and patrol search use the navigation footprint grown by a fixed
+    # margin (test_frontier_route_margin.py pins the semantics).
+    assert "footprint=EXPLORATION_ROUTE_FOOTPRINT" in source
     assert '"/amr/mission/navigate_to_pose"' in source
     assert '"/amr/exploration/start"' in source
     assert '"/amr/exploration/stop"' in source

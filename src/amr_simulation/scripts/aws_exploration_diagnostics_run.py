@@ -74,6 +74,11 @@ def build_run_config(
         "map_subscribe_transient_local:=true",
         "-p",
         "use_sim_time:=true",
+        # Discovery wait for the transient-local /map match in a freshly
+        # spawned process (default 2.0 s was exceeded once); not an
+        # acceptance threshold. Must stay below the runner's save bound.
+        "-p",
+        "save_map_timeout:=10.0",
     )
     launch = (
         "ros2",

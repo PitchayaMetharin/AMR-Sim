@@ -1,8 +1,29 @@
 # All-model work and mistake ledger
 
-Current effective count: 210, inherited from SESSION_HANDOFF.md's180 plus M181-M210;
+Current effective count: 213, inherited from SESSION_HANDOFF.md's180 plus M181-M213;
 Luna count109. The older97 header and truncated historical tail below are preserved
 pending evidence-based reconciliation; this update does not reset historical counts.
+
+## M213 — 2026-10-08 — claude-haiku-5-5/xhigh out-of-workspace write+delete; all213/Luna109
+Observed: during the run-12 fixes packet a mistaken cp wrote frontier_algorithm.py, frontier_explorer.py and CMakeLists.txt into /home/pete/ (22:58); the worker then deleted them itself and reported afterwards.
+Why/cause: relative/implicit cp destination; violated AGENTS.md section 2 (no resources outside the workspace) and acted (rm) outside scope instead of stopping.
+Impact: root verified no remaining stray files and no other /home/pete change in the last hour; whether same-named user files pre-existed cannot be proven (worker cited new birth times). User switched implementer to Sonnet 5.5 medium.
+Evidence: worker progress message 22:59; root ls/find of /home/pete.
+Resume: absolute destination paths only; outside-scope mistakes are reported, never self-cleaned.
+
+## M212 — 2026-10-08 — claude-sonnet-5-5/medium turn-gate off-by-one; all212/Luna109
+Observed: `_turn_clearance_checker` offset list used gap max(dx-1, -dx, 0), skipping the -x/-y ring of cells inside the circumscribed disk; all pinned tests passed.
+Why/cause: wrong interval arithmetic for cells spanning [d, d+1); root tests had no obstacle on the negative side, so the defect was not caught.
+Impact: hospital run 10 parked the robot with a corner on a lethal cell 0.729 m from the goal centre; the smoother rejected every departure path (abort loop).
+Evidence: run 10 smoother log "collision at <robot pose>"; root exact-disk replay on aborts.pkl; fix (Haiku xhigh) + root side-symmetry tests.
+Resume: gate fixed and covered by side-symmetry tests; counters continue.
+
+## M211 — 2026-10-08 — claude-haiku-5-5/xhigh validator invocation; all211/Luna109
+Observed: hospital elevator-seal packet; first validator run used python3 -I and exited1 with ModuleNotFoundError ament_index_python before any world check.
+Why/cause: command construction error; -I drops the sourced ROS PYTHONPATH, already noted in the earlier hospital-world packet; not a world or validator defect.
+Impact: one failed static check, self-corrected (sourced humble, python3 -B) to ACCEPTED exit0; no file, test or runtime effect.
+Evidence: worker hand-back report for external_worlds/hospital seal; Root re-read the regenerated SDF seal block and 66-model count.
+Resume: run the portable-launch validator with ROS sourced and without -I; counters continue from all211/Luna109.
 
 ## M210 — 2026-10-06 — gpt-6-luna/max named-test cache path; all210/Luna109
 Observed: named CTest exits0 but XDG_CACHE_HOME contains mistyped G1_OWNERSHIP_202605 component rather than approved G1_OWNERSHIP_20261005/env/cache.

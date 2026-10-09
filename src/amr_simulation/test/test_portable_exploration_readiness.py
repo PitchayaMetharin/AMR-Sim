@@ -272,6 +272,7 @@ def _bare_readiness(active):
             orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0))))
     readiness._local_costmap_at = 10.0
     readiness._front_scan_at = 10.0
+    readiness._merged_scan_at = 10.0
     readiness._base_at = 10.0
     readiness._base_valid = True
     readiness._base_status = SimpleNamespace()
@@ -448,3 +449,31 @@ def test_main_fails_closed_on_wait_set_error_before_readiness_proof():
     assert node._fault_reason == "readiness shutdown or user stop"
     assert node.destroyed
     assert executor.node is node
+
+
+def test_slam_input_merger_is_a_required_node_and_merged_scan_must_be_fresh():
+    # SLAM and AMCL consume only the merged scan; a missing or stale merger
+    # must hold readiness instead of releasing exploration with a starved map.
+    module = _load()
+    now = 10.0
+    assert "lidar_scan_merger_node" in module.ADAPTER_NODES
+    assert "/amr/sensors/merged_lidar/scan" in SCRIPT.read_text()
+
+    readiness, _ = _bare_readiness(set(module.ADAPTER_NODES))
+    graph = set(module.ADAPTER_NODES)
+    readiness._target_stage = "adapters_authority"
+    readiness._merged_scan_at = 0.0
+    stage, unmet = readiness._evaluate(graph, now)
+    assert stage == "adapters_authority"
+    assert unmet == ("fresh merged scan",)
+
+    active = set(module.ALL_LIFECYCLE_NODES)
+    readiness, _ = _bare_readiness(active)
+    graph = set(active) | {module.SLAM_NODE}
+    stage, unmet = readiness._evaluate(graph, now)
+    assert stage == module.STAGES[4]
+    assert unmet == ()
+    readiness._merged_scan_at = now - module.RECEIPT_MAX_AGE_S - 0.1
+    readiness._target_stage = module.STAGES[4]
+    stage, unmet = readiness._evaluate(graph, now)
+    assert "fresh merged scan" in unmet

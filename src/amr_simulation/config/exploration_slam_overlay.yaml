@@ -1,0 +1,5 @@
+/amr/slam_toolbox:
+  ros__parameters:
+    minimum_time_interval: 0.5
+    minimum_travel_distance: 0.3
+    minimum_travel_heading: 0.3

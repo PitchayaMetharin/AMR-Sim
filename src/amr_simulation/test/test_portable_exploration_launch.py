@@ -242,6 +242,16 @@ def test_launch_contract_is_isolated_and_stages_explorer_after_readiness():
     assert "amr_simulation.launch.py" not in text
 
 
+
+def test_continuous_exploration_is_an_opt_in_explorer_parameter():
+    text = LAUNCH_PATH.read_text()
+    assert (
+        'DeclareLaunchArgument("continuous_exploration", default_value="false", '
+        'choices=["true", "false"])') in text
+    assert (
+        '{"continuous_exploration": ParameterValue('
+        'LaunchConfiguration("continuous_exploration"), value_type=bool)}') in text
+
 def test_static_localization_mode_requires_an_existing_absolute_map_yaml(tmp_path):
     launch = _load_launch()
 
@@ -438,3 +448,32 @@ def test_global_required_process_exit_is_fail_closed_but_respects_shutdown_and_o
     failed = callback(SimpleNamespace(action=object()), SimpleNamespace(is_shutdown=False))
     assert len(failed) == 1
     assert isinstance(failed[0], launch.Shutdown)
+
+
+def test_gazebo_server_and_gui_run_without_a_signal_swallowing_shell(tmp_path, monkeypatch):
+    # ros_gz_sim's gz_sim.launch.py uses shell=True: SIGINT reaches /bin/sh, not
+    # the gz server, and the SIGTERM escalation then orphans the server.
+    from launch.actions import ExecuteProcess, IncludeLaunchDescription
+
+    launch = _load_launch()
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path))
+    validated = launch.validate_world(str(ROOT / "worlds" / "amr_world.sdf"), "")
+    actions = launch._gazebo_runtime_actions(
+        validated, headless=False, resource_value="", use_software_rendering=False)
+    timers = [a for a in actions if type(a).__name__ == "TimerAction"]
+    for timer in timers:
+        actions = actions + list(timer.actions)
+
+    assert not [a for a in actions if isinstance(a, IncludeLaunchDescription)]
+    processes = [a for a in actions if isinstance(a, ExecuteProcess)]
+    assert len(processes) == 2
+    commands = []
+    for process in processes:
+        assert process.shell is False
+        # Gazebo exit is handled by the global required-process-exit handler;
+        # an unconditional Shutdown here raises during an ongoing shutdown.
+        assert process._ExecuteLocal__on_exit is None
+        commands.append(["".join(s.text for s in part) for part in process.cmd])
+    assert commands[0][:2] == ["gz", "sim"]
+    assert {"-s", str(validated.path)} <= set(commands[0])
+    assert commands[1][:3] == ["gz", "sim", "-g"]

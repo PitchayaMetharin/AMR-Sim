@@ -4,7 +4,7 @@
     odom_frame: odom
     map_frame: map
     base_frame: base_footprint
-    scan_topic: /amr/sensors/front_lidar/scan
+    scan_topic: /amr/sensors/merged_lidar/scan
     mode: mapping
     transform_publish_period: 0.05
     # slam_toolbox needs this for scan/TF synchronization and stamp offset.

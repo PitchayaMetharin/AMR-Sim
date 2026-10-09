@@ -797,6 +797,9 @@ def _node(autostart=False):
         base_motion_allowed=True,
         state=ManipulatorStatus.STOWED_EMPTY)
     node.runtime_diagnostics = False
+    node.continuous_exploration = False
+    node.patrol_active = False
+    node.patrol_history = []
     node._runtime_trace_sequence = 0
     node._runtime_trace_events = []
     node.run_generation = 1 if autostart else 0
@@ -811,6 +814,7 @@ def _node(autostart=False):
     node.active_goal = None
     node._active_token = None
     node._result_status = None
+    node._pending_result = None
     node._result_future = None
     node.goal_started_at = None
     node._motion_deadline = None
@@ -1796,6 +1800,76 @@ def test_matching_obstacle_blockage_enters_recovery_wait_then_requires_stationar
     assert len(node.action_client.send_calls) == 2
 
 
+def _expire_mission_terminal_grace(node):
+    """Advance the explorer's steady clock past the mission-terminal grace."""
+    real = node._monotonic
+    node._monotonic = lambda: real() + frontier_explorer_module.MISSION_TERMINAL_GRACE_S + 0.1
+    node._tick()
+
+
+def test_result_before_terminal_mission_status_waits_then_enters_recovery_wait():
+    node = _selection_fixture(_node(autostart=True))
+    _dispatch_pending(node, candidate=(14, 10), goal_world=(14.5, 10.5))
+    handle = _accept(node)
+    node._mission_status_callback(
+        _mission_status(node._expected_goal_uuid, stage="SMOOTHING",
+                        outcome="PENDING", reason="following",
+                        blockage=False, fault_class="NONE"))
+
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+    assert node.state == "NAVIGATING"
+    assert node.fault_latched is False
+
+    node._mission_status_callback(_mission_status(node._expected_goal_uuid))
+
+    assert node.state == "RECOVERY_WAIT"
+    assert node.fault_latched is False
+    assert node._mission_fault_class == "OBSTACLE_BLOCKAGE"
+    assert node._motion_owned is False
+    assert node._blocked_destinations
+
+
+def test_result_without_terminal_mission_status_faults_after_grace():
+    node = _node(autostart=True)
+    _dispatch_pending(node)
+    handle = _accept(node)
+    node._mission_status_callback(
+        _mission_status(node._expected_goal_uuid, stage="SMOOTHING",
+                        outcome="PENDING", reason="following",
+                        blockage=False, fault_class="NONE"))
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+    assert node.state == "NAVIGATING"
+
+    _expire_mission_terminal_grace(node)
+
+    assert node.state == "FAULT"
+    assert node.fault_latched is True
+    assert node.reason == (
+        "navigation goal ended with status 6; "
+        "matching mission status is not terminal")
+    assert node._mission_fault_class == "NAVIGATION_FAULT"
+    assert node._motion_owned is False
+
+
+def test_pending_result_keeps_motion_owned_and_dispatches_nothing():
+    node = _selection_fixture(_node(autostart=True))
+    _dispatch_pending(node, candidate=(14, 10), goal_world=(14.5, 10.5))
+    handle = _accept(node)
+    handle.result_future.set_result(
+        SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+
+    for _ in range(3):
+        node._tick()
+    assert node.state == "NAVIGATING"
+    assert node._motion_owned is True
+    assert len(node.action_client.send_calls) == 1
+    fields = _diagnostic_values(node)
+    assert fields["active"] == "true"
+    assert fields["motion_stopped"] == "false"
+
+
 def test_matching_global_planning_abort_defers_frontier_without_latching_fault():
     node = _selection_fixture(_node(autostart=True))
     unreachable_world = (14.5, 10.5)
@@ -1895,6 +1969,7 @@ def test_non_success_without_matching_mission_terminal_faults_without_replan(sta
     _dispatch_pending(node)
     handle = _accept(node)
     handle.result_future.set_result(SimpleNamespace(status=status))
+    _expire_mission_terminal_grace(node)
 
     assert node.state == "FAULT"
     assert node.fault_latched is True
@@ -1915,6 +1990,7 @@ def test_mismatched_or_stale_mission_status_cannot_authorize_recovery():
     node._mission_status_callback(_mission_status("00" * 16))
     handle.result_future.set_result(
         SimpleNamespace(status=GoalStatus.STATUS_ABORTED))
+    _expire_mission_terminal_grace(node)
     assert node.state == "FAULT"
     assert len(node.action_client.send_calls) == 1
 
@@ -3968,3 +4044,36 @@ def test_real_two_thread_executor_cancellation_does_not_starve_action_callbacks(
         FrontierExplorer._goal_response = original_goal_response
         FrontierExplorer._cancel_response = original_cancel_response
         assert not spin_errors, "executor thread failed: %s" % spin_errors
+
+
+def test_main_exits_cleanly_when_sigint_already_shut_down_the_context(monkeypatch):
+    # On SIGINT rclpy's signal handler shuts the default context down before
+    # KeyboardInterrupt reaches spin(); main() must not shut it down again.
+    destroyed = []
+
+    class FakeExplorer:
+        def destroy_node(self):
+            destroyed.append(True)
+
+    class SignalledExecutor:
+        def __init__(self, num_threads):
+            pass
+
+        def add_node(self, node):
+            pass
+
+        def spin(self):
+            rclpy.shutdown()
+            raise KeyboardInterrupt
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(frontier_explorer_module, "FrontierExplorer", FakeExplorer)
+    monkeypatch.setattr(
+        frontier_explorer_module, "MultiThreadedExecutor", SignalledExecutor)
+    try:
+        frontier_explorer_module.main()
+    finally:
+        rclpy.try_shutdown()
+    assert destroyed == [True]

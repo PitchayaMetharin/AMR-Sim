@@ -11,3 +11,4 @@
     startup_grace_sec: 15.0
     cancel_timeout_sec: 5.0
     min_goal_distance_m: 0.3
+    continuous_exploration: false

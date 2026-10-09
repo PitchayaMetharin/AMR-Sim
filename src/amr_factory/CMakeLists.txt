@@ -114,6 +114,8 @@ if(BUILD_TESTING)
     test/test_factory_mapping_readiness.py)
   ament_add_pytest_test(factory_attachment_bootstrap_contract_test
     test/test_attachment_bootstrap_contract.py)
+  ament_add_pytest_test(factory_attachment_bootstrap_shutdown_test
+    test/test_gate6_attachment_bootstrap_shutdown.py)
   ament_add_pytest_test(factory_autonomous_contract_test
     test/test_factory_autonomous_contract.py)
 endif()

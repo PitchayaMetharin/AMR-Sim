@@ -1149,3 +1149,125 @@ int main(int argc, char ** argv) {
   rclcpp::shutdown();
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Localization-loss classification (root-authored acceptance tests, 2026-10-09;
+// implementer must not edit).  Hospital runs 07/14: slam_toolbox froze the
+// map->odom stamp during map rebuilds, the controller's TF lookup failed and
+// FollowPath aborted; the supervisor reported a generic CONTROLLER_ABORT and
+// the explorer FAULT-latched.  The supervisor must classify that abort from
+// its own TF evidence (newest map->odom stamp older than newest odom->base
+// stamp) as LOCALIZATION_UNAVAILABLE, and must keep every other class.
+
+namespace {
+
+void inject_localization_tf(
+  MissionBehaviorContext & context, double map_odom_stamp, double odom_base_stamp,
+  bool with_map_odom = true)
+{
+  if (with_map_odom) {
+    geometry_msgs::msg::TransformStamped map_odom;
+    map_odom.header.frame_id = "map";
+    map_odom.child_frame_id = "odom";
+    map_odom.header.stamp = rclcpp::Time(static_cast<int64_t>(map_odom_stamp * 1e9));
+    map_odom.transform.rotation.w = 1.0;
+    ASSERT_TRUE(context.supervisor->tf_buffer_.setTransform(map_odom, "test", false));
+  }
+  geometry_msgs::msg::TransformStamped odom_base;
+  odom_base.header.frame_id = "odom";
+  odom_base.child_frame_id = "base_footprint";
+  odom_base.header.stamp = rclcpp::Time(static_cast<int64_t>(odom_base_stamp * 1e9));
+  odom_base.transform.rotation.w = 1.0;
+  ASSERT_TRUE(context.supervisor->tf_buffer_.setTransform(odom_base, "test", false));
+}
+
+struct LocalizationAbortOutcome {
+  rclcpp_action::ResultCode code;
+  std::string fault_class;
+  std::string reason;
+  std::string outcome;
+  std::string blockage;
+};
+
+LocalizationAbortOutcome run_follow_abort(
+  MissionBehaviorContext & context, bool collision_before_abort = false)
+{
+  context.planner_result_mode = MissionBehaviorContext::ResultMode::SUCCEED;
+  context.controller_result_mode = MissionBehaviorContext::ResultMode::HOLD;
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(context.supervisor->get_node_base_interface());
+  executor.add_node(context.peer);
+  LocalizationAbortOutcome out{rclcpp_action::ResultCode::UNKNOWN, {}, {}, {}, {}};
+  EXPECT_TRUE(spin_until(executor, [&]() {
+    return context.client->action_server_is_ready() &&
+      context.planner_probe->action_server_is_ready() &&
+      context.smoother_probe->action_server_is_ready() &&
+      context.controller_probe->action_server_is_ready();
+  }, 2s));
+  auto goal = valid_goal();
+  goal.pose.pose.position.x = 2.0;
+  auto sent = context.client->async_send_goal(goal);
+  EXPECT_EQ(executor.spin_until_future_complete(sent, 2s), rclcpp::FutureReturnCode::SUCCESS);
+  auto handle = sent.get();
+  EXPECT_NE(handle, nullptr);
+  if (!handle) return out;
+  EXPECT_TRUE(spin_until(executor, [&]() {return !context.controller_goals.empty();}, 2s));
+  if (context.controller_goals.empty()) return out;
+  if (collision_before_abort) context.supervisor->controller_collision_observed_ = true;
+  context.controller_goals.back()->abort(
+    std::make_shared<MissionBehaviorContext::Follow::Result>());
+  auto terminal = context.client->async_get_result(handle);
+  EXPECT_EQ(executor.spin_until_future_complete(terminal, 2s), rclcpp::FutureReturnCode::SUCCESS);
+  out.code = terminal.get().code;
+  EXPECT_TRUE(spin_until(executor, [&]() {
+    return !context.statuses.empty() &&
+      status_value(context.statuses.back(), "stage") == "TERMINAL";
+  }, 2s));
+  if (!context.statuses.empty()) {
+    out.fault_class = status_value(context.statuses.back(), "fault_class");
+    out.reason = status_value(context.statuses.back(), "reason");
+    out.outcome = status_value(context.statuses.back(), "outcome");
+    out.blockage = status_value(context.statuses.back(), "blockage_confirmed");
+  }
+  executor.remove_node(context.peer);
+  executor.remove_node(context.supervisor->get_node_base_interface());
+  return out;
+}
+
+}  // namespace
+
+TEST(MissionSupervisorBehavior, FollowAbortWithStaleMapOdomIsLocalizationUnavailable) {
+  MissionBehaviorContext context("loc_stale", false);
+  inject_localization_tf(context, 10.0, 10.1);      // headroom -0.1 s
+  const auto out = run_follow_abort(context);
+  EXPECT_EQ(out.code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_EQ(out.outcome, "FAULT");
+  EXPECT_EQ(out.fault_class, "LOCALIZATION_UNAVAILABLE");
+  EXPECT_EQ(out.reason, "path following lost map localization");
+  EXPECT_EQ(out.blockage, "false");
+}
+
+TEST(MissionSupervisorBehavior, FollowAbortWithHealthyMapOdomStaysControllerAbort) {
+  MissionBehaviorContext context("loc_healthy", false);
+  inject_localization_tf(context, 11.0, 10.1);      // headroom +0.9 s
+  const auto out = run_follow_abort(context);
+  EXPECT_EQ(out.code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_EQ(out.fault_class, "CONTROLLER_ABORT");
+  EXPECT_EQ(out.reason, "path following failed");
+}
+
+TEST(MissionSupervisorBehavior, CollisionKeepsPrecedenceOverStaleLocalization) {
+  MissionBehaviorContext context("loc_collision", false);
+  inject_localization_tf(context, 10.0, 10.1);      // headroom -0.1 s
+  const auto out = run_follow_abort(context, true);
+  EXPECT_EQ(out.fault_class, "OBSTACLE_BLOCKAGE");
+  EXPECT_EQ(out.blockage, "true");
+}
+
+TEST(MissionSupervisorBehavior, MissingMapOdomEvidenceStaysControllerAbort) {
+  MissionBehaviorContext context("loc_missing", false);
+  inject_localization_tf(context, 0.0, 10.1, false);   // no map->odom at all
+  const auto out = run_follow_abort(context);
+  EXPECT_EQ(out.fault_class, "CONTROLLER_ABORT");
+  EXPECT_EQ(out.reason, "path following failed");
+}

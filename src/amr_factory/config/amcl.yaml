@@ -9,7 +9,7 @@
     base_frame_id: base_footprint
     global_frame_id: map
     odom_frame_id: odom
-    scan_topic: /amr/sensors/front_lidar/scan
+    scan_topic: /amr/sensors/merged_lidar/scan
     min_particles: 500
     max_particles: 2000
     max_beams: 60

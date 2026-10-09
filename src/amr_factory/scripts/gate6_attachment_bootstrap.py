@@ -30,6 +30,7 @@ from geometry_msgs.msg import PoseStamped
 from ros_gz_interfaces.msg import Entity
 from ros_gz_interfaces.srv import ControlWorld, SetEntityPose
 from rosgraph_msgs.msg import Clock
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -710,6 +711,14 @@ def main() -> int:
             rclpy.spin(node)
         except KeyboardInterrupt:
             # SIGINT is the normal bounded-runtime shutdown path.
+            return 0
+        except ExternalShutdownException:
+            return 0
+        except Exception:
+            # rclpy's SIGINT handler may shut the context down first, which
+            # surfaces from spin as a cast error; only a live context is a fault.
+            if rclpy.ok():
+                raise
             return 0
         return 0
     except Exception as error:  # constructor/configuration failure

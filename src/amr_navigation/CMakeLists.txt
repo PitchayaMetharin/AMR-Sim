@@ -25,6 +25,7 @@ install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(navigation_contract_test test/test_navigation_contract.py)
+  ament_add_pytest_test(navigation_params_overlay_test test/test_navigation_params_overlay.py)
   add_subdirectory(test/replay)
 endif()
 

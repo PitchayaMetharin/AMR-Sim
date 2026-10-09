@@ -11,7 +11,6 @@ from __future__ import annotations
 import math
 import os
 import re
-import shlex
 import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -23,6 +22,7 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
+    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
     RegisterEventHandler,
@@ -721,10 +721,26 @@ def _gazebo_runtime_actions(
         path.mkdir(parents=True, exist_ok=True)
     runtime_dir.chmod(0o700)
 
-    gazebo_launch = PythonLaunchDescriptionSource(
-        str(Path(get_package_share_directory("ros_gz_sim")) / "launch" / "gz_sim.launch.py")
-    )
-    server_args = "-r -s -v 2 " + shlex.quote(str(validated.path))
+    # Run gz directly, not through ros_gz_sim's shell=True gz_sim.launch.py:
+    # that shell receives launch's SIGINT instead of Gazebo, and the SIGTERM
+    # escalation then orphans the server.
+    plugin_env = {
+        name: os.pathsep.join(filter(None, (
+            os.environ.get(name, ""), os.environ.get("LD_LIBRARY_PATH", ""))))
+        for name in ("GZ_SIM_SYSTEM_PLUGIN_PATH", "IGN_GAZEBO_SYSTEM_PLUGIN_PATH")
+    }
+
+    def gazebo_process(arguments: List[str]) -> ExecuteProcess:
+        # No unconditional on_exit=Shutdown(): when the whole launch is being
+        # SIGINTed, a clean gz exit would emit a second Shutdown mid-shutdown
+        # and raise.  The global required-process-exit handler
+        # (_shutdown_on_required_process_exit) already covers Gazebo exit.
+        return ExecuteProcess(
+            cmd=["gz", "sim", *arguments, "--force-version", "8"],
+            additional_env=plugin_env,
+            output="screen",
+        )
+
     actions: List[object] = [
         SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", resource_value),
         SetEnvironmentVariable("XDG_CACHE_HOME", str(cache_dir)),
@@ -739,23 +755,13 @@ def _gazebo_runtime_actions(
             SetEnvironmentVariable("LIBGL_ALWAYS_SOFTWARE", "1"),
             SetEnvironmentVariable("GALLIUM_DRIVER", "llvmpipe"),
         ])
-    actions.append(IncludeLaunchDescription(
-        gazebo_launch,
-        launch_arguments={
-            "gz_args": server_args,
-            "on_exit_shutdown": "true",
-        }.items(),
-    ))
+    actions.append(gazebo_process(["-r", "-s", "-v", "2", str(validated.path)]))
     if not headless:
         actions.append(TimerAction(
             period=2.0,
-            actions=[IncludeLaunchDescription(
-                gazebo_launch,
-                launch_arguments={
-                    "gz_args": "-g --render-engine-gui ogre2 --render-engine-gui-api-backend opengl",
-                    "on_exit_shutdown": "true",
-                }.items(),
-            )],
+            actions=[gazebo_process([
+                "-g", "--render-engine-gui", "ogre2",
+                "--render-engine-gui-api-backend", "opengl"])],
         ))
     return actions
 
@@ -942,6 +948,8 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
         "amr_perception", "front_lidar_perception_node")
     rear_perception, (rear_perception_activate, rear_perception_configure) = _managed_node(
         "amr_perception", "rear_lidar_perception_node")
+    merger, (merger_activate, merger_configure) = _managed_node(
+        "amr_perception", "lidar_scan_merger_node")
     health, (health_activate, health_configure) = _managed_node(
         "amr_health", "health_supervisor_node")
     ekf = Node(
@@ -976,6 +984,7 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
         wheel, wheel_activate,
         front_perception, front_perception_activate,
         rear_perception, rear_perception_activate,
+        merger, merger_activate,
         health, health_activate,
         TimerAction(
             period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S,
@@ -993,13 +1002,27 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
             period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 3.0,
             actions=[health_configure],
         ),
+        TimerAction(
+            period=PORTABLE_ADAPTER_CONFIGURE_DELAY_S + 4.0,
+            actions=[merger_configure],
+        ),
         ekf,
         control_include,
         stow,
     ]
     # Keep the existing package barriers/timers for each later causal stage.
-    slam_include = _package_launch_include("amr_slam")
-    navigation_include = _package_launch_include("amr_navigation")
+    slam_include = _package_launch_include(
+        "amr_slam",
+        arguments={"params_overlay": os.path.join(
+            get_package_share_directory("amr_simulation"), "config",
+            "exploration_slam_overlay.yaml")},
+    )
+    navigation_include = _package_launch_include(
+        "amr_navigation",
+        arguments={"params_overlay": os.path.join(
+            get_package_share_directory("amr_simulation"), "config",
+            "exploration_navigation_overlay.yaml")},
+    )
     mpc_include = _package_launch_include(
         "amr_mpc_controller",
         arguments={"controller_frequency": str(PORTABLE_CONTROLLER_FREQUENCY)},
@@ -1020,6 +1043,7 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
             {"authority_timeout_sec": PORTABLE_AUTHORITY_TIMEOUT_SEC},
             {"tf_timeout_sec": PORTABLE_TF_TIMEOUT_SEC},
             {"autostart": ParameterValue(LaunchConfiguration("auto_start_exploration"), value_type=bool)},
+            {"continuous_exploration": ParameterValue(LaunchConfiguration("continuous_exploration"), value_type=bool)},
         ],
         output="screen",
     )
@@ -1067,7 +1091,7 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
             "base_frame_id": "base_footprint",
             "global_frame_id": "map",
             "odom_frame_id": "odom",
-            "scan_topic": "/amr/sensors/front_lidar/scan",
+            "scan_topic": "/amr/sensors/merged_lidar/scan",
             "min_particles": 500,
             "max_particles": 2000,
             "max_beams": 60,
@@ -1099,7 +1123,7 @@ def _runtime_actions(context, validated: ValidatedWorld, pose: Tuple[float, floa
             name="amcl",
             namespace="/amr",
             parameters=[amcl_parameters],
-            remappings=[("map", "/map"), ("scan", "/amr/sensors/front_lidar/scan")],
+            remappings=[("map", "/map"), ("scan", "/amr/sensors/merged_lidar/scan")],
             output="screen",
         )
         localization_manager = Node(
@@ -1213,6 +1237,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("software_rendering", default_value="auto", choices=["auto", "true", "false"]),
         DeclareLaunchArgument("rviz", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument("auto_start_exploration", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("continuous_exploration", default_value="false", choices=["true", "false"]),
         DeclareLaunchArgument("simulation_diagnostics", default_value="false", choices=["true", "false"]),
         DeclareLaunchArgument("localization_mode", default_value="slam", choices=["slam", "amcl"]),
         DeclareLaunchArgument("map_yaml", default_value=""),
